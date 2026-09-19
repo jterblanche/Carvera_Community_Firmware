@@ -84,6 +84,7 @@ private:
 	int udp_send_port;
 	int udp_recv_port;
 	int tcp_timeout_s;
+	int max_clients;
 	int connection_fail_count;
 	int sta_down_seconds;
 	uint32_t wifi_seconds;
