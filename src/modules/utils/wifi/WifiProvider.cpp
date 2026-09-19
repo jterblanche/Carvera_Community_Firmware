@@ -8,6 +8,7 @@
 #include "WifiProvider.h"
 #include "libs/CRC16.h"
 
+#include <algorithm>
 #include <cstdarg>
 #include "brd_cfg.h"
 #include "M8266HostIf.h"
@@ -53,7 +54,12 @@
 #define udp_send_port_checksum		      CHECKSUM("udp_send_port")
 #define udp_recv_port_checksum		      CHECKSUM("udp_recv_port")
 #define tcp_timeout_s_checksum			  CHECKSUM("tcp_timeout_s")
+#define max_clients_checksum			  CHECKSUM("max_clients")
 #define ap_auto_disable_checksum          CHECKSUM("ap_auto_disable")
+
+// the module accepts 1 to 15 simultaneous TCP clients on a server link
+#define WIFI_MAX_CLIENTS_MIN         1
+#define WIFI_MAX_CLIENTS_MAX         15
 
 #define WIFI_AP_ON_DELAY_S           5
 #define WIFI_STA_FLAP_WINDOW_S       (5 * 60)   // count reconnect cycles in this window
@@ -107,6 +113,13 @@ void WifiProvider::on_module_loaded()
 	this->udp_send_port = THEKERNEL->config->value(wifi_checksum, udp_send_port_checksum)->as_int(3333);
 	this->udp_recv_port = THEKERNEL->config->value(wifi_checksum, udp_recv_port_checksum)->as_int(4444);
 	this->tcp_timeout_s = THEKERNEL->config->value(wifi_checksum, tcp_timeout_s_checksum)->as_int(10);
+	int configured_max_clients = THEKERNEL->config->value(wifi_checksum, max_clients_checksum)->as_int(1);
+	if (configured_max_clients < WIFI_MAX_CLIENTS_MIN || configured_max_clients > WIFI_MAX_CLIENTS_MAX) {
+		THEKERNEL->streams->printf("WIFI: wifi.max_clients %d out of range 1-15, clamped to %d\n",
+			configured_max_clients,
+			std::clamp(configured_max_clients, WIFI_MAX_CLIENTS_MIN, WIFI_MAX_CLIENTS_MAX));
+	}
+	this->max_clients = std::clamp(configured_max_clients, WIFI_MAX_CLIENTS_MIN, WIFI_MAX_CLIENTS_MAX);
 	std::string config_name = THEKERNEL->config->value(wifi_checksum, machine_name_checksum)->as_string("CARVERA");
 	this->ap_auto_disable = THEKERNEL->config->value(wifi_checksum, ap_auto_disable_checksum)->as_bool(true);
     strncpy(this->machine_name, config_name.c_str(), sizeof(this->machine_name) - 1);
@@ -1655,6 +1668,12 @@ void WifiProvider::init_wifi_module(bool reset) {
 	if( M8266WIFI_SPI_Set_TcpServer_Auto_Discon_Timeout(tcp_link_no, tcp_timeout_s, &status) == 0)
 	{
 		THEKERNEL->streams->printf("M8266WIFI_SPI_Set_TcpServer_Auto_Discon_Timeout ERROR, status:%d, high: %d, low: %d!\n", status, int(status >> 8), int(status & 0xff));
+	}
+
+	// set the tcp server's simultaneous client limit
+	if( M8266WIFI_SPI_Config_Max_Clients_Allowed_To_A_Tcp_Server(tcp_link_no, max_clients, &status) == 0)
+	{
+		THEKERNEL->streams->printf("M8266WIFI_SPI_Config_Max_Clients_Allowed_To_A_Tcp_Server ERROR, status:%d, high: %d, low: %d!\n", status, int(status >> 8), int(status & 0xff));
 	}
 
 	// load current AP IP and Netmask
