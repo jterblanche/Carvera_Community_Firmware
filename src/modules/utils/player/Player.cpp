@@ -21,10 +21,13 @@
 #include "checksumm.h"
 #include "Config.h"
 #include "ConfigValue.h"
+#if !defined(NO_SD_CARD)
 #include "SDFAT.h"
+#endif
 #include "md5.h"
 
 #include "modules/robot/Conveyor.h"
+#include "modules/robot/Planner.h"
 #include "DirHandle.h"
 #include "ATCHandlerPublicAccess.h"
 #include "PublicDataRequest.h"
@@ -32,6 +35,7 @@
 #include "PlayerPublicAccess.h"
 #include "TemperatureControlPublicAccess.h"
 #include "TemperatureControlPool.h"
+#include "modules/tools/accessories/BedCleaning.h"
 #include "StepTicker.h"
 #include "Block.h"
 #include "quicklz.h"
@@ -43,7 +47,6 @@
 #include <algorithm>
 
 #include "mbed.h"
-#include "libs/compiler.h"
 
 #define home_on_boot_checksum             CHECKSUM("home_on_boot")
 #define on_boot_gcode_checksum            CHECKSUM("on_boot_gcode")
@@ -54,12 +57,15 @@
 #define spindle_suspend_restore_enable_checksum CHECKSUM("spindle_suspend_restore_enable")
 #define laser_module_clustering_checksum 	  CHECKSUM("laser_module_clustering")
 
+#if !defined(NO_SD_CARD)
 extern SDFAT mounter;
+#endif
 
 #define XBUFF_LENGTH	8208
-unsigned char xbuff[XBUFF_LENGTH] LOCATED_IN_AHBSRAM; /* 2 for data length, 8192 for XModem + 3 head chars + 2 crc + nul */
-unsigned char fbuff[4096] LOCATED_IN_AHBSRAM;
+unsigned char xbuff[XBUFF_LENGTH]; /* 2 for data length, 8192 for XModem + 3 head chars + 2 crc + nul */
+unsigned char fbuff[4096];
 
+#if !defined(STREAMED_JOB_PLAYBACK)
 // used for XMODEM - smoothie
 #define SOH  0x01
 #define STX  0x02
@@ -70,8 +76,8 @@ unsigned char fbuff[4096] LOCATED_IN_AHBSRAM;
 #define CTRLZ 0x1A
 
 
-char error_msg[64] LOCATED_IN_AHBSRAM;
-char md5buf[64] LOCATED_IN_AHBSRAM;
+char error_msg[64];
+char md5buf[64];
 // used for XMODEM 
 #define WAIT_MD5  0x01
 #define WAIT_FILE_VIEW  0x02
@@ -80,12 +86,34 @@ char md5buf[64] LOCATED_IN_AHBSRAM;
 #define RETRYTIME  50
 #define TIMEOUT_MS 10
 #define RETRYTIMES 10
+#endif
+
+#if defined(STREAMED_JOB_PLAYBACK)
+namespace {
+constexpr std::size_t streamed_line_count = 20;
+// Refill once only six of the twenty buffered lines remain.
+constexpr std::size_t streamed_refill_threshold = 6;
+constexpr uint32_t streamed_retry_us = 5000000;
+constexpr uint32_t streamed_timeout_us = 60000000;
+StreamedJobBuffer::Line streamed_line_storage[streamed_line_count];
+}
+#endif
 
 
 Player::Player()
 {
     this->playing_file = false;
-    this->current_file_handler = nullptr;
+#if defined(STREAMED_JOB_PLAYBACK)
+    this->line_source = StreamedJobBuffer(streamed_line_storage, streamed_line_count);
+    this->streamed_state = StreamedState::idle;
+    this->filename_crc = 0;
+    this->last_request_line = 0;
+    this->streamed_last_request_us = 0;
+    this->streamed_wait_started_us = 0;
+    this->play_data_resend_pending = false;
+#else
+    this->line_source.attach(nullptr);
+#endif
     this->booted = false;
     this->elapsed_secs = 0;
     this->reply_stream = nullptr;
@@ -105,13 +133,34 @@ Player::Player()
     this->file_line = 0;
 }
 
+#if !defined(STREAMED_JOB_PLAYBACK)
+void Player::set_current_file(FILE *file)
+{
+    this->line_source.attach(file);
+}
+#endif
+
+void Player::close_line_source()
+{
+    this->line_source.close();
+}
+
+void Player::save_last_progress(unsigned int unknown_size_percent)
+{
+    this->last_played_lines = this->played_lines;
+    this->last_percent_complete = this->file_size > 0
+        ? static_cast<unsigned int>(roundf((this->played_cnt * 100.0F) / this->file_size))
+        : unknown_size_percent;
+    this->last_elapsed_secs = this->elapsed_secs;
+    this->last_filename = this->filename;
+    this->has_last_progress = true;
+}
+
 void Player::sync_progress_max()
 {
-    if(this->current_file_handler == nullptr) return;
-
-    long pos = fwfs::ftell(this->current_file_handler);
-    if(pos > 0 && (unsigned long)pos > this->played_cnt)
-        this->played_cnt = (unsigned long)pos;
+    const unsigned long pos = this->line_source.position();
+    if(pos > this->played_cnt)
+        this->played_cnt = pos;
     if(this->file_line > this->played_lines)
         this->played_lines = this->file_line;
 }
@@ -161,25 +210,24 @@ void Player::on_halt(void* argument)
 
 void Player::on_second_tick(void *)
 {
+    if(THEKERNEL->is_suspending() || THEKERNEL->is_waiting() || THEKERNEL->is_tool_waiting()) return;
     if(this->playing_file) this->elapsed_secs++;
 }
 
+#if !defined(STREAMED_JOB_PLAYBACK)
 bool Player::prepare_ocode_prescan(StreamOutput* stream, const char* fail_msg)
 {
     this->ocode_handler.reset();
-    this->ocode_handler.pre_scan(this->current_file_handler, stream);
+    this->ocode_handler.pre_scan(this->line_source.file(), stream);
     if(this->ocode_handler.pre_scan_failed()) {
         stream->printf("%s\r\n", fail_msg);
-        fwfs::fclose(this->current_file_handler);
-        this->current_file_handler = NULL;
+        this->close_line_source();
         return false;
     }
     return true;
 }
-
 void Player::select_file(string argument, bool force_prescan)
 {
-
     this->filename = argument;
 
     this->filename.erase((std::remove)(this->filename.begin(), this->filename.end(), '"'), this->filename.end());
@@ -200,24 +248,24 @@ void Player::select_file(string argument, bool force_prescan)
     }
     this->current_stream = nullptr;
 
-    if(this->current_file_handler != NULL) {
+    if(this->line_source.file() != NULL) {
         this->playing_file = false;
-        fwfs::fclose(this->current_file_handler);
+        this->close_line_source();
     }
-    this->current_file_handler = fwfs::fopen( this->filename.c_str(), "r");
+    this->set_current_file(fwfs::fopen(this->filename.c_str(), "r"));
 
-    if(this->current_file_handler == NULL) {
+    if(this->line_source.file() == NULL) {
         THEKERNEL->streams->printf("file.open failed: %s\r\n", this->filename.c_str());
         return;
 
     } else {
         // get size of file
-        int result = fwfs::fseek(this->current_file_handler, 0, SEEK_END);
+        int result = fwfs::fseek(this->line_source.file(), 0, SEEK_END);
         if (0 != result) {
             this->file_size = 0;
         } else {
-            this->file_size = fwfs::ftell(this->current_file_handler);
-            fwfs::fseek(this->current_file_handler, 0, SEEK_SET);
+            this->file_size = fwfs::ftell(this->line_source.file());
+            fwfs::fseek(this->line_source.file(), 0, SEEK_SET);
         }
         THEKERNEL->streams->printf("File opened:%s Size:%ld\r\n", this->filename.c_str(), this->file_size);
 
@@ -250,10 +298,10 @@ void Player::goto_line_number(unsigned long line_number)
     // (it can't be reconstructed from a line number; stray closers afterwards
     // warn rather than halt). The subroutine table is (re)built here, before
     // playback resumes, so no file scan ever happens mid-cut.
-    this->ocode_handler.prepare_jump(this->current_file_handler, THEKERNEL->streams);
+    this->ocode_handler.prepare_jump(this->line_source.file(), THEKERNEL->streams);
 
     // goto file begin
-    fwfs::fseek(this->current_file_handler, 0, SEEK_SET);
+    fwfs::fseek(this->line_source.file(), 0, SEEK_SET);
     played_lines = 0;
     played_cnt   = 0;
     file_line    = 0;
@@ -261,7 +309,7 @@ void Player::goto_line_number(unsigned long line_number)
     // Read lines until we've positioned at the target line
     // We want to break BEFORE reading the target line, so the file pointer is at the target
     while (file_line < this->goto_line - 1) {
-        if (fwfs::fgets(buf, sizeof(buf), this->current_file_handler) == NULL) {
+        if (this->line_source.read(buf, sizeof(buf)) != LineReadResult::data) {
             break; // EOF reached
         }
 
@@ -299,7 +347,7 @@ void Player::end_of_file()
 
 void Player::play_opened_file()
 {
-    if (this->current_file_handler != NULL) {
+    if (this->line_source.file() != NULL) {
         this->playing_file = true;
         // this would be a problem if the stream goes away before the file has finished,
         // so we attach it to the kernel stream, however network connections from pronterface
@@ -307,6 +355,7 @@ void Player::play_opened_file()
         this->reply_stream = THEKERNEL->streams;
     }
 }
+#endif
 // extract any options found on line, terminates args at the space before the first option (-v)
 // eg this is a file.gcode -v
 //    will return -v and set args to this is a file.gcode
@@ -327,6 +376,17 @@ void Player::on_gcode_received(void *argument)
     Gcode *gcode = static_cast<Gcode *>(argument);
     string args = get_arguments(gcode->get_command());
     if (gcode->has_m) {
+#if defined(NO_SD_CARD)
+        if (gcode->m == 23 || gcode->m == 26 || gcode->m == 32 || gcode->m == 97 || gcode->m == 98 ||
+            gcode->m == 99) {
+            gcode->stream->printf("ERROR: File storage is not available on this machine\r\n");
+#if defined(STREAMED_JOB_PLAYBACK)
+            if (this->streamed_session_active())
+                this->abort_command("1", gcode->stream);
+#endif
+            return;
+        }
+#endif
         // Track spindle state from the job stream so suspend/resume can work
         if (gcode->m == 3) {
             this->last_spindle_on = true;
@@ -351,22 +411,42 @@ void Player::on_gcode_received(void *argument)
 
         }      
         else if (gcode->m == 21) { // Dummy code; makes Octoprint happy -- supposed to initialize SD card
+#if !defined(NO_SD_CARD)
             mounter.remount();
+#endif
             gcode->stream->printf("SD card ok\r\n");
 
+#if !defined(STREAMED_JOB_PLAYBACK)
         } else if (gcode->m == 23) { // select file
             this->clear_macro_file_queue();
             this->select_file(args, true);
+#endif
         } else if (gcode->m == 24) { // start print
+#if defined(STREAMED_JOB_PLAYBACK)
+            if (this->streamed_session_active()) {
+                this->resume_command("", gcode->stream);
+            } else {
+                gcode->stream->printf("ERROR: File playback is not supported on this machine\r\n");
+            }
+#else
             this->play_opened_file();
+#endif
 
         } else if (gcode->m == 25) { // pause print
+#if defined(STREAMED_JOB_PLAYBACK)
+            if (this->streamed_session_active()) {
+                this->suspend_command("", gcode->stream);
+            }
+#else
             this->playing_file = false;
+#endif
 
-        } else if (gcode->m == 26) { // Reset print. Slightly different than M26 in Marlin and the rest
+        }
+#if !defined(STREAMED_JOB_PLAYBACK)
+        else if (gcode->m == 26) { // Reset print. Slightly different than M26 in Marlin and the rest
             //empty macro queue
             this->clear_macro_file_queue();
-            if(this->current_file_handler != NULL) {
+            if(this->line_source.file() != NULL) {
                 string currentfn = this->filename.c_str();
                 unsigned long old_size = this->file_size;
 
@@ -375,9 +455,9 @@ void Player::on_gcode_received(void *argument)
 
                 if(!currentfn.empty()) {
                     // reload the last file opened
-                    this->current_file_handler = fwfs::fopen(currentfn.c_str() , "r");
+                    this->set_current_file(fwfs::fopen(currentfn.c_str(), "r"));
 
-                    if(this->current_file_handler == NULL) {
+                    if(this->line_source.file() == NULL) {
                         gcode->stream->printf("file.open failed: %s\r\n", currentfn.c_str());
                     } else {
                         this->current_stream = nullptr;
@@ -390,12 +470,15 @@ void Player::on_gcode_received(void *argument)
             } else {
                 gcode->stream->printf("No file loaded\r\n");
             }
-
         } else if (gcode->m == 27) { // report print progress, in format used by Marlin
+#else
+        else if (gcode->m == 27) { // report print progress, in format used by Marlin
+#endif
             progress_command("-b", gcode->stream);
 
         //} else if (gcode->m == 30) { // end file implementation for M30 returning from macros. M99 is the proper formatting.
         //    this->end_of_file();
+#if !defined(STREAMED_JOB_PLAYBACK)
         } else if (gcode->m == 32) { // select file and start print
             
             
@@ -495,7 +578,7 @@ void Player::on_gcode_received(void *argument)
 
         } else if (gcode->m == 99) { // return from macro to main program
             this->end_of_file();
-
+#endif
         } else if (gcode->m == 600) { // suspend print, Not entirely Marlin compliant, M600.1 will leave the heaters on
             this->suspend_command((gcode->subcode == 1)?"h":"", gcode->stream, (gcode->subcode == 5)?true:false);
 
@@ -550,13 +633,18 @@ void Player::on_console_line_received( void *argument )
     }else if (cmd == "buffer") {
     	this->buffer_command( possible_command, new_message.stream );
     }else if (cmd == "upload") {
+#if defined(NO_SD_CARD)
+        new_message.stream->printf("ERROR: local file transfers are not available on this machine\r\n");
+#else
     	this->upload_command( possible_command, new_message.stream );
+#endif
     }else if (cmd == "download") {
+#if defined(NO_SD_CARD)
+        new_message.stream->printf("ERROR: local file transfers are not available on this machine\r\n");
+#else
         memset(md5_str, 0, sizeof(md5_str));
-    	if (possible_command.find("config.txt") != string::npos) {
-        	this->test_command( possible_command, new_message.stream );
-    	}
     	this->download_command( possible_command, new_message.stream );
+#endif
     }
 }
 
@@ -588,18 +676,33 @@ void Player::play_command( string parameters, StreamOutput *stream )
 	}
     // extract any options from the line and terminate the line there
     string options= extract_options(parameters);
+#if defined(STREAMED_JOB_PLAYBACK)
+    if (options.find_first_of("Oo") != string::npos) {
+        stream->printf("ERROR: O-code programs are not supported on this machine\r\n");
+        return;
+    }
+#else
     this->skip_ocodes_prescan = (options.find_first_of("Oo") == string::npos);
+#endif
     // Get filename which is the entire parameter line upto any options found or entire line
     this->filename = absolute_from_relative(shift_parameter(parameters));
     this->last_filename = this->filename;
 
-    if (this->playing_file || THEKERNEL->is_suspending() || THEKERNEL->is_waiting()) {
+    if (this->playing_file || THEKERNEL->is_suspending() || THEKERNEL->is_waiting()
+#if defined(STREAMED_JOB_PLAYBACK)
+        || this->streamed_session_active()
+#endif
+    ) {
         stream->printf("Currently printing, abort print first\r\n");
         return;
     }
 
-    if (this->current_file_handler != NULL) { // must have been a paused print
-        fwfs::fclose(this->current_file_handler);
+#if defined(STREAMED_JOB_PLAYBACK)
+    this->start_streamed_playback(stream, options);
+#else
+
+    if (this->line_source.file() != NULL) { // must have been a paused print
+        this->close_line_source();
     }
 
 //    this->temp_file_handler = fopen ("/sd/gcodes/temp.nc", "w");
@@ -611,8 +714,8 @@ void Player::play_command( string parameters, StreamOutput *stream )
     //empty macro queue
     this->clear_macro_file_queue();
 
-    this->current_file_handler = fwfs::fopen( this->filename.c_str(), "r");
-    if(this->current_file_handler == NULL) {
+    this->set_current_file(fwfs::fopen(this->filename.c_str(), "r"));
+    if(this->line_source.file() == NULL) {
         stream->printf("File not found: %s\r\n", this->filename.c_str());
         return;
     }
@@ -640,13 +743,13 @@ void Player::play_command( string parameters, StreamOutput *stream )
     }
 
     // get size of file
-    int result = fwfs::fseek(this->current_file_handler, 0, SEEK_END);
+    int result = fwfs::fseek(this->line_source.file(), 0, SEEK_END);
     if (0 != result) {
         stream->printf("WARNING - Could not get file size\r\n");
         file_size = 0;
     } else {
-        file_size = fwfs::ftell(this->current_file_handler);
-        fwfs::fseek(this->current_file_handler, 0, SEEK_SET);
+        file_size = fwfs::ftell(this->line_source.file());
+        fwfs::fseek(this->line_source.file(), 0, SEEK_SET);
         stream->printf("  File size %ld\r\n", file_size);
     }
     this->played_cnt = 0;
@@ -663,6 +766,226 @@ void Player::play_command( string parameters, StreamOutput *stream )
 
     // reset current position;
     THEROBOT->reset_position_from_current_actuator_position();
+#endif
+}
+
+#if defined(STREAMED_JOB_PLAYBACK)
+void Player::start_streamed_playback(StreamOutput *stream, const string& options)
+{
+    this->close_line_source();
+    this->filename_crc = crc16::ccitt(
+        reinterpret_cast<const uint8_t *>(this->filename.data()), this->filename.size());
+    this->streamed_state = StreamedState::opening;
+    this->play_data_resend_pending = false;
+    this->current_stream = options.find_first_of("Vv") == string::npos
+        ? nullptr : THEKERNEL->streams;
+
+    char request_data[2];
+    makera::write_be16(request_data, this->filename_crc);
+    THEKERNEL->serial->PacketMessage(PTYPE_PLAY_START, request_data, sizeof(request_data));
+    this->streamed_last_request_us = us_ticker_read();
+    this->streamed_wait_started_us = this->streamed_last_request_us;
+    stream->printf("Playing %s\r\n", this->filename.c_str());
+}
+
+void Player::request_streamed_lines()
+{
+    if (!this->line_source.is_open() || this->line_source.at_end()) return;
+
+    const uint32_t line = this->line_source.next_expected_line();
+    const uint16_t count = static_cast<uint16_t>(this->line_source.available());
+    char request_data[8];
+    makera::write_be16(request_data, this->filename_crc);
+    makera::write_be32(request_data + 2, line);
+    makera::write_be16(request_data + 6, count);
+    THEKERNEL->serial->PacketMessage(PTYPE_PLAY_DATA, request_data, sizeof(request_data));
+    if (line != this->last_request_line || this->streamed_wait_started_us == 0) {
+        this->streamed_wait_started_us = us_ticker_read();
+    }
+    this->last_request_line = line;
+    this->streamed_last_request_us = us_ticker_read();
+    this->play_data_resend_pending = false;
+}
+
+void Player::maintain_streamed_source()
+{
+    const uint32_t now = us_ticker_read();
+    if (this->streamed_wait_started_us != 0 &&
+        now - this->streamed_wait_started_us > streamed_timeout_us) {
+        THEKERNEL->streams->printf("ERROR: streamed job transfer timed out\r\n");
+        this->abort_command("1", &StreamOutput::NullStream);
+        return;
+    }
+
+    if (this->streamed_state == StreamedState::opening) {
+        if (now - this->streamed_last_request_us > streamed_retry_us) {
+            char request_data[2];
+            makera::write_be16(request_data, this->filename_crc);
+            THEKERNEL->serial->PacketMessage(PTYPE_PLAY_START, request_data, sizeof(request_data));
+            this->streamed_last_request_us = us_ticker_read();
+        }
+        return;
+    }
+    if (this->streamed_state == StreamedState::seeking) {
+        if (now - this->streamed_last_request_us > streamed_retry_us) {
+            char request_data[6];
+            makera::write_be16(request_data, this->filename_crc);
+            makera::write_be32(request_data + 2, this->goto_line);
+            THEKERNEL->serial->PacketMessage(PTYPE_GOTO_START, request_data, sizeof(request_data));
+            this->streamed_last_request_us = us_ticker_read();
+        }
+        return;
+    }
+    if (this->line_source.queued() > streamed_refill_threshold ||
+        this->line_source.at_end()) return;
+
+    const uint32_t expected = this->line_source.next_expected_line();
+    if (!this->play_data_resend_pending && expected == this->last_request_line &&
+        us_ticker_read() - this->streamed_last_request_us <= streamed_retry_us) return;
+    this->request_streamed_lines();
+}
+
+bool Player::streamed_session_active() const
+{
+    return this->streamed_state != StreamedState::idle;
+}
+
+void Player::handle_link_packet(const player_link_packet& packet)
+{
+    if (packet.type == PTYPE_PLAY_VIEW) {
+        if (this->streamed_state != StreamedState::opening || packet.data_length < 6) return;
+        const uint16_t filename_crc = makera::read_be16(packet.data);
+        if (filename_crc != this->filename_crc) {
+            THEKERNEL->streams->printf("ERROR: streamed job identity mismatch\r\n");
+            this->streamed_state = StreamedState::idle;
+            THEKERNEL->serial->PacketMessage(PTYPE_PLAY_CAN, nullptr, 0);
+            return;
+        }
+        const uint32_t size = makera::read_be32(packet.data + 2);
+        this->line_source.begin(filename_crc);
+        this->file_size = size;
+        this->played_cnt = 0;
+        this->played_lines = 0;
+        this->file_line = 0;
+        this->elapsed_secs = 0;
+        this->playing_lines = 0;
+        this->goto_line = 0;
+        this->has_last_progress = false;
+        this->streamed_state = StreamedState::playing;
+        this->playing_file = true;
+        this->streamed_wait_started_us = 0;
+        THEROBOT->absolute_mode = true;
+        THEROBOT->e_absolute_mode = true;
+        THEROBOT->reset_position_from_current_actuator_position();
+        this->request_streamed_lines();
+        return;
+    }
+
+    if (packet.type == PTYPE_PLAY_DATA) {
+        if (packet.data_length < 6 || !this->line_source.is_open()) return;
+        const uint16_t filename_crc = makera::read_be16(packet.data);
+        const uint32_t first_line = makera::read_be32(packet.data + 2);
+        const auto result = this->line_source.append_lines(
+            filename_crc, first_line, packet.data + 6, packet.data_length - 6);
+        if (result == StreamedJobBuffer::AppendResult::success) {
+            this->streamed_wait_started_us = 0;
+        } else if (result == StreamedJobBuffer::AppendResult::line_too_long) {
+            THEKERNEL->streams->printf("ERROR: streamed job line exceeds 128 bytes\r\n");
+            THEKERNEL->serial->PacketMessage(PTYPE_PLAY_CAN, nullptr, 0);
+            this->reset_streamed_playback();
+        } else if (result == StreamedJobBuffer::AppendResult::unexpected_line ||
+                   result == StreamedJobBuffer::AppendResult::queue_full) {
+            this->play_data_resend_pending = true;
+        }
+        return;
+    }
+
+    if (packet.type == PTYPE_GOTO_LINES) {
+        if (this->streamed_state != StreamedState::seeking || packet.data_length < 10) return;
+        const uint16_t filename_crc = makera::read_be16(packet.data);
+        if (filename_crc != this->filename_crc) return;
+        const uint32_t line = makera::read_be32(packet.data + 2);
+        const uint32_t offset = makera::read_be32(packet.data + 6);
+        this->played_lines = line;
+        this->file_line = line;
+        this->playing_lines = line;
+        this->played_cnt = offset;
+        this->streamed_last_request_us = us_ticker_read();
+        this->streamed_wait_started_us = this->streamed_last_request_us;
+        if (line < this->goto_line - 1) return;
+        this->line_source.begin(filename_crc, line, offset);
+        this->streamed_state = StreamedState::playing;
+        this->request_streamed_lines();
+        return;
+    }
+
+    if (packet.type == PTYPE_PLAY_END) {
+        this->line_source.mark_end(this->filename_crc);
+        this->streamed_wait_started_us = 0;
+    } else if (packet.type == PTYPE_PLAY_CAN) {
+        if (!this->streamed_session_active() || THEKERNEL->is_aborted()) return;
+        this->save_last_progress();
+        if (THEKERNEL->is_suspending()) {
+            THEKERNEL->set_waiting(false);
+            THEKERNEL->set_suspending(false);
+            THEROBOT->pop_state();
+            this->clear_saved_spindle();
+        }
+        this->reset_streamed_playback();
+        this->request_job_abort();
+    }
+}
+
+void Player::reset_streamed_playback()
+{
+    this->streamed_state = StreamedState::idle;
+    this->playing_file = false;
+    this->play_data_resend_pending = false;
+    this->streamed_wait_started_us = 0;
+    this->close_line_source();
+    this->played_cnt = 0;
+    this->played_lines = 0;
+    this->file_line = 0;
+    this->playing_lines = 0;
+    this->goto_line = 0;
+    this->file_size = 0;
+    this->filename.clear();
+    this->current_stream = nullptr;
+    this->clear_buffered_queue();
+}
+#endif
+
+void Player::request_job_abort()
+{
+    THEKERNEL->conveyor->request_motion_abort();
+    THEKERNEL->set_aborted(true);
+}
+
+void Player::finish_job_abort()
+{
+    // Keep ATC-owned accessories active until queued automation motion stops.
+    THEKERNEL->call_event(ON_ABORT);
+    struct SerialMessage message;
+    message.message = "M5";
+    message.stream = THEKERNEL->streams;
+    message.line = 0;
+    THEKERNEL->call_event(ON_CONSOLE_LINE_RECEIVED, &message);
+
+#if defined(STREAMED_JOB_PLAYBACK)
+    if (THEKERNEL->get_laser_mode()) {
+        message.message = "laserabort";
+        THEKERNEL->call_event(ON_CONSOLE_LINE_RECEIVED, &message);
+    }
+#endif
+
+    THEROBOT->reset_position_from_current_actuator_position();
+    THEKERNEL->planner->reset_after_abort();
+    THEKERNEL->conveyor->clear_motion_abort();
+    THEKERNEL->set_aborted(false);
+#if defined(STREAMED_JOB_PLAYBACK)
+    this->streamed_state = StreamedState::idle;
+#endif
+    THEKERNEL->streams->printf("Aborted playing or paused file. \r\n");
 }
 
 // Goto a certain line when playing a file
@@ -673,7 +996,28 @@ void Player::goto_command( string parameters, StreamOutput *stream )
         return;
     }
 
-    if (this->current_file_handler == NULL) {
+#if defined(STREAMED_JOB_PLAYBACK)
+    if (this->streamed_state != StreamedState::playing || !this->line_source.is_open()) {
+        stream->printf("No streamed job is active\r\n");
+        return;
+    }
+    string line_str = shift_parameter(parameters);
+    if (line_str.empty()) return;
+    char *end = nullptr;
+    this->goto_line = strtoul(line_str.c_str(), &end, 10);
+    this->goto_line = this->goto_line < 1 ? 1 : this->goto_line;
+    char request_data[6];
+    makera::write_be16(request_data, this->filename_crc);
+    makera::write_be32(request_data + 2, this->goto_line);
+    this->line_source.close();
+    this->streamed_state = StreamedState::seeking;
+    THEKERNEL->serial->PacketMessage(PTYPE_GOTO_START, request_data, sizeof(request_data));
+    this->streamed_last_request_us = us_ticker_read();
+    this->streamed_wait_started_us = this->streamed_last_request_us;
+    stream->printf("Goto line %lu...\r\n", this->goto_line);
+#else
+
+    if (this->line_source.file() == NULL) {
     	stream->printf("Missing file handle!\r\n");
     	return;
     }
@@ -685,6 +1029,7 @@ void Player::goto_command( string parameters, StreamOutput *stream )
         this->goto_line_number(this->goto_line);
         
     }
+#endif
 }
 
 void Player::progress_command( string parameters, StreamOutput *stream )
@@ -694,7 +1039,7 @@ void Player::progress_command( string parameters, StreamOutput *stream )
     string options = shift_parameter( parameters );
     bool sdprinting= options.find_first_of("Bb") != string::npos;
 
-    if(!playing_file && current_file_handler != NULL) {
+    if(!playing_file && line_source.is_open()) {
         if(sdprinting)
             stream->printf("SD printing byte %lu/%lu\r\n", played_cnt, file_size);
         else
@@ -733,20 +1078,39 @@ void Player::progress_command( string parameters, StreamOutput *stream )
 
 void Player::abort_command( string parameters, StreamOutput *stream )
 {
+    if (THEKERNEL->is_aborted()) {
+        stream->printf("Abort already pending\r\n");
+        return;
+    }
 
-    PublicData::set_value( atc_handler_checksum, abort_checksum, nullptr );
-
-    if(!playing_file && current_file_handler == NULL) {
+    if(!playing_file && !line_source.is_open()
+#if defined(STREAMED_JOB_PLAYBACK)
+        && !this->streamed_session_active()
+#endif
+    ) {
+        THEKERNEL->call_event(ON_ABORT);
         stream->printf("Not currently playing\r\n");
         return;
     }
 
+#if defined(STREAMED_JOB_PLAYBACK)
+    if (this->streamed_session_active()) {
+        this->save_last_progress();
+        THEKERNEL->serial->PacketMessage(PTYPE_PLAY_CAN, nullptr, 0);
+        this->reset_streamed_playback();
+        if (THEKERNEL->is_suspending()) {
+            THEKERNEL->set_waiting(false);
+            THEKERNEL->set_suspending(false);
+            THEROBOT->pop_state();
+            this->clear_saved_spindle();
+        }
+        this->request_job_abort();
+        return;
+    }
+#endif
+
     // save last progress so status (?) continues to show |P:played_lines,percent_complete,elapsed_secs|
-    this->last_played_lines = this->played_lines;
-    this->last_percent_complete = (file_size > 0) ? (unsigned int)roundf((played_cnt * 100.0F) / file_size) : 0;
-    this->last_elapsed_secs = this->elapsed_secs;
-    this->last_filename = this->filename;
-    this->has_last_progress = true;
+    this->save_last_progress();
 
     this->current_stream = NULL;
 
@@ -759,19 +1123,30 @@ void Player::abort_command( string parameters, StreamOutput *stream )
     this->goto_line = 0;
     this->file_size = 0;
     this->clear_buffered_queue();
+#if !defined(STREAMED_JOB_PLAYBACK)
     this->clear_macro_file_queue();
     this->ocode_handler.reset();
+#endif
     this->filename = "";
     // end smoothie
 
-    fwfs::fclose(current_file_handler);
-    current_file_handler = NULL;
+    this->close_line_source();
 
     THEKERNEL->set_suspending(false);
+    if (parameters.empty()) {
+        THEKERNEL->set_waiting(false);
+        this->request_job_abort();
+        return;
+    }
+
     THEKERNEL->set_waiting(true);
 
     // wait for queue to empty
     THEKERNEL->conveyor->wait_for_idle();
+
+    // Keep ATC-owned accessories active until already-queued automation motion stops.
+    // A halt still releases them immediately through ATCHandler::on_halt().
+    THEKERNEL->call_event(ON_ABORT);
 
 
     if (communication_protocol == PROTOCOL_SMOOTHIE) {
@@ -792,15 +1167,6 @@ void Player::abort_command( string parameters, StreamOutput *stream )
             THEKERNEL->call_event(ON_CONSOLE_LINE_RECEIVED, &message);
         }
 
-        if (parameters.empty()) {
-            // clear out the block queue, will wait until queue is empty
-            // MUST be called in on_main_loop to make sure there are no blocked main loops waiting to put something on the queue
-            THEKERNEL->conveyor->flush_queue();
-
-            // now the position will think it is at the last received pos, so we need to do FK to get the actuator position and reset the current position
-            THEROBOT->reset_position_from_current_actuator_position();
-            stream->printf("Aborted playing or paused file. \r\n");
-        }
     } else {
         if(THEKERNEL->is_halted()) {
             THEKERNEL->streams->printf("Aborted by halt\n");
@@ -825,14 +1191,6 @@ void Player::abort_command( string parameters, StreamOutput *stream )
                 message.line = 0;
                 THEKERNEL->call_event(ON_CONSOLE_LINE_RECEIVED, &message);
             }
-            if (parameters.empty()) {
-                // clear out the block queue, will wait until queue is empty
-                // MUST be called in on_main_loop to make sure there are no blocked main loops waiting to put something on the queue
-                THEKERNEL->conveyor->flush_queue();
-                // now the position will think it is at the last received pos, so we need to do FK to get the actuator position and reset the current position
-                THEROBOT->reset_position_from_current_actuator_position();
-                stream->printf("Aborted playing or paused file. \r\n");
-            }    
             this->playing_file = false;
             this->played_cnt = 0;
             this->played_lines = 0;
@@ -851,14 +1209,22 @@ void Player::clear_buffered_queue(){
 	}
 }
 
+#if !defined(STREAMED_JOB_PLAYBACK)
 void Player::clear_macro_file_queue(){
 	while (!this->macro_file_queue.empty()) {
 		this->macro_file_queue.pop();
 	}
 }
+#endif
 
 void Player::on_main_loop(void *argument)
 {
+    if (THEKERNEL->is_aborted()) {
+        if (THEKERNEL->conveyor->is_idle()) {
+            this->finish_job_abort();
+        }
+        return;
+    }
     if( !this->booted ) {
         this->booted = true;
         if (this->home_on_boot) {
@@ -878,10 +1244,18 @@ void Player::on_main_loop(void *argument)
 
     }
 
+#if defined(STREAMED_JOB_PLAYBACK)
+    this->maintain_streamed_source();
+#endif
+
     if ( this->playing_file ) {
         if(THEKERNEL->is_halted() || THEKERNEL->is_suspending() || THEKERNEL->is_waiting() || this->inner_playing) {
             return;
         }
+
+#if defined(STREAMED_JOB_PLAYBACK)
+        this->maintain_streamed_source();
+#endif
 
         // check if there are bufferd command
         while (!this->buffered_queue.empty()) {
@@ -913,11 +1287,12 @@ void Player::on_main_loop(void *argument)
         */
 
         uint32_t last_idle_us = us_ticker_read();
-        while (fwfs::fgets(buf, sizeof(buf), this->current_file_handler) != NULL) {
+        LineReadResult read_result;
+        while ((read_result = this->line_source.read(buf, sizeof(buf))) == LineReadResult::data) {
 
             int len = strlen(buf);
             if (len == 0) continue; // empty line? should not be possible
-            if (buf[len - 1] == '\n' || fwfs::feof(this->current_file_handler)) {
+            if (buf[len - 1] == '\n' || this->line_source.at_end()) {
                 if(discard) { // we are discarding a long line
                     discard = false;
                     continue;
@@ -1008,7 +1383,19 @@ void Player::on_main_loop(void *argument)
                 message.message = buf;
                 message.stream = this->current_stream == nullptr ? &(StreamOutput::NullStream) : this->current_stream;
 
-                if (this->ocode_handler.process_line(buf, this->current_file_handler, message.stream, this->file_line)) {
+#if defined(NO_SD_CARD)
+                const char* command = buf;
+                while (*command == ' ' || *command == '\t') ++command;
+                if (*command == 'O' || *command == 'o') {
+                    THEKERNEL->streams->printf("ERROR: O-codes are not available without local file storage\r\n");
+#if defined(STREAMED_JOB_PLAYBACK)
+                    this->abort_command("1", THEKERNEL->streams);
+#endif
+                    return;
+                }
+#elif !defined(STREAMED_JOB_PLAYBACK)
+                if (this->line_source.file() != nullptr &&
+                    this->ocode_handler.process_line(buf, this->line_source.file(), message.stream, this->file_line)) {
                     this->sync_progress_max();
                     if (this->ocode_handler.is_skipping()) {
                         // Fast-forwarding through a skipped block stays in this
@@ -1022,7 +1409,7 @@ void Player::on_main_loop(void *argument)
                     }
                     return;
                 }
-                if (this->ocode_handler.is_skipping()) {
+                if (this->line_source.file() != nullptr && this->ocode_handler.is_skipping()) {
                     this->sync_progress_max();
                     uint32_t now_us = us_ticker_read();
                     if((now_us - last_idle_us) >= 200000) {
@@ -1031,6 +1418,7 @@ void Player::on_main_loop(void *argument)
                     }
                     continue;
                 }
+#endif
 
                 if (this->current_stream != nullptr) {
                     this->current_stream->printf("%s", buf);
@@ -1065,14 +1453,26 @@ void Player::on_main_loop(void *argument)
             }
         }
 
-        // save last progress so status (?) continues to show |P:played_lines,percent_complete,elapsed_secs|
-        this->last_played_lines = this->played_lines;
-        this->last_percent_complete = (file_size > 0) ? (unsigned int)roundf((played_cnt * 100.0F) / file_size) : 100;
-        this->last_elapsed_secs = this->elapsed_secs;
-        this->last_filename = this->filename;
-        this->has_last_progress = true;
+        if (read_result == LineReadResult::waiting) {
+#if defined(STREAMED_JOB_PLAYBACK)
+            this->maintain_streamed_source();
+#endif
+            return;
+        }
+#if defined(STREAMED_JOB_PLAYBACK)
+        if (!THEKERNEL->conveyor->is_idle()) return;
+#endif
 
+        // save last progress so status (?) continues to show |P:played_lines,percent_complete,elapsed_secs|
+        this->save_last_progress(100);
+
+#if defined(STREAMED_JOB_PLAYBACK)
+        THEKERNEL->serial->PacketMessage(PTYPE_PLAY_END, nullptr, 0);
+#endif
+
+#if !defined(STREAMED_JOB_PLAYBACK)
         this->ocode_handler.reset();
+#endif
         this->playing_file = false;
         this->filename = "";
         played_cnt = 0;
@@ -1082,8 +1482,10 @@ void Player::on_main_loop(void *argument)
         goto_line = 0;
         file_size = 0;
 
-        fwfs::fclose(this->current_file_handler);
-        current_file_handler = NULL;
+        this->close_line_source();
+#if defined(STREAMED_JOB_PLAYBACK)
+        this->streamed_state = StreamedState::idle;
+#endif
 
         this->current_stream = NULL;
 
@@ -1093,8 +1495,9 @@ void Player::on_main_loop(void *argument)
             this->reply_stream = NULL;
         }
         
-        bool bbb = true;
-        PublicData::set_value( atc_handler_checksum, set_job_complete_checksum, &bbb );
+    bool bbb = true;
+    PublicData::set_value( atc_handler_checksum, set_job_complete_checksum, &bbb );
+    THEKERNEL->bed_cleaning->job_completed();
     }
 }
 
@@ -1185,8 +1588,9 @@ void Player::on_get_public_data(void *argument)
             pdr->set_taken();
         }
     } else if (pdr->second_element_is(inner_playing_checksum)) {
-    	bool b = this->inner_playing;
-        pdr->set_data_ptr(&b);
+        static bool inner_playing;
+        inner_playing = this->inner_playing;
+        pdr->set_data_ptr(&inner_playing);
         pdr->set_taken();
     }
 }
@@ -1225,6 +1629,11 @@ void Player::on_set_public_data(void *argument)
     } else if (pdr->second_element_is(resume_play_checksum)) {
         this->resume_command("", &(StreamOutput::NullStream));
         pdr->set_taken();
+#if defined(STREAMED_JOB_PLAYBACK)
+    } else if (pdr->second_element_is(link_packet_checksum)) {
+        this->handle_link_packet(*static_cast<player_link_packet *>(pdr->get_data_ptr()));
+        pdr->set_taken();
+#endif
     }
 }
 
@@ -1331,6 +1740,7 @@ void Player::suspend_command(string parameters, StreamOutput *stream, bool pause
         return;
     }
 
+    this->playing_lines = this->played_lines;
     THEKERNEL->set_waiting(false);
     THEKERNEL->set_suspending(true);
 
@@ -1372,6 +1782,12 @@ void Player::resume_command(string parameters, StreamOutput *stream )
         stream->printf("Not suspended\n");
         return;
     }
+#if defined(STREAMED_JOB_PLAYBACK)
+    if (this->streamed_state == StreamedState::seeking) {
+        stream->printf("Stream seek is still pending\n");
+        return;
+    }
+#endif
 
     stream->printf("Resuming playing...\n");
 
@@ -1431,6 +1847,7 @@ void Player::resume_command(string parameters, StreamOutput *stream )
 	stream->printf("Playing file resumed\n");
 }
 
+#if !defined(STREAMED_JOB_PLAYBACK)
 int Player::check_crc(int crc, unsigned char *data, unsigned int len)
 {
     if (crc) {
@@ -1543,8 +1960,6 @@ int Player::decompress(string sfilename, string dfilename, uint32_t sfilesize, S
 		{
 			u16Sum += fbuff[j];
 		}
-		// Set the file write system buffer 4096 Byte
-		setvbuf(f_out, (char*)&xbuff[4096], _IOFBF, 4096);
 		fwfs::fwrite(fbuff, sizeof(char),u32DcmprsSize, f_out);
 		u32TotalDcmprsSize += u32DcmprsSize;
 		u32BlockNum += 1;
@@ -2068,26 +2483,50 @@ upload_success:
 }
 
 
+static bool md5_digest_usable(const char *s)
+{
+    if (s == NULL) {
+        return false;
+    }
+    for (int i = 0; i < 32; i++) {
+        char c = s[i];
+        if (c >= 'A' && c <= 'F') {
+            c = static_cast<char>(c + 32);
+        }
+        if ((c < '0' || c > '9') && (c < 'a' || c > 'f')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool fill_md5_from_path(const char *path, char *out, size_t out_size)
+{
+    if (out == NULL || out_size < 33) {
+        return false;
+    }
+    memset(out, 0, out_size);
+    FILE *fd = fwfs::fopen(path, "rb");
+    if (fd == NULL) {
+        return false;
+    }
+    MD5 md5;
+    uint8_t buf[64];
+    do {
+        size_t n = fwfs::fread(buf, 1, sizeof(buf), fd);
+        if (n > 0) {
+            md5.update(buf, n);
+        }
+        THEKERNEL->call_event(ON_IDLE);
+    } while (!fwfs::feof(fd));
+    fwfs::fclose(fd);
+    strcpy(out, md5.finalize().hexdigest().c_str());
+    return md5_digest_usable(out);
+}
+
 void Player::test_command( string parameters, StreamOutput* stream ) {
     string filename = absolute_from_relative(shift_parameter(parameters));
-	FILE *fd = fwfs::fopen(filename.c_str(), "rb");
-	if (NULL != fd) {
-        MD5 md5;
-        uint8_t smoothie_md5_buf[64];
-        do {
-            if (communication_protocol == PROTOCOL_SMOOTHIE) { 
-                size_t n = fwfs::fread(smoothie_md5_buf, 1, sizeof(smoothie_md5_buf), fd);
-                if (n > 0) md5.update(smoothie_md5_buf, n);
-            } else {
-                size_t n = fwfs::fread(md5buf, 1, sizeof(md5buf), fd);
-                if (n > 0) md5.update(md5buf, n);
-            }
-            THEKERNEL->call_event(ON_IDLE);
-        } while (!fwfs::feof(fd));
-        strcpy(md5_str, md5.finalize().hexdigest().c_str());
-        fwfs::fclose(fd);
-        fd = NULL;
-	}
+    fill_md5_from_path(filename.c_str(), md5_str, sizeof(md5_str));
 }
 
 void Player::download_command( string parameters, StreamOutput *stream )
@@ -2166,19 +2605,23 @@ void Player::download_command( string parameters, StreamOutput *stream )
     
 
     FILE *fd = fwfs::fopen(md5_filename.c_str(), "rb");
+    bool have_digest = false;
     if (fd != NULL) {
         if (communication_protocol == PROTOCOL_SMOOTHIE) {
             fwfs::fread(md5, sizeof(char), 64, fd);
+            have_digest = md5_digest_usable(md5);
         } else {
             fwfs::fread(md5buf, sizeof(char), 64, fd);
+            have_digest = md5_digest_usable(md5buf);
         }
         fwfs::fclose(fd);
         fd = NULL;
-    } else {
+    }
+    if (!have_digest) {
         if (communication_protocol == PROTOCOL_SMOOTHIE) {
-            strcpy(md5, this->md5_str);
+            fill_md5_from_path(filename.c_str(), md5, sizeof(md5));
         } else {
-            strcpy(md5buf, this->md5_str);
+            fill_md5_from_path(filename.c_str(), md5buf, sizeof(md5buf));
         }
     }
 	
@@ -2480,3 +2923,4 @@ void Player::SendMessage(char cmd, char* s, int size , StreamOutput *stream)
 	xbuff[total_length+8] = FOOTER&0xFF;
 	stream->puts((char *)xbuff, len+6);
 }
+#endif

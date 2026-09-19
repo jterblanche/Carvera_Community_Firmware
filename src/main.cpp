@@ -6,9 +6,14 @@
 */
 
 #include "libs/Kernel.h"
+#if !defined(NO_SD_CARD)
 #include "libs/FirmwareFileSystem.h"
+#endif
 
 #include "modules/tools/laser/Laser.h"
+#if defined(CANOPEN_SUPPORT)
+#include "modules/tools/canopen/CANopen.h"
+#endif
 #include "modules/tools/spindle/SpindleMaker.h"
 #include "modules/tools/temperaturecontrol/TemperatureControlPool.h"
 #include "modules/tools/endstops/Endstops.h"
@@ -23,14 +28,22 @@
 #include "modules/tools/temperatureswitch/TemperatureSwitch.h"
 #include "modules/tools/drillingcycles/Drillingcycles.h"
 #include "modules/tools/atc/ATCHandler.h"
+#include "modules/tools/accessories/BedCleaning.h"
+#include "modules/tools/accessories/SpindleAccessories.h"
+#if !defined(NO_WIFI_PROVIDER)
 #include "modules/utils/wifi/WifiProvider.h"
+#endif
 #include "modules/robot/Conveyor.h"
 #include "modules/utils/simpleshell/SimpleShell.h"
 #include "modules/utils/configurator/Configurator.h"
 #include "modules/utils/player/Player.h"
 #include "modules/utils/mainbutton/MainButton.h"
+#if !defined(NO_WIRELESS_PROBE)
 #include "modules/communication/SerialConsole2.h"
+#endif
+#if !defined(NO_USB_HOST)
 #include "libs/USBDevice/MSCFileSystem.h"
+#endif
 #include "Config.h"
 #include "checksumm.h"
 #include "ConfigValue.h"
@@ -41,23 +54,23 @@
 // #include "libs/ChaNFSSD/SDFileSystem.h"
 #include "libs/nuts_bolts.h"
 #include "libs/utils.h"
+#include "libs/gpio.h"
 
 // Debug
 #include "libs/SerialMessage.h"
 
+#if !defined(NO_SD_CARD)
 //#include "libs/USBDevice/SDCard/SDCard.h"
 #include "libs/USBDevice/SDCard/SDFileSystem.h"
 // #include "libs/USBDevice/USBSerial/USBSerial.h"
 // #include "libs/USBDevice/DFU.h"
 #include "libs/SDFAT.h"
+#endif
 #include "StreamOutputPool.h"
 
 #include "libs/Watchdog.h"
-#include "libs/compiler.h"
-
 #include "version.h"
 #include "system_LPC17xx.h"
-#include "platform_memory.h"
 
 #include "mbed.h"
 
@@ -70,33 +83,30 @@
 #define enable_checksum        CHECKSUM("enable")
 #define watchdog_timeout_checksum  CHECKSUM("watchdog_timeout")
 
-// USB Stuff
-//SDCard sd  __attribute__ ((section ("AHBSRAM"))) (P0_18, P0_17, P0_15, P0_16);      // this selects SPI1 as the sdcard as it is on Smoothieboard
-SDFileSystem sd LOCATED_IN_AHBSRAM (P0_18, P0_17, P0_15, P0_16, 12000000);
-//SDCard sd(P0_18, P0_17, P0_15, P0_16);  // this selects SPI0 as the sdcard
-//SDCard sd(P0_18, P0_17, P0_15, P2_8);  // this selects SPI0 as the sdcard witrh a different sd select
-
-// USB u __attribute__ ((section ("AHBSRAM")));
-// USBSerial usbserial __attribute__ ((section ("AHBSRAM"))) (&u);
-
-/*
-#ifndef DISABLEMSD
-USBMSD msc __attribute__ ((section ("AHBSRAM"))) (&u, &sd);
-#else
-USBMSD *msc= NULL;
+#if !defined(NO_SD_CARD)
+SDFileSystem sd(P0_18, P0_17, P0_15, P0_16, 12000000);
+SDFAT mounter("sd", &sd);
 #endif
-*/
 
-SDFAT mounter LOCATED_IN_AHBSRAM ("sd", &sd);
-
+#if defined(MACHINE_FAMILY_Z1)
+GPIO leds[4] = {
+    GPIO(P1_17),
+    GPIO(P4_29),
+    GPIO(P4_28),
+    GPIO(P1_16)
+};
+#else
 GPIO leds[4] = {
     GPIO(P4_29),
     GPIO(P4_28),
 	GPIO(P0_4),
     GPIO(P1_17)
 };
+#endif
 
 void init() {
+
+    SCB->VTOR = 0x4000;
 
     // Default pins to low status
     for (int i = 0; i < 4; i++){
@@ -105,9 +115,14 @@ void init() {
     }
 
 
+#if defined(MACHINE_FAMILY_Z1)
+    GPIO beep = GPIO(P1_15);
+#else
     GPIO beep = GPIO(P1_14);
+#endif
     beep.output();
     beep = 0;
+#if defined(MACHINE_FAMILY_CARVERA)
     GPIO extout = GPIO(P0_29);
     extout.output();
     extout = 0;
@@ -117,6 +132,7 @@ void init() {
     extout = GPIO(P1_19);
     extout.output();
     extout = 0;
+#endif
 
     // open 12V
     // GPIO v12 = GPIO(P0_11);
@@ -140,8 +156,10 @@ void init() {
     // kernel->streams->printf("Smoothie Running @%ldMHz\r\n", SystemCoreClock / 1000000);
     SimpleShell::version_command("", kernel->streams);
 
-    bool sdok = (sd.disk_initialize() == 0);
-    if(!sdok) kernel->streams->printf("SDCard failed to initialize\r\n");
+#if !defined(NO_SD_CARD)
+    const bool sdok = (sd.disk_initialize() == 0);
+    if (!sdok) kernel->streams->printf("SDCard failed to initialize\r\n");
+#endif
 
     #ifdef NONETWORK
         kernel->streams->printf("NETWORK is disabled\r\n");
@@ -156,7 +174,7 @@ void init() {
     if(sdok && !kernel->config->value( disable_msd_checksum )->as_bool(true)){
         // HACK to zero the memory USBMSD uses as it and its objects seem to not initialize properly in the ctor
         size_t n= sizeof(USBMSD);
-        void *v = AHB.alloc(n);
+        void *v = malloc(n);
         memset(v, 0, n); // clear the allocated memory
         msc= new(v) USBMSD(&u, &sd); // allocate object using zeroed memory
     }else{
@@ -169,23 +187,40 @@ void init() {
     // Create and add main modules
     kernel->add_module( new Player() );
 
+#if defined(CANOPEN_SUPPORT)
+    static CANOpenManager canopen_storage;
+    kernel->add_module(&canopen_storage);
+#endif
+
     // ATC Handler
     kernel->add_module( new ATCHandler() );
+    static BedCleaning bed_cleaning_storage;
+    static SpindleAccessories spindle_accessories_storage;
+    kernel->bed_cleaning = &bed_cleaning_storage;
+    kernel->spindle_accessories = &spindle_accessories_storage;
+    kernel->add_module(kernel->bed_cleaning);
+    kernel->add_module(kernel->spindle_accessories);
 
+#if !defined(NO_USB_HOST)
     // This module owns the USB host controller while enabled.
     if (kernel->config->value(usb_msc_checksum, enable_checksum)->as_bool(true)) {
         kernel->add_module( new MSCFileSystem("ud") );
     } else {
         kernel->streams->printf("NOTE: USB mass storage host is disabled\n");
     }
+#endif
 
+#if !defined(NO_WIRELESS_PROBE)
     // Serial Console handles IO with the wireless probe
-    kernel->add_module( new(AHB) SerialConsole2() ); // must stay in AHB: UART RxIrq writes RingBuffer
+    kernel->add_module( new SerialConsole2() );
+#endif
 
     kernel->add_module( new MainButton() );
 
+#if !defined(NO_WIFI_PROVIDER)
     // Wifi Provider
     kernel->add_module( new WifiProvider);
+#endif
 
     // these modules can be completely disabled in the Makefile by adding to EXCLUDE_MODULES
     #ifndef NO_TOOLS_SWITCH
@@ -193,13 +228,6 @@ void init() {
     sp->load_tools();
     delete sp;
     #endif
-
-    // #ifndef NO_TOOLS_EXTRUDER
-    // // NOTE this must be done first before Temperature control so ToolManager can handle Tn before temperaturecontrol module does
-    // ExtruderMaker *em= new(AHB) ExtruderMaker();
-    // em->load_tools();
-    // delete em;
-    // #endif
 
     // #ifndef NO_TOOLS_TEMPERATURECONTROL
     // Note order is important here must be after extruder so Tn as a parameter will get executed first
@@ -219,14 +247,9 @@ void init() {
     SpindleMaker *sm = new SpindleMaker();
     sm->load_spindle();
     delete sm;
-    //kernel->add_module( new(AHB) Spindle() );
-    #endif
-    #ifndef NO_UTILS_PANEL
-    // kernel->add_module( new(AHB) Panel() );
     #endif
     #ifndef NO_TOOLS_ZPROBE
-    ZProbe *zprobe = new ZProbe();
-    kernel->add_module( zprobe );
+    kernel->add_module( new ZProbe() );
     #endif
     #ifndef NO_TOOLS_SCARACAL
     kernel->add_module( new SCARAcal() );
@@ -266,10 +289,6 @@ void init() {
     }
     */
 
-    // if( kernel->config->value( dfu_enable_checksum )->as_bool(false) ){
-    //     kernel->add_module( new(AHB) DFU(&u));
-    // }
-
     // 10 second watchdog timeout (or config as seconds)
 
     // LUKE : DISABLED
@@ -282,27 +301,19 @@ void init() {
     }else{
         kernel->streams->printf("WARNING Watchdog is disabled\n");
     }
-
     // kernel->add_module( &u );
 
-    // memory before cache is cleared
-    //SimpleShell::print_mem(kernel->streams);
-
-    // clear up the config cache to save some memory
     kernel->config->config_cache_clear();
-
-    #ifndef NO_TOOLS_ZPROBE
-    // Flex compensation autoload (and anything else that needs main-heap room)
-    // must run only after the config cache is released.
-    zprobe->after_config_cache_clear();
-    #endif
 
     if(kernel->is_using_leds()) {
         // set some leds to indicate status... led0 init done, led1 mainloop running, led2 idle loop running, led3 sdcard ok
         leds[0]= 1; // indicate we are done with init
+#if !defined(NO_SD_CARD)
         leds[3]= sdok?1:0; // 4th led indicates sdcard is available (TODO maye should indicate config was found)
+#endif
     }
 
+#if !defined(NO_SD_CARD)
     if(sdok) {
         // load config override file if present
         // NOTE only Mxxx commands that set values should be put in this file. The file is generated by M500
@@ -320,6 +331,7 @@ void init() {
             fwfs::fclose(fp);
         }
     }
+#endif
 
     // start the timers and interrupts
     THEKERNEL->conveyor->start(THEROBOT->get_number_registered_motors());

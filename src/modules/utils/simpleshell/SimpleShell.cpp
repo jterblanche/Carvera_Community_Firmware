@@ -44,9 +44,14 @@
 #include "EndstopsPublicAccess.h"
 #include "ATCHandlerPublicAccess.h"
 // #include "NetworkPublicAccess.h"
-#include "platform_memory.h"
+#include "heap/heap_debug.h"
+#include "heap/heap_5.h"
 #include "SwitchPublicAccess.h"
+#include "Config.h"
+#include "ConfigValue.h"
+#if !defined(NO_SD_CARD)
 #include "SDFAT.h"
+#endif
 #include "FATFileSystem.h"
 #include "Thermistor.h"
 #include "md5.h"
@@ -64,7 +69,6 @@
 #include <string.h>
 #include <vector>
 
-extern unsigned int g_maximumHeapAddress;
 #define XBUFF_LENGTH	8208
 extern unsigned char xbuff[XBUFF_LENGTH];
 extern unsigned char fbuff[4096];
@@ -78,9 +82,6 @@ extern unsigned char fbuff[4096];
 #include <stdlib.h>
 #include <functional>
 
-extern "C" uint32_t  __end__;
-extern "C" uint32_t  __malloc_free_list;
-extern "C" void*     _sbrk(int size);
 
 // support upload file type definition
 #define FILETYPE	"lz"		//compressed by quicklz
@@ -88,25 +89,44 @@ extern "C" void*     _sbrk(int size);
 // Version is defined by makefile using -D__GITVERSIONSTRING__ 
 #define VERSION __GITVERSIONSTRING__
 
+namespace {
+Machine machine_model_from_name(const string& name)
+{
+#if defined(MACHINE_FAMILY_Z1)
+    if (name == "Z1") return Machine::makera_z1;
+    if (name == "Z1Pro") return Machine::makera_z1_pro;
+#else
+    if (name == "C1") return Machine::carvera;
+    if (name == "CA1") return Machine::carvera_air;
+#endif
+    return Machine::unknown;
+}
+}
 
 // command lookup table
 const SimpleShell::ptentry_t SimpleShell::commands_table[] = {
+#if !defined(NO_SD_CARD)
     {"ls",       SimpleShell::ls_command},
     {"cd",       SimpleShell::cd_command},
     {"pwd",      SimpleShell::pwd_command},
     {"cat",      SimpleShell::cat_command},
-    {"echo",     SimpleShell::echo_command},
     {"rm",       SimpleShell::rm_command},
     {"mv",       SimpleShell::mv_command},
     {"mkdir",    SimpleShell::mkdir_command},
     // {"upload",   SimpleShell::upload_command},
 	// {"download", SimpleShell::download_command},
+    {"ftype",    SimpleShell::ftype_command},
+    {"load",     SimpleShell::load_command},
+    {"save",     SimpleShell::save_command},
+    {"remount",  SimpleShell::remount_command},
+    {"md5sum",   SimpleShell::md5sum_command},
+#endif
+    {"echo",     SimpleShell::echo_command},
     {"reset",    SimpleShell::reset_command},
     {"dfu",      SimpleShell::dfu_command},
     {"break",    SimpleShell::break_command},
     {"help",     SimpleShell::help_command},
     {"?",        SimpleShell::help_command},
-	{"ftype",	 SimpleShell::ftype_command},
     {"version",  SimpleShell::version_command},
     {"mem",      SimpleShell::mem_command},
     {"get",      SimpleShell::get_command},
@@ -118,16 +138,14 @@ const SimpleShell::ptentry_t SimpleShell::commands_table[] = {
 	{"diagnose",   SimpleShell::diagnose_command},
 	{"sleep",   SimpleShell::sleep_command},
 	{"power",   SimpleShell::power_command},
-    {"load",     SimpleShell::load_command},
-    {"save",     SimpleShell::save_command},
-    {"remount",  SimpleShell::remount_command},
     {"calc_thermistor", SimpleShell::calc_thermistor_command},
     {"thermistors", SimpleShell::print_thermistors_command},
-    {"md5sum",   SimpleShell::md5sum_command},
 	{"time",   SimpleShell::time_command},
     {"test",     SimpleShell::test_command},
     {"model",  SimpleShell::model_command},
+#if defined(MACHINE_FAMILY_CARVERA)
     {"check_5th",  SimpleShell::test_5th_command},
+#endif
     {"check_4th",  SimpleShell::test_4th_command},
     {"check_led",  SimpleShell::test_led_command},
     {"fset",  SimpleShell::fset_command},
@@ -141,65 +159,6 @@ const SimpleShell::ptentry_t SimpleShell::commands_table[] = {
 };
 
 int SimpleShell::reset_delay_secs = 0;
-
-// Adam Greens heap walk from http://mbed.org/forum/mbed/topic/2701/?page=4#comment-22556
-static uint32_t heapWalk(StreamOutput *stream, bool verbose)
-{
-    uint32_t chunkNumber = 1;
-    // The __end__ linker symbol points to the beginning of the heap.
-    uintptr_t chunkCurr = reinterpret_cast<uintptr_t>(&__end__);
-    // __malloc_free_list is the head pointer to newlib-nano's link list of free chunks.
-    uintptr_t freeCurr = __malloc_free_list;
-    // Calling _sbrk() with 0 reserves no more memory but it returns the current top of heap.
-    uintptr_t heapEnd = reinterpret_cast<uintptr_t>(_sbrk(0));
-    // accumulate totals
-    uint32_t freeSize = 0;
-    uint32_t usedSize = 0;
-
-    stream->printf("Used Heap Size: %lu\n", static_cast<unsigned long>(heapEnd - chunkCurr));
-
-    // Walk through the chunks until we hit the end of the heap.
-    while (chunkCurr < heapEnd) {
-        // Assume the chunk is in use.  Will update later.
-        int      isChunkFree = 0;
-        // The first 32-bit word in a chunk is the size of the allocation.  newlib-nano over allocates by 8 bytes.
-        // 4 bytes for this 32-bit chunk size and another 4 bytes to allow for 8 byte-alignment of returned pointer.
-        uint32_t chunkSize = *reinterpret_cast<uint32_t *>(chunkCurr);
-        // The start of the next chunk is right after the end of this one.
-        uintptr_t chunkNext = chunkCurr + chunkSize;
-
-        // The free list is sorted by address.
-        // Check to see if we have found the next free chunk in the heap.
-        if (chunkCurr == freeCurr) {
-            // Chunk is free so flag it as such.
-            isChunkFree = 1;
-            // The second 32-bit word in a free chunk is a pointer to the next free chunk (again sorted by address).
-            freeCurr = *reinterpret_cast<uint32_t *>(freeCurr + 4);
-        }
-
-        // Skip past the 32-bit size field in the chunk header.
-        chunkCurr += 4;
-        // 8-byte align the data pointer.
-        chunkCurr = (chunkCurr + 7) & ~7;
-        // newlib-nano over allocates by 8 bytes, 4 bytes for the 32-bit chunk size and another 4 bytes to allow for 8
-        // byte-alignment of the returned pointer.
-        chunkSize -= 8;
-        if (verbose)
-            stream->printf("  Chunk: %lu  Address: 0x%08lX  Size: %lu  %s\n",
-                           static_cast<unsigned long>(chunkNumber), static_cast<unsigned long>(chunkCurr),
-                           static_cast<unsigned long>(chunkSize), isChunkFree ? "CHUNK FREE" : "");
-
-        if (isChunkFree) freeSize += chunkSize;
-        else usedSize += chunkSize;
-
-        chunkCurr = chunkNext;
-        chunkNumber++;
-    }
-    stream->printf("Allocated: %lu, Free: %lu\r\n", static_cast<unsigned long>(usedSize),
-                   static_cast<unsigned long>(freeSize));
-    return freeSize;
-}
-
 
 void SimpleShell::on_module_loaded()
 {
@@ -227,6 +186,7 @@ void SimpleShell::on_gcode_received(void *argument)
     string args = get_arguments(gcode->get_command());
 
     if (gcode->has_m) {
+#if !defined(NO_SD_CARD)
         if (gcode->m == 20) { // list sd card
             if (communication_protocol == PROTOCOL_SMOOTHIE) {
                 gcode->stream->printf("Begin file list\r\n");
@@ -249,72 +209,14 @@ void SimpleShell::on_gcode_received(void *argument)
                 // M576 / M576.1 -- walk all files that have a stored MD5
                 md5check_command(args, gcode->stream);
             }
-        } else if (gcode->m == 331) { // change to vacuum mode
-        	if (gcode->subcode == 0) {
-				THEKERNEL->set_vacuum_mode(true);
-			    // get spindle state
-			    struct spindle_status ss;
-			    bool ok = PublicData::get_value(pwm_spindle_control_checksum, get_spindle_status_checksum, &ss);
-			    if (ok) {
-			    	if (ss.state) {
-		        		// open vacuum
-		        		bool b = true;
-		        		PublicData::set_value( switch_checksum, vacuum_checksum, state_checksum, &b );
-			    	}
-	        	}
-	        	//PacketMessage(PTYPE_NORMAL_INFO, "turning vacuum mode on\r\n", 0, gcode->stream);
-                gcode->stream->printf("turning vacuum mode on\r\n");
-			}
-			else if (gcode->subcode == 3) {
-				THEKERNEL->set_extout_mode(true);
-			    // get spindle state
-			    struct spindle_status ss;
-			    bool ok = PublicData::get_value(pwm_spindle_control_checksum, get_spindle_status_checksum, &ss);
-			    if (ok) {
-			    	if (ss.state) {
-		        		// open vacuum
-		        		bool b = true;
-		        		PublicData::set_value( switch_checksum, extendout_checksum, state_checksum, &b );
-			    	}
-	        	}
-	        	//PacketMessage(PTYPE_NORMAL_INFO, "turning extend out mode on\r\n", 0, gcode->stream);
-                gcode->stream->printf("turning extend out mode on\r\n");
-            }
-        } else if (gcode->m == 332) { // change to CNC mode			
-			if (gcode->subcode == 0) {
-				THEKERNEL->set_vacuum_mode(false);
-			    // get spindle state
-			    struct spindle_status ss;
-			    bool ok = PublicData::get_value(pwm_spindle_control_checksum, get_spindle_status_checksum, &ss);
-			    if (ok) {
-			    	if (ss.state) {
-		        		// close vacuum
-		        		bool b = false;
-		        		PublicData::set_value( switch_checksum, vacuum_checksum, state_checksum, &b );
-			    	}
-	        	}
-				// turn off vacuum mode
-		
-				//PacketMessage(PTYPE_NORMAL_INFO, "turning vacuum mode off\r\n", 0, gcode->stream);
-                gcode->stream->printf("turning vacuum mode off\r\n");
-			}
-			else if (gcode->subcode == 3) {
-				THEKERNEL->set_extout_mode(false);
-			    // get spindle state
-			    struct spindle_status ss;
-			    bool ok = PublicData::get_value(pwm_spindle_control_checksum, get_spindle_status_checksum, &ss);
-			    if (ok) {
-			    	if (ss.state) {
-		        		// close extout
-		        		bool b = false;
-		        		PublicData::set_value( switch_checksum, extendout_checksum, state_checksum, &b );
-			    	}
-	        	}
-	        	//PacketMessage(PTYPE_NORMAL_INFO, "turning extend out mode off\r\n", 0, gcode->stream);
-                gcode->stream->printf("turning extend out mode off\r\n");
-			}
-
-		} else if (gcode->m == 333) { // turn off optional stop mode
+		}
+#else
+        if (gcode->m == 20 || gcode->m == 576 ||
+            (gcode->m == 30 && !args.empty() && !THEKERNEL->is_grbl_mode())) {
+            gcode->stream->printf("ERROR: File storage is not available on this machine\r\n");
+        }
+#endif
+        if (gcode->m == 333) { // turn off optional stop mode
 			THEKERNEL->set_optional_stop_mode(false);
 			// turn off optional stop mode
 			gcode->stream->printf("turning optional stop mode off\r\n");
@@ -329,14 +231,43 @@ void SimpleShell::on_gcode_received(void *argument)
 			THEKERNEL->set_line_by_line_exec_mode(true);
 			gcode->stream->printf("turning line by line execute mode on.\r\nPlaying file will pause after every valid gcode line, skipping empty and commented lines\r\n");
 		}else if (gcode->m == 337){
-            struct led_rgb colors;
-            colors.r = 0;
-            colors.g = 0;
-            colors.b = 0;
-            if (gcode->has_letter('R')) colors.r = gcode->get_value('R');
-            if (gcode->has_letter('U')) colors.g = gcode->get_value('U');
-            if (gcode->has_letter('B')) colors.b = gcode->get_value('B');
-            PublicData::set_value(main_button_checksum, set_led_bar_checksum, &colors);
+            int index = 0;
+            if (gcode->has_letter('I')) index = gcode->get_int('I');
+            if (gcode->has_letter('R') || gcode->has_letter('U') || gcode->has_letter('B')) {
+                struct led_rgb colors;
+                colors.r = 0;
+                colors.g = 0;
+                colors.b = 0;
+                colors.i = index;
+                if (gcode->has_letter('R')) colors.r = gcode->get_value('R');
+                if (gcode->has_letter('U')) colors.g = gcode->get_value('U');
+                if (gcode->has_letter('B')) colors.b = gcode->get_value('B');
+                PublicData::set_value(main_button_checksum, set_led_bar_checksum, &colors);
+            } else {
+                struct led_bar_state bar;
+                if (PublicData::get_value(main_button_checksum, get_led_bar_checksum, &bar)) {
+                    if (index >= 1 && index <= bar.n) {
+                        gcode->stream->printf("I%d R:%dG:%dB:%d\r\n", index, bar.r[index - 1], bar.g[index - 1], bar.b[index - 1]);
+                    } else {
+                        bool same = true;
+                        for (uint8_t i = 1; i < bar.n; i++) {
+                            if (bar.r[i] != bar.r[0] || bar.g[i] != bar.g[0] || bar.b[i] != bar.b[0]) {
+                                same = false;
+                                break;
+                            }
+                        }
+                        if (same || bar.n == 1) {
+                            gcode->stream->printf("R:%dG:%dB:%d\r\n", bar.r[0], bar.g[0], bar.b[0]);
+                        } else {
+                            for (uint8_t i = 0; i < bar.n; i++) {
+                                gcode->stream->printf("I%d R:%dG:%dB:%d\r\n", i + 1, bar.r[i], bar.g[i], bar.b[i]);
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (gcode->m == 338) {
+            PublicData::set_value(main_button_checksum, restore_led_bar_checksum, nullptr);
         } else if (gcode->m == 485) { //swap communication protocols
             if (gcode->subcode == 1) {
                 gcode->stream->printf("setting to smoothie communication protocol\n");
@@ -454,6 +385,16 @@ void SimpleShell::on_console_line_received( void *argument )
         //new_message.stream->printf("Received %s\r\n", possible_command.c_str());
         string cmd = shift_parameter(possible_command);
 
+#if defined(NO_SD_CARD)
+        if (cmd == "ls" || cmd == "cd" || cmd == "pwd" || cmd == "cat" ||
+            cmd == "rm" || cmd == "mv" || cmd == "mkdir" || cmd == "ftype" || cmd == "load" ||
+            cmd == "save" || cmd == "remount" || cmd == "md5sum" || cmd == "config-get-all" ||
+            cmd == "config-restore" || cmd == "config-default") {
+            new_message.stream->printf("ERROR: File storage is not available on this machine\r\n");
+            return;
+        }
+#endif
+
         // Configurator commands
         if (cmd == "config-get"){
             THEKERNEL->configurator->config_get_command(  possible_command, new_message.stream );
@@ -481,7 +422,7 @@ void SimpleShell::on_console_line_received( void *argument )
         		|| cmd == "goto") {
             // these are handled by Player module
 
-        } else if (cmd == "laser") {
+        } else if (cmd == "laser" || cmd == "laserabort") {
             // these are handled by Laser module
 
         } else if (cmd.substr(0, 2) == "ok") {
@@ -591,16 +532,22 @@ void SimpleShell::ls_command( string parameters, StreamOutput *stream )
     }
 }
 
+#if !defined(NO_SD_CARD)
 extern SDFAT mounter;
+#endif
 
 void SimpleShell::remount_command( string parameters, StreamOutput *stream )
 {
+#if !defined(NO_SD_CARD)
     mounter.remount();
     if (communication_protocol == PROTOCOL_SMOOTHIE) {
         stream->printf("remounted\r\n");
     } else {
         PacketMessage(PTYPE_NORMAL_INFO, "remounted\r\n", 0, stream);
     }
+#else
+    stream->printf("ERROR: SD card is not available\r\n");
+#endif
 }
 
 // Delete a file
@@ -914,28 +861,80 @@ void SimpleShell::save_command( string parameters, StreamOutput *stream )
     stream->printf("Settings Stored to %s\r\n", filename.c_str());
 }
 
+struct HeapDumpBuffer {
+    char *data;
+    size_t capacity;
+    size_t length;
+    bool truncated;
+};
+
+static void format_heap_area(const HeapAreaInfo_t *area, void *context)
+{
+    auto *output = static_cast<HeapDumpBuffer *>(context);
+    if(output->truncated) return;
+
+    int written = snprintf(output->data + output->length, output->capacity - output->length,
+                           "  %p: %s, %lu bytes\n", area->address,
+                           area->allocated ? "used" : "free", (unsigned long)area->size);
+    if(written < 0 || static_cast<size_t>(written) >= output->capacity - output->length) {
+        output->truncated = true;
+        output->data[output->length] = '\0';
+        return;
+    }
+    output->length += written;
+}
+
 // show free memory
 void SimpleShell::mem_command( string parameters, StreamOutput *stream)
 {
     bool verbose = shift_parameter( parameters ).find_first_of("Vv") != string::npos;
-    unsigned long heap_top = (unsigned long)_sbrk(0);
-    unsigned long heap_unallocated_top = (STACK_SIZE && g_maximumHeapAddress != 0) ? g_maximumHeapAddress - heap_top : 0; // Calculate unallocated space at the top if stack limit is set
-    stream->printf("Main Heap Unallocated Top: %lu bytes\r\n", heap_unallocated_top);
-
-    uint32_t heap_fragmented_free = heapWalk(stream, verbose); // Calculates and prints used/free within allocated heap part
-    stream->printf("Total Free RAM (Main Heap): %lu bytes\r\n", heap_unallocated_top + heap_fragmented_free);
-
-    // Use MemoryPool::free() which calculates total free space in the pool
-    uint32_t ahb_total_free = AHB.free();
-    stream->printf("AHB Pool Total Free: %lu bytes\r\n", ahb_total_free);
-
-    if (verbose) {
-        stream->printf("--- AHB Pool Details ---\n");
-        AHB.debug(stream); // Detailed AHB pool breakdown
-        stream->printf("--- End AHB Pool Details ---\n");
+    HeapStats_t stats;
+    HeapLayoutStats_t layout;
+    vPortGetHeapStats(&stats);
+    bool layout_valid = heapVisitAreas(nullptr, nullptr, &layout);
+    stream->printf("Heap free: %lu bytes, minimum ever free: %lu bytes\r\n",
+                   (unsigned long)stats.xAvailableHeapSpaceInBytes,
+                   (unsigned long)stats.xMinimumEverFreeBytesRemaining);
+    if(layout_valid) {
+        stream->printf("Largest contiguous free area: %lu bytes, free areas: %lu\r\n",
+                       (unsigned long)stats.xSizeOfLargestFreeBlockInBytes,
+                       (unsigned long)layout.freeAreas);
+    } else {
+        stream->printf("Largest contiguous free area: %lu bytes, free areas: unavailable\r\n",
+                       (unsigned long)stats.xSizeOfLargestFreeBlockInBytes);
+    }
+    if(verbose) {
+        stream->printf("Smallest free area: %lu bytes, allocations: %lu, frees: %lu\r\n",
+                       (unsigned long)stats.xSizeOfSmallestFreeBlockInBytes,
+                       (unsigned long)stats.xNumberOfSuccessfulAllocations,
+                       (unsigned long)stats.xNumberOfSuccessfulFrees);
+        stream->printf("Heap areas (sizes include allocator overhead):\r\n");
+        HeapDumpBuffer output = {
+            reinterpret_cast<char *>(xbuff), XBUFF_LENGTH, 0, false,
+        };
+        output.data[0] = '\0';
+        layout_valid = heapVisitAreas(format_heap_area, &output, &layout);
+        if(layout_valid) {
+            char *line = output.data;
+            char *end = output.data + output.length;
+            while(line < end) {
+                char *newline = static_cast<char *>(memchr(line, '\n', end - line));
+                if(newline == nullptr) break;
+                *newline = '\0';
+                stream->printf("%s\r\n", line);
+                line = newline + 1;
+            }
+            if(output.truncated) stream->printf("  area list truncated\r\n");
+            stream->printf("Heap area totals: %lu bytes used in %lu areas, "
+                           "%lu bytes free in %lu areas\r\n",
+                           (unsigned long)layout.usedBytes, (unsigned long)layout.usedAreas,
+                           (unsigned long)layout.freeBytes, (unsigned long)layout.freeAreas);
+        } else {
+            stream->printf("Heap area walk failed\r\n");
+        }
     }
 
-    stream->printf("Block size: %u bytes, Tickinfo size: %u bytes\n", sizeof(Block), sizeof(Block::tickinfo_t) * Block::n_actuators);
+    stream->printf("Planner block size: %u bytes, Tickinfo size: %u bytes\n", sizeof(Block), sizeof(Block::tickinfo_t) * Block::n_actuators);
 }
 
 /*
@@ -966,7 +965,7 @@ void SimpleShell::time_command( string parameters, StreamOutput *stream)
     	set_time(new_time);
     } else {
     	time_t old_time = time(NULL);
-    	stream->printf("time = %lld\n", old_time);
+        stream->printf("time = %ld\n", static_cast<long>(old_time));
     }
 }
 
@@ -1073,7 +1072,7 @@ void SimpleShell::wlan_command( string parameters, StreamOutput *stream)
             } else {
                 PacketMessage(PTYPE_LOAD_INFO, str, 0, stream);
             }
-            AHB.dealloc(str);
+            free(str);
         	if (send_eof) {
                 if (communication_protocol == PROTOCOL_SMOOTHIE) {
                     stream->_putc(EOT);
@@ -1365,21 +1364,34 @@ void SimpleShell::ftype_command( string parameters, StreamOutput *stream )
 }
 // print out build model
 void SimpleShell::model_command( string parameters, StreamOutput *stream )
-{		    	
+{
+	const auto model_number = static_cast<unsigned>(THEKERNEL->factory_set->MachineModel);
 	switch (THEKERNEL->factory_set->MachineModel)
 	{
+#if defined(MACHINE_FAMILY_Z1)
+		case Z1:
+			stream->printf("model = %s, %u, %d, %d\n", "Z1", model_number, THEKERNEL->factory_set->FuncSetting, THEKERNEL->probe_addr);
+			break;
+		case Z1PRO:
+			stream->printf("model = %s, %u, %d, %d\n", "Z1Pro", model_number, THEKERNEL->factory_set->FuncSetting, THEKERNEL->probe_addr);
+			break;
+		default:
+			stream->printf("model = %s, %u, %d, %d\n", "Z1", model_number, THEKERNEL->factory_set->FuncSetting, THEKERNEL->probe_addr);
+			break;
+#else
 		case CARVERA:			
-			stream->printf("model = %s, %d, %d, %d\n", "C1", THEKERNEL->factory_set->MachineModel, THEKERNEL->factory_set->FuncSetting, THEKERNEL->probe_addr);
+			stream->printf("model = %s, %u, %d, %d\n", "C1", model_number, THEKERNEL->factory_set->FuncSetting, THEKERNEL->probe_addr);
 			break;
 		case CARVERA_AIR:			
-			stream->printf("model = %s, %d, %d, %d\n", "CA1", THEKERNEL->factory_set->MachineModel, THEKERNEL->factory_set->FuncSetting, THEKERNEL->probe_addr);
+			stream->printf("model = %s, %u, %d, %d\n", "CA1", model_number, THEKERNEL->factory_set->FuncSetting, THEKERNEL->probe_addr);
             if(THEKERNEL->is_flex_compensation_load_error()) {
                 stream->printf("ERROR: Could not load flex compensation data\n");
             }
             break;
-		default:			
-			stream->printf("model = %s, %d, %d, %d\n", "C1", THEKERNEL->factory_set->MachineModel, THEKERNEL->factory_set->FuncSetting, THEKERNEL->probe_addr);
+		default:
+			stream->printf("model = %s, %u, %d, %d\n", "C1", model_number, THEKERNEL->factory_set->FuncSetting, THEKERNEL->probe_addr);
 			break;
+#endif
 	}
     if(THEKERNEL->is_config_load_error()) {
         stream->printf("ERROR: config file had errors during boot, see SD\n");
@@ -1538,27 +1550,17 @@ void SimpleShell::fset_command( string parameters, StreamOutput *stream)
     	string s = shift_parameter( parameters );
     	if (s == "model") {
     		if (!parameters.empty()) {
-    			if (parameters.length() > 3) {
-    	    		stream->printf("model length should no more than 3\n");
-    	    	} else {
-    	    		if (parameters == "C1")
-        			{
-    					THEKERNEL->factory_set->MachineModel = 1;
-    					THEKERNEL->factory_set->FuncSetting |= 0x04;
-	            		THEKERNEL->write_Factory_data();
-    	    			stream->printf("fset model ok!\n");
-        			}
-        			else if (parameters == "CA1")
-    				{
-    					THEKERNEL->factory_set->MachineModel = 2;
-	            		THEKERNEL->write_Factory_data();
-    	    			stream->printf("fset model ok!\n");
-        			}
-        			else
-        			{
-        				stream->printf("Unable to recognize parameter model. \n");
-        			}
-    	    	}
+                const Machine model = machine_model_from_name(parameters);
+                if (model == Machine::unknown) {
+                    stream->printf("ERROR: unknown machine model '%s'\n", parameters.c_str());
+                } else {
+                    THEKERNEL->factory_set->MachineModel = model;
+                    if (model == Machine::carvera) {
+                        THEKERNEL->factory_set->FuncSetting |= 0x04;
+                    }
+                    THEKERNEL->write_Factory_data();
+                    stream->printf("fset model ok!\n");
+                }
     		}
     	} else if (s == "func") {
     		if (!parameters.empty()) {
@@ -1665,6 +1667,10 @@ void SimpleShell::disable_4th_hd( string parameters, StreamOutput *stream)
 
 void SimpleShell::baud_command(string parameters, StreamOutput *stream)
 {
+#if defined(MACHINE_FAMILY_Z1)
+    stream->printf("ERROR: the controller connection baud rate is fixed on Makera Z1\n");
+    return;
+#endif
     if (THEKERNEL->serial == nullptr) {
         stream->printf("error:Serial console not available\n");
         return;
@@ -3149,6 +3155,7 @@ void SimpleShell::help_command( string parameters, StreamOutput *stream )
     stream->printf("Commands:\r\n");
     stream->printf("version\r\n");
     stream->printf("mem [-v]\r\n");
+#if !defined(NO_SD_CARD)
     stream->printf("ls [-s] [-e] [folder]\r\n");
     stream->printf("cd folder\r\n");
     stream->printf("pwd\r\n");
@@ -3156,6 +3163,11 @@ void SimpleShell::help_command( string parameters, StreamOutput *stream )
     stream->printf("rm file [-e]\r\n");
     stream->printf("mv file newfile [-e]\r\n");
     stream->printf("remount\r\n");
+    stream->printf("load [file] - loads a configuration override file from soecified name or config-override\r\n");
+    stream->printf("save [file] - saves a configuration override file as specified filename or as config-override\r\n");
+    stream->printf("upload filename - saves a stream of text to the named file\r\n");
+    stream->printf("md5sum file - prints md5 sum of the given file\r\n");
+#endif
     stream->printf("play file [-v]\r\n");
     stream->printf("progress - shows progress of current play\r\n");
     stream->printf("abort - abort currently playing file\r\n");
@@ -3173,12 +3185,8 @@ void SimpleShell::help_command( string parameters, StreamOutput *stream )
     stream->printf("ap [channel]\r\n");
     stream->printf("wlan [ssid] [password] [-d] [-e]\r\n");
     stream->printf("diagnose\r\n");
-    stream->printf("load [file] - loads a configuration override file from soecified name or config-override\r\n");
-    stream->printf("save [file] - saves a configuration override file as specified filename or as config-override\r\n");
-    stream->printf("upload filename - saves a stream of text to the named file\r\n");
     stream->printf("calc_thermistor [-s0] T1,R1,T2,R2,T3,R3 - calculate the Steinhart Hart coefficients for a thermistor\r\n");
     stream->printf("thermistors - print out the predefined thermistors\r\n");
-    stream->printf("md5sum file - prints md5 sum of the given file\r\n");
 }
 
 // output all configs

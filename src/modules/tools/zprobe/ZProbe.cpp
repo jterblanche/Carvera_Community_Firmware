@@ -49,6 +49,7 @@
 #define probe_height_checksum    CHECKSUM("probe_height")
 #define probe_tip_diameter_checksum CHECKSUM("probe_tip_diameter")
 #define probe_calibration_safety_margin_checksum CHECKSUM("calibration_safety_margin")
+#define require_probe_trigger_for_calibration_checksum CHECKSUM("require_probe_trigger_for_calibration")
 #define toolZeroIs3Axis_checksum  CHECKSUM("tool_zero_is_3axis")
 #define gamma_max_checksum       CHECKSUM("gamma_max")
 #define max_z_checksum           CHECKSUM("max_z")
@@ -116,8 +117,11 @@ void ZProbe::config_load()
     this->calibrate_pin.from_string( THEKERNEL->config->value(zprobe_checksum, calibrate_pin_checksum)->as_string("0.5^" ))->as_input();
     this->debounce_ms    = THEKERNEL->config->value(zprobe_checksum, debounce_ms_checksum)->as_number(0  );
     this->probe_calibration_safety_margin = THEKERNEL->config->value(zprobe_checksum, probe_calibration_safety_margin_checksum)->as_number(0.1F);
+    this->require_probe_trigger_for_calibration = THEKERNEL->config->value(
+        zprobe_checksum, require_probe_trigger_for_calibration_checksum)->as_bool(true);
     this->halt_pending = false;
     this->probe_triggered = false;
+    this->probe_crash_count = 0;
 
     // get strategies to load
     vector<uint16_t> modules;
@@ -191,15 +195,13 @@ void ZProbe::config_load()
 
 }
 
-void ZProbe::after_config_cache_clear()
-{
-    for(auto ls : strategies) {
-        ls->after_config_cache_clear();
-    }
-}
-
 void ZProbe::on_main_loop(void *argument)
 {
+    bool keep_3d_probe_powered = CARVERA_AIR == THEKERNEL->factory_set->MachineModel;
+#if defined(MACHINE_FAMILY_Z1)
+    keep_3d_probe_powered = true;
+#endif
+
     // Handle deferred halt event from crash detection
     if (halt_pending) {
         halt_pending = false;
@@ -208,7 +210,7 @@ void ZProbe::on_main_loop(void *argument)
 
     if (check_probe_tool() == 2){
         is_3dprobe_active = true;
-        if (CARVERA_AIR == THEKERNEL->factory_set->MachineModel) {
+        if (keep_3d_probe_powered) {
             bool ignore_on_halt = true;
             PublicData::set_value( switch_checksum, detector_switch_checksum, ignore_on_halt_checksum, &ignore_on_halt );
             bool on = true;
@@ -220,7 +222,7 @@ void ZProbe::on_main_loop(void *argument)
             PublicData::set_value( switch_checksum, detector_switch_checksum, state_checksum, &off );
         }
         is_3dprobe_active = false;    
-        if (CARVERA_AIR == THEKERNEL->factory_set->MachineModel) {
+        if (keep_3d_probe_powered) {
             bool ignore_on_halt = false;
             PublicData::set_value( switch_checksum, detector_switch_checksum, ignore_on_halt_checksum, &ignore_on_halt );
         }
@@ -295,6 +297,7 @@ uint32_t ZProbe::read_probe(uint32_t dummy)
                 THEKERNEL->set_halted(true);
                 // Set a flag to process the halt event in the main loop
                 halt_pending = true;
+                ++probe_crash_count;
                 THEKERNEL->streams->printf("error:3D Probe crash detected\r\n");
                 THEKERNEL->streams->printf("Manually move the probe to a safe position\r\n");
             } 
@@ -353,9 +356,8 @@ uint32_t ZProbe::read_calibrate(uint32_t dummy)
 
             if (!probing || probe_detected) {
                 // if we are not probing, e.g. doing a regular TLO calibration,
-                // or we are probing and the probe was detected we signal the
-                // motors to stop, which will preempt any moves on that axis we
-                // do all motors as it may be a delta
+                // or the configured trigger condition is met, stop all motors
+                // as it may be a delta.
                 for (auto &a : THEROBOT->actuators) a->stop_moving();
                 cali_debounce = 0;
             } else {
@@ -707,7 +709,7 @@ void ZProbe::on_gcode_received(void *argument)
                 }
                 break;
             case 465:
-                parse_parameters(gcode, true);
+                if (!parse_parameters(gcode, true)) return;
                 if (gcode->subcode == 1){
                     if (!gcode->has_letter('Y') || !gcode->has_letter('H')){
                         gcode->stream->printf("ERROR: Probe fail: No distance or height set\n");
@@ -962,7 +964,7 @@ void ZProbe::calibrate_Z(Gcode *gcode)
     reset_probe_tracking();
 
     // If calibration is happening with a probe tool, enable tracking of probe position in the read_probe ISR.
-    if (check_probe_tool() > 0) {
+    if (require_probe_trigger_for_calibration && check_probe_tool() > 0) {
         probing = true;
     }
 
@@ -1138,6 +1140,7 @@ float ZProbe::get_xyz_move_length(float x, float y, float z){
 }
 
 bool ZProbe::fast_slow_probe_sequence(int axis, int direction){
+    const uint32_t initial_probe_crash_count = probe_crash_count;
     float moveBuffer[3];
     float mpos[3];
     //float old_mpos[3];
@@ -1199,19 +1202,26 @@ bool ZProbe::fast_slow_probe_sequence(int axis, int direction){
     memset(&this->buff, 0 , sizeof(this->buff));
     std::sprintf(this->buff, "G38.%i X%.3f Y%.3f Z%.3f F%.3f", 2 + param.probe_g38_subcode, THEROBOT->from_millimeters(x), THEROBOT->from_millimeters(y), THEROBOT->from_millimeters(z), param.feed_rate);
     this->gcodeBuffer = new Gcode(this->buff, &StreamOutput::NullStream);
-    probe_XYZ(this->gcodeBuffer);
+    bool probe_ok = probe_XYZ(this->gcodeBuffer);
     delete gcodeBuffer;
+    if (!probe_ok) return false;
+
     //move off the surface
     moveBuffer[0] = retractx;
     moveBuffer[1] = retracty;
     moveBuffer[2] = retractz;
     THEROBOT->delta_move(moveBuffer, param.feed_rate, 3);
+    THECONVEYOR->wait_for_idle();
+    if (probe_crash_count != initial_probe_crash_count) return false;
+
     //slow probe
     memset(&this->buff, 0 , sizeof(this->buff));
     std::sprintf(this->buff, "G38.%i X%.3f Y%.3f Z%.3f", 2 + param.probe_g38_subcode,THEROBOT->from_millimeters(x), THEROBOT->from_millimeters(y), THEROBOT->from_millimeters(z));
     this->gcodeBuffer = new Gcode(this->buff, &StreamOutput::NullStream);
-    probe_XYZ(this->gcodeBuffer);
+    probe_ok = probe_XYZ(this->gcodeBuffer);
     delete gcodeBuffer;
+    if (!probe_ok) return false;
+
     // always wait for idle before getting the machine pos
     THECONVEYOR->wait_for_idle();
     //store position
@@ -1252,7 +1262,7 @@ bool ZProbe::fast_slow_probe_sequence(int axis, int direction){
     THEROBOT->delta_move(moveBuffer, param.feed_rate, 3);
     // always wait for idle before getting the machine pos
     THECONVEYOR->wait_for_idle();
-    return probe_detected;
+    return probe_detected && probe_crash_count == initial_probe_crash_count;
 }
 
 int ZProbe::xy_probe_move_alarm_when_hit(int direction, int probe_g38_subcode, float x, float y, float feed_rate){
@@ -1427,14 +1437,14 @@ void ZProbe::probe_bore(bool calibration) //M461
 	for(int i=0; i< param.repeat; i++) {
         if (param.x_axis_distance != 0) {
             // probe in positive x direction
-            fast_slow_probe_sequence(X_AXIS, POS);
+            if (!fast_slow_probe_sequence(X_AXIS, POS)) return;
 
             //THEKERNEL->streams->printf("X: %.3f Y: %.3f\n", out_coords.x_positive_x_out, out_coords.x_positive_y_out);
             //move back to the center position
             coordinated_move(out_coords.origin_x, out_coords.origin_y, NAN, param.rapid_rate);
 
             // probe in negative x direction
-            fast_slow_probe_sequence(X_AXIS, NEG);
+            if (!fast_slow_probe_sequence(X_AXIS, NEG)) return;
 
             //THEKERNEL->streams->printf("X: %.3f Y: %.3f\n", out_coords.x_negative_x_out, out_coords.x_negative_y_out);
             //calculate center of bore (will only be centered in x)
@@ -1454,7 +1464,7 @@ void ZProbe::probe_bore(bool calibration) //M461
 
         if (param.y_axis_distance != 0) {
             // probe in positive < direction
-            fast_slow_probe_sequence(Y_AXIS, POS);
+            if (!fast_slow_probe_sequence(Y_AXIS, POS)) return;
 
             //THEKERNEL->streams->printf("X: %.3f Y: %.3f\n", out_coords.y_positive_x_out, out_coordsy_positive_y_out);
             //goto current center position
@@ -1462,7 +1472,7 @@ void ZProbe::probe_bore(bool calibration) //M461
             THECONVEYOR->wait_for_idle();
             
             // probe in negative y direction
-            fast_slow_probe_sequence(Y_AXIS, NEG);
+            if (!fast_slow_probe_sequence(Y_AXIS, NEG)) return;
             
             //THEKERNEL->streams->printf("X: %.3f Y: %.3f\n", out_coords.x_negative_x_out, out_coords.x_negative_y_out);
             //calculate center of bore (will only be centered in x)
@@ -1539,7 +1549,7 @@ void ZProbe::probe_boss(bool calibration) //M462
 	//slow zprobe without alarm to probe_height. Skip if probe height is 0
 	if (param.probe_height != 0){
         param.z_axis_distance = param.probe_height;
-        fast_slow_probe_sequence(Z_AXIS, POS);
+        if (!fast_slow_probe_sequence(Z_AXIS, POS)) return;
         if (param.save_position == 2 && check_last_probe_ok()){
             THEROBOT->set_current_wcs_by_mpos( NAN, NAN, out_coords.z_negative_z_out);
         }
@@ -1577,7 +1587,7 @@ void ZProbe::probe_boss(bool calibration) //M462
             }
 
             // probe in negative x direction
-            fast_slow_probe_sequence(X_AXIS, NEG);
+            if (!fast_slow_probe_sequence(X_AXIS, NEG)) return;
 
             //THEKERNEL->streams->printf("X: %.3f Y: %.3f\n", out_coords.x_positive_x_out, out_coords.x_positive_y_out);
             //goto clearance_world_pos in z
@@ -1599,7 +1609,7 @@ void ZProbe::probe_boss(bool calibration) //M462
             }
 
             // probe in positive x direction
-            fast_slow_probe_sequence(X_AXIS, POS);
+            if (!fast_slow_probe_sequence(X_AXIS, POS)) return;
 
             //THEKERNEL->streams->printf("X: %.3f Y: %.3f\n", out_coords.x_positive_x_out, out_coords.x_positive_y_out);
             //calculate center of bore (will only be centered in x)
@@ -1634,7 +1644,7 @@ void ZProbe::probe_boss(bool calibration) //M462
             }
             
             // probe in negative y direction
-            fast_slow_probe_sequence(Y_AXIS, NEG);
+            if (!fast_slow_probe_sequence(Y_AXIS, NEG)) return;
 
             //THEKERNEL->streams->printf("X: %.3f Y: %.3f\n", out_coords.y_positive_x_out, out_coords.y_positive_y_out);
             //goto clearance_world_pos in z
@@ -1656,7 +1666,7 @@ void ZProbe::probe_boss(bool calibration) //M462
             }
 
             // probe in positive y direction
-            fast_slow_probe_sequence(Y_AXIS, POS);
+            if (!fast_slow_probe_sequence(Y_AXIS, POS)) return;
             
             //THEKERNEL->streams->printf("X: %.3f Y: %.3f\n", out_coords.y_positive_x_out, out_coords.y_positive_y_out);
             //calculate center of bore (will only be centered in x)
@@ -1729,7 +1739,7 @@ void ZProbe::probe_insideCorner() //M463
 	//setup repeat
 	for(int i=0; i< param.repeat; i++) {
         
-        fast_slow_probe_sequence(X_AXIS, POS);
+        if (!fast_slow_probe_sequence(X_AXIS, POS)) return;
 
         out_coords.x_positive_x_out = out_coords.x_positive_x_out + (param.x_axis_distance>= 0 ? 1.0f : -1.0f) *  param.half_tool_dia_rotated_x_x;
         out_coords.x_positive_y_out = out_coords.x_positive_y_out + (param.x_axis_distance>= 0 ? 1.0f : -1.0f) *  param.half_tool_dia_rotated_x_y;
@@ -1740,7 +1750,7 @@ void ZProbe::probe_insideCorner() //M463
         coordinated_move(out_coords.origin_x, out_coords.origin_y, NAN, param.rapid_rate );
         THECONVEYOR->wait_for_idle();
 
-        fast_slow_probe_sequence(Y_AXIS, POS);
+        if (!fast_slow_probe_sequence(Y_AXIS, POS)) return;
 
         out_coords.y_positive_y_out = out_coords.y_positive_y_out + (param.y_axis_distance>= 0 ? 1.0f : -1.0f) * param.half_tool_dia_rotated_y_y;
         out_coords.y_positive_x_out = out_coords.y_positive_x_out + (param.y_axis_distance>= 0 ? 1.0f : -1.0f) * param.half_tool_dia_rotated_y_x;
@@ -1792,7 +1802,7 @@ void ZProbe::probe_outsideCorner() //M464
 	//slow zprobe without alarm to probe_height. Skip if probe height is 0
 	if (param.probe_height != 0){
         param.z_axis_distance = param.probe_height;
-        fast_slow_probe_sequence(Z_AXIS, POS);
+        if (!fast_slow_probe_sequence(Z_AXIS, POS)) return;
         if (param.save_position == 2 && check_last_probe_ok()){
             THEROBOT->set_current_wcs_by_mpos( NAN, NAN, out_coords.z_negative_z_out);
         }
@@ -1833,7 +1843,7 @@ void ZProbe::probe_outsideCorner() //M464
         }
         
         // probe in positive x direction
-        fast_slow_probe_sequence(X_AXIS, POS);
+        if (!fast_slow_probe_sequence(X_AXIS, POS)) return;
 
         out_coords.x_positive_x_out = out_coords.x_positive_x_out + (param.x_axis_distance>= 0 ? 1.0f : -1.0f) *  param.half_tool_dia_rotated_x_x;
         out_coords.x_positive_y_out = out_coords.x_positive_y_out + (param.x_axis_distance>= 0 ? 1.0f : -1.0f) *  param.half_tool_dia_rotated_x_y;
@@ -1859,7 +1869,7 @@ void ZProbe::probe_outsideCorner() //M464
         }
 
         // probe in positive y direction
-        fast_slow_probe_sequence(Y_AXIS, POS);
+        if (!fast_slow_probe_sequence(Y_AXIS, POS)) return;
 
         out_coords.y_positive_y_out = out_coords.y_positive_y_out + (param.y_axis_distance>= 0 ? 1.0f : -1.0f) * param.half_tool_dia_rotated_y_y;
         out_coords.y_positive_x_out = out_coords.y_positive_x_out + (param.y_axis_distance>= 0 ? 1.0f : -1.0f) * param.half_tool_dia_rotated_y_x;
@@ -2016,7 +2026,7 @@ void ZProbe::probe_axisangle(bool probe_a_axis, bool probe_with_offset) //M465
                 return;
             }
             
-            fast_slow_probe_sequence(Z_AXIS, NEG);
+            if (!fast_slow_probe_sequence(Z_AXIS, NEG)) return;
             if (check_last_probe_ok()){
                 out_coords.y_positive_y_out = out_coords.z_negative_z_out;
             }else{
@@ -2032,7 +2042,7 @@ void ZProbe::probe_axisangle(bool probe_a_axis, bool probe_with_offset) //M465
                 THEKERNEL->set_halt_reason(PROBE_FAIL);
                 return;
             }
-            fast_slow_probe_sequence(Z_AXIS, NEG);
+            if (!fast_slow_probe_sequence(Z_AXIS, NEG)) return;
             if (check_last_probe_ok()){
                 out_coords.y_negative_y_out = out_coords.z_negative_z_out;
             }
@@ -2050,7 +2060,7 @@ void ZProbe::probe_axisangle(bool probe_a_axis, bool probe_with_offset) //M465
 
         }else if (probe_x) {
             
-            fast_slow_probe_sequence(Y_AXIS, POS);
+            if (!fast_slow_probe_sequence(Y_AXIS, POS)) return;
             THECONVEYOR->wait_for_idle();
             
             if (!check_last_probe_ok()) {
@@ -2075,7 +2085,7 @@ void ZProbe::probe_axisangle(bool probe_a_axis, bool probe_with_offset) //M465
             }
 
             //probe along y axis to find second point
-            fast_slow_probe_sequence(Y_AXIS, POS);
+            if (!fast_slow_probe_sequence(Y_AXIS, POS)) return;
             THECONVEYOR->wait_for_idle();
             
             if (!check_last_probe_ok()) {
@@ -2099,7 +2109,7 @@ void ZProbe::probe_axisangle(bool probe_a_axis, bool probe_with_offset) //M465
             angle_measurements.push_back(current_angle);
             THEKERNEL->streams->printf("Measurement %d: Angle from X Axis is: %.3f degrees or %.3f radians\n" , i+1, current_angle, current_angle * pi / 180 );
         }else{
-            fast_slow_probe_sequence(X_AXIS, POS);
+            if (!fast_slow_probe_sequence(X_AXIS, POS)) return;
             THECONVEYOR->wait_for_idle();
             
             if (!check_last_probe_ok()) {
@@ -2124,7 +2134,7 @@ void ZProbe::probe_axisangle(bool probe_a_axis, bool probe_with_offset) //M465
             }
 
             //probe along y axis to find second point
-            fast_slow_probe_sequence(X_AXIS, POS);
+            if (!fast_slow_probe_sequence(X_AXIS, POS)) return;
             THECONVEYOR->wait_for_idle();
             
             if (!check_last_probe_ok()) {
@@ -2265,7 +2275,7 @@ void ZProbe::probe_square(){
         // go to starting position
         coordinated_move(out_coords.origin_x, out_coords.origin_y, out_coords.origin_z, param.rapid_rate);
         for (int j = 0; j < 4; j++){
-            fast_slow_probe_sequence(Z_AXIS, NEG);
+            if (!fast_slow_probe_sequence(Z_AXIS, NEG)) return;
             z_pos[j] = out_coords.z_negative_z_out;
             if (j == 0){
                 min_z = max_z = z_pos[j];
@@ -2460,7 +2470,7 @@ void ZProbe::single_axis_probe_double_tap(){
 
         THECONVEYOR->wait_for_idle();
         // POS doesn't do anything here since it's a XYZ Probe move
-        fast_slow_probe_sequence(XYZ, POS);
+        if (!fast_slow_probe_sequence(XYZ, POS)) return;
 
         THECONVEYOR->wait_for_idle();
         
