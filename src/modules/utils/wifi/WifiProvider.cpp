@@ -732,12 +732,21 @@ void WifiProvider::on_idle(void *argument)
 		receive_wifi_data();
 	}
 
+	// This whole function can run nested inside a dispatch that's already in
+	// progress: a blocking command like continuous jog calls ON_IDLE
+	// cooperatively on every iteration (SimpleShell::jog), which re-enters
+	// on_idle() while on_main_loop() is still inside dispatch_console_line()
+	// for a different client. Every active_reply_client assignment below
+	// saves and restores the previous value rather than resetting to -1
+	// unconditionally, so a status poll answered during someone else's
+	// dispatch can't steal the rest of that dispatch's output.
 	if (makera_file_cancel) {
 		makera_file_cancel = false;
 		static const char cancel_payload[] = "ok\r\n";
+		const int saved_reply_client = active_reply_client;
 		if (communication_protocol == PROTOCOL_MAKERA) active_reply_client = makera_file_cancel_client;
 		PacketMessage(PTYPE_FILE_CAN, cancel_payload, sizeof(cancel_payload));
-		active_reply_client = -1;
+		active_reply_client = saved_reply_client;
 		makera_file_cancel_client = -1;
 	}
 
@@ -758,15 +767,17 @@ void WifiProvider::on_idle(void *argument)
 			WifiClientStream &client = wifi_streams[i];
 			if (client.query_flag) {
 				client.query_flag = false;
+				const int saved_reply_client = active_reply_client;
 				active_reply_client = static_cast<int>(i);
 				PacketMessage(PTYPE_STATUS_RES, THEKERNEL->get_query_string().c_str(), 0);
-				active_reply_client = -1;
+				active_reply_client = saved_reply_client;
 			}
 			if (client.diagnose_flag) {
 				client.diagnose_flag = false;
+				const int saved_reply_client = active_reply_client;
 				active_reply_client = static_cast<int>(i);
 				PacketMessage(PTYPE_DIAG_RES, THEKERNEL->get_diagnose_string().c_str(), 0);
-				active_reply_client = -1;
+				active_reply_client = saved_reply_client;
 			}
 		}
 	}
@@ -801,6 +812,13 @@ void WifiProvider::on_main_loop(void *argument)
 
 			command_waiting = false;
 			command_waiting_client = -1;
+			// Resetting to -1 unconditionally (not save/restore) is correct
+			// here specifically: the is_dispatching_console_line() guard
+			// above means this call is never itself nested inside another
+			// dispatch, so active_reply_client is always -1 before it and
+			// should be -1 again once it returns. Nested re-entry during
+			// the dispatch (via ON_IDLE) is what on_idle()'s own sites save
+			// and restore around, so it doesn't leak back out to here.
 			active_reply_client = client_index;
 			THEKERNEL->dispatch_console_line(message);
 			active_reply_client = -1;
