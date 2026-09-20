@@ -368,6 +368,16 @@ void WifiProvider::receive_wifi_data() {
 				continue;
 			}
 
+			if (packet.type == PTYPE_HELLO) {
+				handle_wifi_hello(client_index, packet.data, packet.data_length, now_ms);
+				continue;
+			}
+
+			if (packet.type == PTYPE_CLIENT_LIST_REQ) {
+				handle_wifi_client_list_request(client_index);
+				continue;
+			}
+
 			if (packet.type != PTYPE_CTRL_MULTI && packet.type != PTYPE_FILE_START) continue;
 
 			if (packet.data_length == 0) {
@@ -455,6 +465,124 @@ void WifiProvider::broadcast_to_wifi_clients(const u8* data, size_t length) {
 	for (size_t i = 0; i < multiclient::max_wifi_clients; ++i) {
 		if (multiclient::shared_client_table().wifi_at(static_cast<int>(i)) != nullptr) {
 			send_to_wifi_client(static_cast<int>(i), data, length);
+		}
+	}
+}
+
+// Sends `data` to every WiFi client that has identified itself, skipping
+// anyone still unidentified. Not called anywhere yet -- no message built by
+// this branch is broadcast this way. It exists so a later status/event/
+// console publish only reaches clients that identified themselves, leaving
+// broadcast_to_wifi_clients() above exactly as it is (reaching every
+// connected client, identified or not) for the messages that already use
+// it today, such as a halt notice -- a lone unidentified client must keep
+// seeing those exactly as it does now.
+void WifiProvider::broadcast_to_identified_wifi_clients(const u8* data, size_t length) {
+	for (size_t i = 0; i < multiclient::max_wifi_clients; ++i) {
+		const multiclient::Client *client = multiclient::shared_client_table().wifi_at(static_cast<int>(i));
+		if (client != nullptr && client->identified) {
+			send_to_wifi_client(static_cast<int>(i), data, length);
+		}
+	}
+}
+
+// Sends a framed reply addressed to `client_index` regardless of whatever
+// active_reply_client currently holds -- this can run nested inside another
+// client's dispatch (see receive_wifi_data()), so the previous value is
+// saved and restored rather than clobbered.
+void WifiProvider::send_wifi_packet(int client_index, char cmd, const uint8_t* payload, size_t length) {
+	const int saved_reply_client = active_reply_client;
+	active_reply_client = client_index;
+	PacketMessage(cmd, reinterpret_cast<const char*>(payload), static_cast<int>(length));
+	active_reply_client = saved_reply_client;
+}
+
+// Parses a hello frame and answers it, addressed to the sender only. An
+// already-identified client re-sending hello is re-acked with no state
+// change. A first-time hello whose id already belongs to another,
+// already-identified client is treated as a reconnect: that stale entry is
+// dropped first. A first-time hello while an old (never-identified,
+// window-expired) client is already known to be connected is refused, so
+// this client never becomes a peer while that's true.
+void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, uint16_t payload_length, uint32_t now_ms) {
+	auto &table = multiclient::shared_client_table();
+	multiclient::Client *self = table.wifi_at(client_index);
+	if (self == nullptr) return;
+
+	multiclient::Hello hello;
+	if (!multiclient::parse_hello(payload, payload_length, hello)) return; // malformed, or an unrecognised version: ignored
+
+	if (!self->identified) {
+		const int stale = table.find_wifi_by_id(hello.id, client_index);
+		if (stale >= 0) {
+			forget_wifi_client(stale);
+			table.remove_wifi(stale);
+		} else if (table.usb_has_id(hello.id)) {
+			table.clear_usb_identity();
+		}
+
+		if (table.has_old_client(now_ms, client_index)) {
+			uint8_t ack[multiclient::hello_ack_length];
+			const std::size_t ack_len = multiclient::build_hello_ack(
+				ack, multiclient::hello_result_old_controller_present, multiclient::hello_mode_single_user);
+			send_wifi_packet(client_index, PTYPE_HELLO_ACK, ack, ack_len);
+			return;
+		}
+
+		multiclient::set_identity(*self, hello.id, hello.name, hello.name_len);
+	}
+
+	uint8_t ack[multiclient::hello_ack_length];
+	const std::size_t ack_len =
+		multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, multiclient::hello_mode_single_user);
+	send_wifi_packet(client_index, PTYPE_HELLO_ACK, ack, ack_len);
+}
+
+// Answers a client-list request with every identified client in the shared
+// table, addressed to the requester only. Answered regardless of whether
+// the requester itself is identified -- this is a request-and-reply
+// message, not a publish.
+void WifiProvider::handle_wifi_client_list_request(int client_index) {
+	uint8_t payload[multiclient::max_client_list_reply_length];
+	const std::size_t length =
+		multiclient::build_client_list_reply(multiclient::shared_client_table(), payload, sizeof(payload));
+	send_wifi_packet(client_index, PTYPE_CLIENT_LIST_REPLY, payload, length);
+}
+
+// Called once a second (see on_second_tick), after reconcile_wifi_clients()
+// has already reaped anything the WiFi module dropped. A client that has
+// not identified within its hello window is old. Alone, it is left exactly
+// as it is -- served like any client was before this branch existed. Not
+// alone (another identified or also-unidentified client is present too),
+// it is disconnected through the driver, same as any other refusal this
+// file issues; whether that disconnect closes the link cleanly is not
+// verified by this branch. There is no equivalent action for USB: the
+// firmware has no way to sever that link, so an old, not-alone USB
+// controller simply stays unidentified and limited to request-and-reply,
+// same as it would be alone.
+void WifiProvider::enforce_old_client_rule(uint32_t now_ms) {
+	auto &table = multiclient::shared_client_table();
+	if (table.present_count() <= 1) {
+		// Alone (or nobody connected): nothing to enforce. A straggler seen
+		// later is a fresh situation, worth its own log line if it recurs.
+		logged_old_client_disconnect_count = 0;
+		return;
+	}
+
+	for (int i = 0; i < static_cast<int>(multiclient::max_wifi_clients); ++i) {
+		const multiclient::Client *client = table.wifi_at(i);
+		if (client == nullptr || !multiclient::client_is_old(*client, now_ms)) continue;
+
+		bool already_logged = false;
+		for (uint8_t k = 0; k < logged_old_client_disconnect_count; ++k) {
+			if (multiclient::same_address(logged_old_client_disconnects[k], client->address)) {
+				already_logged = true;
+				break;
+			}
+		}
+		disconnect_wifi_client(client->address, "old controller, another client is connected", !already_logged);
+		if (!already_logged && logged_old_client_disconnect_count < max_logged_old_client_disconnects) {
+			logged_old_client_disconnects[logged_old_client_disconnect_count++] = client->address;
 		}
 	}
 }
@@ -630,7 +758,7 @@ void WifiProvider::on_second_tick(void *)
 				snprintf(address, sizeof(address), "%d.%d.%d.%d", bytes[3], bytes[2], bytes[1], bytes[0]);
 			}
 
-			snprintf(udp_buff, sizeof(udp_buff), "%s,%s,%d,%d", this->machine_name, this->sta_address, this->tcp_port, client_num > 0 ? 1 : 0);
+			snprintf(udp_buff, sizeof(udp_buff), "%s,%s,%d,%d,%d", this->machine_name, this->sta_address, this->tcp_port, client_num > 0 ? 1 : 0, client_num > 0 ? 1 : 0);
 			if (M8266WIFI_SPI_Send_Udp_Data((u8 *)udp_buff, strlen(udp_buff), udp_link_no, address, this->udp_send_port, &status) < strlen(udp_buff)) {
 				// THEKERNEL->streams->printf("Send UDP through STA ERROR, status: %d, high: %d, low: %d!\n", status, int(status >> 8), int(status & 0xff));
 			} else {
@@ -670,7 +798,7 @@ void WifiProvider::on_second_tick(void *)
 			snprintf(address, sizeof(address), "%d.%d.%d.%d", bytes[3], bytes[2], bytes[1], bytes[0]);
 		}
 
-		snprintf(udp_buff, sizeof(udp_buff), "%s,%s,%d,%d", this->machine_name, this->ap_address, this->tcp_port, client_num > 0 ? 1 : 0);
+		snprintf(udp_buff, sizeof(udp_buff), "%s,%s,%d,%d,%d", this->machine_name, this->ap_address, this->tcp_port, client_num > 0 ? 1 : 0, client_num > 0 ? 1 : 0);
 		if (M8266WIFI_SPI_Send_Udp_Data((u8 *)udp_buff, strlen(udp_buff), udp_link_no, address, this->udp_send_port, &status) < strlen(udp_buff)) {
 			// THEKERNEL->streams->printf("Send UDP through AP ERROR, status: %d, high: %d, low: %d!\n", status, int(status >> 8), int(status & 0xff));
 		}
@@ -690,6 +818,8 @@ void WifiProvider::on_second_tick(void *)
 		// This branch only runs in Makera mode (the other branch, above,
 		// handles Smoothie mode, which is always single-client).
 		reconcile_wifi_clients(client_num, RemoteClients);
+		enforce_old_client_rule(us_ticker_read() / 1000);
+		const bool old_controller_present = multiclient::shared_client_table().has_old_client(us_ticker_read() / 1000);
 
 		if (M8266WIFI_SPI_Get_STA_Connection_Status(&connection_status, &status)) {
 			if (connection_status == 5) {
@@ -698,7 +828,7 @@ void WifiProvider::on_second_tick(void *)
 				M8266WIFI_SPI_Query_STA_Param(STA_PARAM_TYPE_NETMASK_ADDR, (u8 *)this->sta_netmask, &param_len, &status);
 				// send data to sta broadcast address
 				get_broadcast_from_ip_and_netmask(address, this->sta_address, this->sta_netmask);
-				snprintf(udp_buff, sizeof(udp_buff), "%s,%s,%d,%d", this->machine_name, this->sta_address, this->tcp_port, client_num > 0 ? 1 : 0);
+				snprintf(udp_buff, sizeof(udp_buff), "%s,%s,%d,%d,%d", this->machine_name, this->sta_address, this->tcp_port, client_num > 0 ? 1 : 0, old_controller_present ? 1 : 0);
 				if (M8266WIFI_SPI_Send_Udp_Data((u8 *)udp_buff, strlen(udp_buff), udp_link_no, address, this->udp_send_port, &status) < strlen(udp_buff)) {
 					// THEKERNEL->streams->printf("Send UDP through STA ERROR, status: %d, high: %d, low: %d!\n", status, int(status >> 8), int(status & 0xff));
 				} else {
@@ -725,7 +855,7 @@ void WifiProvider::on_second_tick(void *)
 			if (!this->ap_currently_on) return;
 			memset(udp_buff, 0, sizeof(udp_buff));
 			get_broadcast_from_ip_and_netmask(address, this->ap_address, this->ap_netmask);
-			snprintf(udp_buff, sizeof(udp_buff), "%s,%s,%d,%d", this->machine_name, this->ap_address, this->tcp_port, client_num > 0 ? 1 : 0);
+			snprintf(udp_buff, sizeof(udp_buff), "%s,%s,%d,%d,%d", this->machine_name, this->ap_address, this->tcp_port, client_num > 0 ? 1 : 0, old_controller_present ? 1 : 0);
 			if (M8266WIFI_SPI_Send_Udp_Data((u8 *)udp_buff, strlen(udp_buff), udp_link_no, address, this->udp_send_port, &status) < strlen(udp_buff)) {
 				// THEKERNEL->streams->printf("Send UDP through AP ERROR, status: %d, high: %d, low: %d!\n", status, int(status >> 8), int(status & 0xff));
 			}
@@ -890,6 +1020,7 @@ void WifiProvider::on_protocol_changed()
 	active_reply_client = -1;
 	pending_wifi_client = -1;
 	logged_refusal_count = 0;
+	logged_old_client_disconnect_count = 0;
 	for (size_t i = 0; i < multiclient::max_wifi_clients; ++i) wifi_streams[i].clear();
 	// M485 switches the protocol for the whole link. Every WiFi client's
 	// parser state is for the protocol that just ended, so none of it means
