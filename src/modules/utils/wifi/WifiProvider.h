@@ -19,6 +19,7 @@ using namespace std;
 #include "M8266WIFIDrv.h"
 #include "libs/RingBuffer.h"
 #include "libs/MakeraFrame.h"
+#include "libs/FrameResync.h"
 #include "libs/ClientTable.h"
 #include "libs/Hello.h"
 #include "libs/Publish.h"
@@ -181,18 +182,21 @@ private:
     // stay single-valued rather than one per client.
     struct WifiClientStream {
     	makera::Packet packet{};
-    	makera::FrameDecoder decoder{packet};
+    	// Owns the header-error bookkeeping too (see libs/FrameResync.h): a
+    	// run of junk/plain-text bytes before a frame, and the "please
+    	// update" diagnostic that eventually follows, are per-client state
+    	// exactly like the decoder itself.
+    	makera::ResyncingDecoder decoder{packet};
     	bool query_flag = false;
     	bool diagnose_flag = false;
-    	uint16_t header_errors = 0;
 
-    	// FrameDecoder holds a reference to `packet`, so this struct has no
-    	// copy/move assignment; reset it in place instead.
+    	// FrameDecoder (inside ResyncingDecoder) holds a reference to
+    	// `packet`, so this struct has no copy/move assignment; reset it in
+    	// place instead.
     	void clear() {
     		decoder.reset();
     		query_flag = false;
     		diagnose_flag = false;
-    		header_errors = 0;
     	}
     };
     WifiClientStream wifi_streams[multiclient::max_wifi_clients];
