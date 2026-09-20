@@ -158,6 +158,10 @@ void SerialConsole::on_serial_char_received() {
 		}
 
         if (communication_protocol == PROTOCOL_MAKERA) {
+            // The firmware cannot detect a bare USB cable, only bytes
+            // actually arriving on it -- this is where a USB controller
+            // starts counting as present for the old-client rule.
+            multiclient::shared_client_table().start_usb_hello_window(last_activity_ms);
             const int next = makera_rx_bytes.next_block_index(makera_rx_bytes.head);
             if (next == makera_rx_bytes.tail) {
                 makera_rx_overflow = true;
@@ -239,6 +243,21 @@ void SerialConsole::on_idle(void * argument)
             makera_rx_bytes.pop_front(received);
             process_makera_byte(static_cast<uint8_t>(received));
             if (THEKERNEL->is_uploading()) break;
+        }
+    }
+
+    // A USB entry whose hello window has started but has gone quiet for
+    // usb_idle_timeout_ms is treated as no longer present: its identity and
+    // hello-window progress are cleared, the same reset a protocol switch
+    // already does, so it stops counting toward "present" (and, if it never
+    // identified, toward "old and not alone") until something arrives on it
+    // again. Without this, a single USB session anywhere in a power cycle
+    // would count forever, since nothing else ever un-counts it.
+    if (communication_protocol == PROTOCOL_MAKERA) {
+        auto &table = multiclient::shared_client_table();
+        const multiclient::Client *usb = table.usb();
+        if (usb != nullptr && multiclient::usb_session_expired(usb->hello_window_started, now_ms, last_activity_ms)) {
+            table.clear_usb_identity();
         }
     }
 
@@ -440,6 +459,16 @@ void SerialConsole::process_makera_byte(uint8_t received)
         return;
     }
 
+    if (packet.type == PTYPE_HELLO) {
+        handle_hello(packet.data, packet.data_length, last_activity_ms);
+        return;
+    }
+
+    if (packet.type == PTYPE_CLIENT_LIST_REQ) {
+        handle_client_list_request();
+        return;
+    }
+
     if (packet.type == PTYPE_CTRL_MULTI || packet.type == PTYPE_FILE_START) {
         if (packet.data_length == 0) {
             if (packet.type == PTYPE_FILE_START) makera_file_cancel = true;
@@ -452,6 +481,53 @@ void SerialConsole::process_makera_byte(uint8_t received)
         PublicData::set_value(player_checksum, link_packet_checksum, &link);
 #endif
     }
+}
+
+// Parses a hello frame and answers it. An already-identified USB link
+// re-sending hello is re-acked with no state change. A first-time hello
+// whose id already belongs to an identified WiFi client is treated as a
+// reconnect: that WiFi table entry is dropped (its own per-client parser
+// state is left for WifiProvider to reset the next time that slot is
+// reused, which it already does on every admission). A first-time hello
+// while an old (never-identified, window-expired) client is already known
+// to be connected -- other than this USB link itself -- is refused.
+void SerialConsole::handle_hello(const uint8_t* payload, uint16_t payload_length, uint32_t now_ms) {
+    auto &table = multiclient::shared_client_table();
+    multiclient::Client *self = table.usb();
+    if (self == nullptr) return;
+
+    multiclient::Hello hello;
+    if (!multiclient::parse_hello(payload, payload_length, hello)) return; // malformed, or an unrecognised version: ignored
+
+    if (!self->identified) {
+        const int stale = table.find_wifi_by_id(hello.id);
+        if (stale >= 0) table.remove_wifi(stale);
+
+        if (table.has_old_client(now_ms, -1, /*exclude_usb=*/true)) {
+            uint8_t ack[multiclient::hello_ack_length];
+            const std::size_t ack_len = multiclient::build_hello_ack(
+                ack, multiclient::hello_result_old_controller_present, multiclient::hello_mode_single_user);
+            PacketMessage(PTYPE_HELLO_ACK, reinterpret_cast<const char*>(ack), static_cast<int>(ack_len));
+            return;
+        }
+
+        multiclient::set_identity(*self, hello.id, hello.name, hello.name_len);
+    }
+
+    uint8_t ack[multiclient::hello_ack_length];
+    const std::size_t ack_len =
+        multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, multiclient::hello_mode_single_user);
+    PacketMessage(PTYPE_HELLO_ACK, reinterpret_cast<const char*>(ack), static_cast<int>(ack_len));
+}
+
+// Answers a client-list request with every identified client in the shared
+// table. Answered regardless of whether this USB link is itself identified
+// -- this is a request-and-reply message, not a publish.
+void SerialConsole::handle_client_list_request() {
+    uint8_t payload[multiclient::max_client_list_reply_length];
+    const std::size_t length =
+        multiclient::build_client_list_reply(multiclient::shared_client_table(), payload, sizeof(payload));
+    PacketMessage(PTYPE_CLIENT_LIST_REPLY, reinterpret_cast<const char*>(payload), static_cast<int>(length));
 }
 
 int SerialConsole::receive_packet(makera::Packet& packet, uint32_t timeout_ms)
@@ -536,6 +612,11 @@ void SerialConsole::on_protocol_changed()
     makera_rx_bytes.tail = makera_rx_bytes.head;
     makera_frame_decoder.reset();
     reset_file_parser();
+    // A protocol switch invalidates every client's identified state (a
+    // fresh hello is required after switching back), and there is no
+    // traffic yet under whichever protocol is now in effect, so the hello
+    // window has not started either.
+    multiclient::shared_client_table().clear_usb_identity();
 }
 
 int SerialConsole::_putc(int c)

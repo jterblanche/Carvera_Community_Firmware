@@ -27,3 +27,14 @@ disturbing the three already admitted, idempotent re-adds of an address
 already present, freeing and refilling a slot on removal, the USB entry
 being a single present/absent slot independent of the WiFi cap, and the
 shared singleton accessor.
+
+Also: recording identity and clamping an over-length name; the hello window
+(not old before it starts or before it elapses, old once it has, never old
+once identified); a WiFi client's window starting the moment it is admitted
+versus a USB entry's window only starting once something is actually
+received on it; clearing a USB entry's identity without removing the slot;
+who counts as "present" for the old-client rule (an idle USB entry does not,
+a talking one does); a lone old client versus a second one making it
+not-alone; excluding a given client (and, for USB, optionally itself) when
+checking whether an old client is already in the mix; and looking a client
+up by id, scoped to identified clients only.

@@ -20,6 +20,7 @@ using namespace std;
 #include "libs/RingBuffer.h"
 #include "libs/MakeraFrame.h"
 #include "libs/ClientTable.h"
+#include "libs/Hello.h"
 
 #define WIFI_DATA_MAX_SIZE 1460
 #define WIFI_DATA_TIMEOUT_MS 10
@@ -81,8 +82,18 @@ private:
     void disconnect_wifi_client(const multiclient::Address& address, const char* reason, bool log = true);
     void send_to_wifi_client(int client_index, const u8* data, size_t length);
     void broadcast_to_wifi_clients(const u8* data, size_t length);
+    void broadcast_to_identified_wifi_clients(const u8* data, size_t length);
     void reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_clients[]);
     void forget_wifi_client(int client_index);
+    void enforce_old_client_rule(uint32_t now_ms);
+
+    // Handles a decoded hello/client-list-request frame. Both reply inline,
+    // addressed to that one client (see receive_wifi_data()).
+    void handle_wifi_hello(int client_index, const uint8_t* payload, uint16_t payload_length, uint32_t now_ms);
+    void handle_wifi_client_list_request(int client_index);
+    // Sends a framed reply addressed to one specific client, regardless of
+    // whatever active_reply_client currently holds (saves and restores it).
+    void send_wifi_packet(int client_index, char cmd, const uint8_t* payload, size_t length);
 
     mbed::InterruptIn *wifi_interrupt_pin; // Interrupt pin for measuring speed
 
@@ -178,6 +189,13 @@ private:
     static constexpr size_t max_logged_refusals = 4;
     multiclient::Address logged_refusals[max_logged_refusals];
     uint8_t logged_refusal_count = 0;
+
+    // Same idea as logged_refusals above, but for enforce_old_client_rule():
+    // an old client whose driver-level disconnect doesn't immediately take
+    // is logged only once, not every second it lingers.
+    static constexpr size_t max_logged_old_client_disconnects = multiclient::max_wifi_clients;
+    multiclient::Address logged_old_client_disconnects[max_logged_old_client_disconnects];
+    uint8_t logged_old_client_disconnect_count = 0;
 };
 
 #endif /* WIFIPROVIDER_H_ */
