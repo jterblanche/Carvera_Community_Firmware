@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstdio>
+#include <string>
 
 #include "libs/ClientTable.h"
 
@@ -185,6 +186,178 @@ int main() {
     multiclient::ClientTable& first = multiclient::shared_client_table();
     multiclient::ClientTable& second = multiclient::shared_client_table();
     CHECK(&first == &second);
+  }
+
+  {
+    TEST("set_identity records id and name and clamps an over-length name");
+    multiclient::Client client;
+    multiclient::set_identity(client, 0x0102030405060708ULL, "Office PC", 9);
+    CHECK(client.identified);
+    CHECK(client.id == 0x0102030405060708ULL);
+    CHECK(client.name_len == 9);
+    CHECK(std::string(client.name) == "Office PC");
+
+    multiclient::Client clamped;
+    const char too_long[41] = "0123456789012345678901234567890123456789";
+    multiclient::set_identity(clamped, 1, too_long, 40);
+    CHECK(clamped.name_len == multiclient::max_name_length);
+  }
+
+  {
+    TEST("a client is not old before its hello window starts");
+    multiclient::Client client;  // hello_window_started defaults to false
+    CHECK(!multiclient::client_is_old(client, 1'000'000));
+  }
+
+  {
+    TEST("a client is not old before its hello window has elapsed");
+    multiclient::Client client;
+    client.hello_window_started = true;
+    client.hello_window_start_ms = 1000;
+    CHECK(!multiclient::client_is_old(client, 1000));
+    CHECK(!multiclient::client_is_old(client, 1000 + multiclient::hello_window_ms - 1));
+  }
+
+  {
+    TEST("a client is old once its hello window has elapsed without identifying");
+    multiclient::Client client;
+    client.hello_window_started = true;
+    client.hello_window_start_ms = 1000;
+    CHECK(multiclient::client_is_old(client, 1000 + multiclient::hello_window_ms));
+    CHECK(multiclient::client_is_old(client, 1000 + multiclient::hello_window_ms + 60'000));
+  }
+
+  {
+    TEST("an identified client is never old, however long its window has run");
+    multiclient::Client client;
+    client.hello_window_started = true;
+    client.hello_window_start_ms = 1000;
+    client.identified = true;
+    CHECK(!multiclient::client_is_old(client, 1000 + multiclient::hello_window_ms + 60'000));
+  }
+
+  {
+    TEST("a WiFi client's hello window starts the moment it is admitted");
+    multiclient::ClientTable table;
+    const int index = table.add_wifi(address(1, 2, 3, 4, 1), 5000);
+    const multiclient::Client* client = table.wifi_at(index);
+    CHECK(client->hello_window_started);
+    CHECK(client->hello_window_start_ms == 5000);
+    CHECK(!multiclient::client_is_old(*client, 5000 + multiclient::hello_window_ms - 1));
+    CHECK(multiclient::client_is_old(*client, 5000 + multiclient::hello_window_ms));
+  }
+
+  {
+    TEST("a USB entry's hello window does not start until start_usb_hello_window is called");
+    multiclient::ClientTable table;
+    table.set_usb_present(true, 0);  // present from boot, nothing sent yet
+    const multiclient::Client* usb = table.usb();
+    CHECK(!usb->hello_window_started);
+    CHECK(!multiclient::client_is_old(*usb, 1'000'000));  // never old while idle, however long
+
+    table.start_usb_hello_window(2000);
+    CHECK(table.usb()->hello_window_started);
+    CHECK(table.usb()->hello_window_start_ms == 2000);
+    CHECK(multiclient::client_is_old(*table.usb(), 2000 + multiclient::hello_window_ms));
+
+    // Calling it again once started does not push the deadline back.
+    table.start_usb_hello_window(9000);
+    CHECK(table.usb()->hello_window_start_ms == 2000);
+  }
+
+  {
+    TEST("clear_usb_identity resets identity and the hello window but keeps the slot");
+    multiclient::ClientTable table;
+    table.set_usb_present(true, 0);
+    table.start_usb_hello_window(100);
+    multiclient::set_identity(*table.usb(), 42, "USB", 3);
+
+    table.clear_usb_identity();
+    const multiclient::Client* usb = table.usb();
+    CHECK(usb != nullptr);
+    CHECK(usb->link == multiclient::Link::usb);
+    CHECK(!usb->identified);
+    CHECK(!usb->hello_window_started);
+  }
+
+  {
+    TEST("present_count excludes an idle USB entry but includes a talking one");
+    multiclient::ClientTable table;
+    CHECK(table.present_count() == 0);
+
+    table.set_usb_present(true, 0);
+    CHECK(table.present_count() == 0);  // present, but never talked
+
+    table.start_usb_hello_window(10);
+    CHECK(table.present_count() == 1);
+
+    table.add_wifi(address(1, 1, 1, 1, 1), 0);
+    CHECK(table.present_count() == 2);
+  }
+
+  {
+    TEST("a lone unidentified WiFi client, past its window, is not old-and-not-alone");
+    multiclient::ClientTable table;
+    const int index = table.add_wifi(address(1, 1, 1, 1, 1), 0);
+    const uint32_t later = multiclient::hello_window_ms;
+    CHECK(multiclient::client_is_old(*table.wifi_at(index), later));
+    CHECK(table.present_count() == 1);  // alone: today's behaviour, nothing to enforce
+  }
+
+  {
+    TEST("a second unidentified client makes the first one not-alone");
+    multiclient::ClientTable table;
+    const int first = table.add_wifi(address(1, 1, 1, 1, 1), 0);
+    table.add_wifi(address(2, 2, 2, 2, 2), 0);
+    const uint32_t later = multiclient::hello_window_ms;
+    CHECK(multiclient::client_is_old(*table.wifi_at(first), later));
+    CHECK(table.present_count() == 2);  // not alone
+  }
+
+  {
+    TEST("has_old_client excludes the given WiFi index and, optionally, USB");
+    multiclient::ClientTable table;
+    const int old_index = table.add_wifi(address(1, 1, 1, 1, 1), 0);
+    const uint32_t later = multiclient::hello_window_ms;
+
+    CHECK(table.has_old_client(later));              // the WiFi entry is old
+    CHECK(!table.has_old_client(later, old_index));  // excluded by index, nothing else present
+
+    table.set_usb_present(true, 0);
+    table.start_usb_hello_window(0);
+    CHECK(table.has_old_client(later, old_index));                         // USB is old too, not excluded by default
+    CHECK(!table.has_old_client(later, old_index, /*exclude_usb=*/true));  // both excluded now
+
+    table.remove_wifi(old_index);
+    CHECK(table.has_old_client(later));                          // only USB left, and it's old
+    CHECK(!table.has_old_client(later, -1, /*exclude_usb=*/true));  // USB excluded too: nobody old left
+  }
+
+  {
+    TEST("find_wifi_by_id only matches an identified client, excluding a given index");
+    multiclient::ClientTable table;
+    const int a = table.add_wifi(address(1, 1, 1, 1, 1), 0);
+    const int b = table.add_wifi(address(2, 2, 2, 2, 2), 0);
+    CHECK(table.find_wifi_by_id(42) == -1);  // nobody identified yet
+
+    multiclient::set_identity(*table.wifi_at(a), 42, "A", 1);
+    CHECK(table.find_wifi_by_id(42) == a);
+    CHECK(table.find_wifi_by_id(42, a) == -1);  // excluded
+    CHECK(table.find_wifi_by_id(99) == -1);
+
+    multiclient::set_identity(*table.wifi_at(b), 99, "B", 1);
+    CHECK(table.find_wifi_by_id(99) == b);
+  }
+
+  {
+    TEST("usb_has_id only matches an identified USB entry holding that id");
+    multiclient::ClientTable table;
+    CHECK(!table.usb_has_id(7));
+    table.set_usb_present(true, 0);
+    CHECK(!table.usb_has_id(7));  // present, not identified
+    multiclient::set_identity(*table.usb(), 7, "USB", 3);
+    CHECK(table.usb_has_id(7));
+    CHECK(!table.usb_has_id(8));
   }
 
   std::printf("\n%d checks, %d failures\n", checks, failures);
