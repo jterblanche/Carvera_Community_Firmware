@@ -1,4 +1,5 @@
 [unreleased]
+- Enhancement: A controller can say hello (with a stable id and a display name) and ask who else is connected. The machine tracks who has identified themselves and replies to each with the current list. A client that never says hello within 5 seconds of connecting is treated as before; if another client is already connected, that unidentified one is disconnected. The discovery beacon gains a fifth field marking whether such an old client is present; earlier controllers ignore it and keep working exactly as before.
 - Fixed: with more than one WiFi client connected, every reply went to whichever one connected most recently rather than the one that asked. Each WiFi client now gets its own frame parser and its own replies, and the firmware enforces its own cap of 3 WiFi clients (plus USB) so a 4th is refused by the firmware itself.
 - Enhancement: wifi.max_clients sets how many TCP clients the Wi-Fi module accepts at once, from 1 to 15. The default of 1 keeps today's behaviour; the firmware's own 3-client cap above applies regardless of this setting.
 - Changed: Aborting playback stops queued motion immediately before turning off the spindle.
