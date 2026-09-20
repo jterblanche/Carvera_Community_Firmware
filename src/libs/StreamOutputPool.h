@@ -24,9 +24,18 @@ public:
 
     int puts(const char* s, int size)
     {
+        // Calling through the pool (THEKERNEL->streams->printf/puts) means
+        // every registered stream, by definition -- unlike a specific
+        // gcode's own stream, which targets one link. A multi-client stream
+        // (WifiProvider) uses this flag to broadcast to every client of
+        // its own, rather than whichever one it happens to be mid-dispatch
+        // for when the pool call arrives (see WifiProvider::puts()); a
+        // single-client stream (SerialConsole) has no use for it.
+        const bool was_broadcasting = broadcasting;
+        broadcasting = true;
         int r = 0;
         for(set<StreamOutput*>::iterator i = this->streams.begin(); i != this->streams.end(); i++)
-        {   
+        {
             int k;
             if (communication_protocol == PROTOCOL_SMOOTHIE) {
                 k = (*i)->puts(s);
@@ -37,8 +46,13 @@ public:
             if (k > r)
                 r = k;
         }
+        broadcasting = was_broadcasting;
         return r;
     }
+
+    // True for the duration of the loop above. Save/restore, not a plain
+    // reset to false, in case a stream's puts() somehow re-enters the pool.
+    static bool is_broadcasting() { return broadcasting; }
 
     void append_stream(StreamOutput* stream)
     {
@@ -61,6 +75,7 @@ public:
 
 private:
     set<StreamOutput*> streams;
+    inline static bool broadcasting = false;
 };
 
 #endif

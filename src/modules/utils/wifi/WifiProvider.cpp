@@ -944,8 +944,16 @@ int WifiProvider::puts(const char* s, int size)
 	// notice, or any message the kernel prints on its own -- it goes to
 	// every connected WiFi client instead of "whoever connected most
 	// recently", which is what today's driver call does.
+	//
+	// StreamOutputPool::is_broadcasting() overrides active_reply_client:
+	// output reaching this call through THEKERNEL->streams (the pool) is a
+	// genuine system-wide message -- for example an alarm raised by the
+	// kernel while some other client's command happens to be dispatching --
+	// and must reach every client regardless of whose dispatch is on the
+	// stack at that moment. Without this, an alarm during a blocking
+	// command (a jog, a probe) would go only to the client that started it.
 	const u8* data = reinterpret_cast<const u8*>(s);
-	if (active_reply_client >= 0) {
+	if (active_reply_client >= 0 && !StreamOutputPool::is_broadcasting()) {
 		send_to_wifi_client(active_reply_client, data, total_length);
 	} else {
 		broadcast_to_wifi_clients(data, total_length);
