@@ -532,6 +532,17 @@ int main() {
     CHECK(table.any_identified_present());  // and the exemption stops applying to anyone else
   }
 
+  {
+    TEST("record_heartbeat updates last_heartbeat_ms and nothing else");
+    multiclient::ClientTable table;
+    const int index = table.add_wifi(address(1, 1, 1, 1, 1), 100);
+    multiclient::Client *client = table.wifi_at(index);
+    CHECK(client->last_heartbeat_ms == 100);  // set by add_wifi
+    multiclient::record_heartbeat(*client, 5000);
+    CHECK(client->last_heartbeat_ms == 5000);
+    CHECK(!client->identified);  // a heartbeat never identifies a client
+  }
+
   std::printf("\n%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

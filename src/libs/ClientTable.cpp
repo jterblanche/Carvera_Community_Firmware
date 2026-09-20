@@ -13,6 +13,8 @@ void set_identity(Client& client, uint64_t id, const char* name, uint8_t name_le
   client.identified = true;
 }
 
+void record_heartbeat(Client& client, uint32_t now_ms) { client.last_heartbeat_ms = now_ms; }
+
 bool client_is_old(const Client& client, uint32_t now_ms) {
   if (client.identified) return false;
   if (!client.hello_window_started) return false;
