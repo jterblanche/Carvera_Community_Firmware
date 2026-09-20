@@ -15,6 +15,7 @@ using std::string;
 #include "libs/CRC16.h"
 #include "libs/MakeraControl.h"
 #include "libs/MakeraFrame.h"
+#include "libs/ClientTable.h"
 #include "libs/nuts_bolts.h"
 #include "SerialConsole.h"
 #include "libs/RingBuffer.h"
@@ -96,6 +97,13 @@ void SerialConsole::on_module_loaded() {
 #endif
 
     this->set_rx_enabled(true);
+
+    // USB's own entry in the shared client table (see ClientTable.h), for
+    // the 3 WiFi + 1 USB cap. The firmware cannot detect a USB host (the
+    // chip's native USB is unused; this link is a UART), so unlike a WiFi
+    // socket there is no connect/disconnect event to key this on -- it is
+    // simply always present from boot.
+    multiclient::shared_client_table().set_usb_present(true, us_ticker_read() / 1000);
 
     // We only call the command dispatcher in the main loop, nowhere else
     this->register_for_event(ON_MAIN_LOOP);
