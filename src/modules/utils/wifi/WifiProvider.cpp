@@ -67,7 +67,7 @@
 // connected client as a side effect (see version.txt). Keeping two spare
 // slots above our cap means the module never has to make that choice: the
 // firmware always notices and closes an over-cap connection itself first.
-#define WIFI_MAX_CLIENTS_FLOOR        (multiclient::max_wifi_clients + 2)
+#define WIFI_MAX_CLIENTS_FLOOR        (int(multiclient::max_wifi_clients) + 2)
 #define WIFI_MAX_CLIENTS_DEFAULT      5
 
 #define WIFI_AP_ON_DELAY_S           5
