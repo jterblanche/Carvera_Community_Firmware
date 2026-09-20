@@ -44,6 +44,13 @@
 #define PTYPE_LOAD_FINISH	0x84
 #define PTYPE_LOAD_ERROR	0x85
 #define PTYPE_NORMAL_INFO	0x90
+
+// Identify handshake: a controller says hello and the machine answers,
+// tracking who is connected so they can list each other.
+#define PTYPE_HELLO             0x60
+#define PTYPE_HELLO_ACK         0x61
+#define PTYPE_CLIENT_LIST_REQ   0x63
+#define PTYPE_CLIENT_LIST_REPLY 0x64
 #include <stdint.h>
 
 class PublicData {
