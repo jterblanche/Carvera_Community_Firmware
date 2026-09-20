@@ -90,8 +90,10 @@ class ClientTable {
   Slot usb_;
 };
 
-// One table, shared by the WiFi and USB links, so the 3 WiFi + 1 USB cap is
-// enforced across both.
+// One table, shared by the WiFi and USB links, so both are tracked in one
+// place. The two are independent: the 3-client WiFi cap is enforced only
+// among the WiFi slots (`add_wifi` never looks at `usb_`), and the single
+// USB entry has no cap of its own to enforce -- there is only one USB link.
 ClientTable& shared_client_table();
 
 }  // namespace multiclient
