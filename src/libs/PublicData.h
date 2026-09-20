@@ -49,8 +49,17 @@
 // tracking who is connected so they can list each other.
 #define PTYPE_HELLO             0x60
 #define PTYPE_HELLO_ACK         0x61
+#define PTYPE_HEARTBEAT         0x62
 #define PTYPE_CLIENT_LIST_REQ   0x63
 #define PTYPE_CLIENT_LIST_REPLY 0x64
+
+// Publishing to every identified client, without a request: a system event
+// (upload finished, play started, job ended, alarm/halt) and a command's
+// text or reply, tagged with which client sent it. Status reuses the
+// existing PTYPE_STATUS_RES above instead of a new type -- see the
+// protocol contract's message catalogue.
+#define PTYPE_EVENT             0x68
+#define PTYPE_PUBLISHED_LINE    0x69
 #include <stdint.h>
 
 class PublicData {
