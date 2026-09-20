@@ -11,6 +11,7 @@
 using namespace std;
 #include <set>
 #include <string>
+#include <cstdint>
 #include <cstdio>
 #include <cstdarg>
 
@@ -53,6 +54,18 @@ public:
     // True for the duration of the loop above. Save/restore, not a plain
     // reset to false, in case a stream's puts() somehow re-enters the pool.
     static bool is_broadcasting() { return broadcasting; }
+
+    // Reaches every registered stream's own publish_multiclient() override,
+    // so a fact discovered in one place (Player.cpp, a halt handler) reaches
+    // every transport's identified clients, not just whichever one caused
+    // it. See StreamOutput::publish_multiclient().
+    void publish_multiclient(char cmd, const uint8_t* payload, size_t length)
+    {
+        for(set<StreamOutput*>::iterator i = this->streams.begin(); i != this->streams.end(); i++)
+        {
+            (*i)->publish_multiclient(cmd, payload, length);
+        }
+    }
 
     void append_stream(StreamOutput* stream)
     {

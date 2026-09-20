@@ -13,6 +13,8 @@ void set_identity(Client& client, uint64_t id, const char* name, uint8_t name_le
   client.identified = true;
 }
 
+void record_heartbeat(Client& client, uint32_t now_ms) { client.last_heartbeat_ms = now_ms; }
+
 bool client_is_old(const Client& client, uint32_t now_ms) {
   if (client.identified) return false;
   if (!client.hello_window_started) return false;
@@ -53,6 +55,25 @@ int ClientTable::add_wifi(const Address& address, uint32_t now_ms) {
     return static_cast<int>(i);
   }
   return -1;
+}
+
+bool send_error_means_client_gone(uint8_t errcode) {
+  return errcode == 0x14   // connection by link_no not present
+      || errcode == 0x15   // connection by link_no closed
+      || errcode == 0x1A;  // no such client
+}
+
+void note_send_result(Client& client, bool sent_everything, uint8_t errcode) {
+  if (sent_everything) {
+    client.consecutive_send_failures = 0;
+    return;
+  }
+  if (send_error_means_client_gone(errcode)) {
+    client.send_failed = true;
+    return;
+  }
+  if (client.consecutive_send_failures < 0xFF) ++client.consecutive_send_failures;
+  if (client.consecutive_send_failures >= max_consecutive_send_failures) client.send_failed = true;
 }
 
 bool ClientTable::remove_wifi(int index) {

@@ -57,6 +57,11 @@
 #define max_clients_checksum			  CHECKSUM("max_clients")
 #define ap_auto_disable_checksum          CHECKSUM("ap_auto_disable")
 
+// Governs both WiFi and USB -- see the protocol contract, "Limits and
+// settings" -- so it lives in its own namespace rather than under "wifi.".
+#define multi_client_checksum             CHECKSUM("multi_client")
+#define status_publish_hz_checksum        CHECKSUM("status_publish_hz")
+
 // the module accepts 1 to 15 simultaneous TCP clients on a server link
 #define WIFI_MAX_CLIENTS_MIN         1
 #define WIFI_MAX_CLIENTS_MAX         15
@@ -87,6 +92,7 @@ WifiProvider::WifiProvider()
 	wifi_seconds = 0;
 	sta_flap_count = 0;
 	ap_hold_remaining_s = 0;
+	status_publish_interval_ms = multiclient::status_publish_interval_ms(multiclient::default_status_publish_hz);
 	ap_auto_disable = true;
 	ap_currently_on = true;
 	ap_manually_disabled = false;
@@ -125,6 +131,12 @@ void WifiProvider::on_module_loaded()
 			std::clamp(configured_max_clients, WIFI_MAX_CLIENTS_MIN, WIFI_MAX_CLIENTS_MAX));
 	}
 	this->max_clients = std::clamp(configured_max_clients, WIFI_MAX_CLIENTS_MIN, WIFI_MAX_CLIENTS_MAX);
+	// multi_client., not wifi. -- this also governs the USB entry's own
+	// proactive status publish (SerialConsole).
+	int configured_publish_hz =
+		THEKERNEL->config->value(multi_client_checksum, status_publish_hz_checksum)->as_int(multiclient::default_status_publish_hz);
+	if (configured_publish_hz < 0) configured_publish_hz = multiclient::default_status_publish_hz;
+	this->status_publish_interval_ms = multiclient::status_publish_interval_ms(static_cast<uint16_t>(configured_publish_hz));
 	std::string config_name = THEKERNEL->config->value(wifi_checksum, machine_name_checksum)->as_string("CARVERA");
 	this->ap_auto_disable = THEKERNEL->config->value(wifi_checksum, ap_auto_disable_checksum)->as_bool(true);
     strncpy(this->machine_name, config_name.c_str(), sizeof(this->machine_name) - 1);
@@ -390,6 +402,12 @@ void WifiProvider::receive_wifi_data() {
 				continue;
 			}
 
+			if (packet.type == PTYPE_HEARTBEAT) {
+				multiclient::Client *self = multiclient::shared_client_table().wifi_at(client_index);
+				if (self != nullptr) multiclient::record_heartbeat(*self, now_ms);
+				continue;
+			}
+
 			if (packet.type != PTYPE_CTRL_MULTI && packet.type != PTYPE_FILE_START) continue;
 
 			if (packet.data_length == 0) {
@@ -455,9 +473,21 @@ void WifiProvider::disconnect_wifi_client(const multiclient::Address& address, c
 	}
 }
 
-void WifiProvider::send_to_wifi_client(int client_index, const u8* data, size_t length) {
-	const multiclient::Client *client = multiclient::shared_client_table().wifi_at(client_index);
-	if (client == nullptr) return;
+// Sends `data` to one WiFi client, and reports what happened so the caller
+// can tell a lost message from a lost client.
+//
+// A frame is never split here in practice: WIFI_DATA_MAX_SIZE is a whole TCP
+// segment (1460 B) and every message this firmware publishes is a few
+// hundred bytes, so the loop runs exactly once. The loop remains for the
+// point-to-point reply path, which can carry more.
+//
+// The driver's status word carries an error code in its low byte, and the
+// header documents it as meaningful only when an error was encountered, so
+// it is read only when the send came up short. Reading it after a full send
+// would act on a stale value and drop a client that is perfectly fine.
+WifiProvider::SendOutcome WifiProvider::send_to_wifi_client(int client_index, const u8* data, size_t length) {
+	multiclient::Client *client = multiclient::shared_client_table().wifi_at(client_index);
+	if (client == nullptr) return SendOutcome::dropped;
 	char ip_str[16];
 	snprintf(ip_str, sizeof(ip_str), "%u.%u.%u.%u",
 		client->address.ip[0], client->address.ip[1], client->address.ip[2], client->address.ip[3]);
@@ -469,8 +499,20 @@ void WifiProvider::send_to_wifi_client(int client_index, const u8* data, size_t 
 		const u16 sent = M8266WIFI_SPI_Send_Data_to_TcpClient(
 			const_cast<u8*>(data + sent_index), static_cast<u16>(chunk), tcp_link_no, ip_str, client->address.port, &status);
 		sent_index += sent;
-		if (sent != chunk) break;
+		if (sent != chunk) {
+			// The decision itself lives in ClientTable, away from the module
+			// and the Kernel, so it can be tested on the host: which error
+			// codes mean gone, and how long a run of temporary failures is
+			// allowed to go on. All this does is flag the client -- removing
+			// it here would invalidate the index of whichever caller is
+			// walking the table right now. reconcile_wifi_clients() reaps it
+			// on its next pass.
+			multiclient::note_send_result(*client, false, static_cast<uint8_t>(status & 0xFF));
+			return sent_index == 0 ? SendOutcome::dropped : SendOutcome::truncated;
+		}
 	}
+	multiclient::note_send_result(*client, true, 0);
+	return SendOutcome::sent_all;
 }
 
 void WifiProvider::broadcast_to_wifi_clients(const u8* data, size_t length) {
@@ -496,6 +538,82 @@ void WifiProvider::broadcast_to_identified_wifi_clients(const u8* data, size_t l
 			send_to_wifi_client(static_cast<int>(i), data, length);
 		}
 	}
+}
+
+// Builds one frame from cmd+payload (the same layout as PacketMessage(),
+// duplicated rather than shared with it: PacketMessage() always sends
+// through puts(), which for Makera mode means "the current reply target, or
+// broadcast to every connected client" -- neither of those is what a
+// publish wants, which is always every *identified* client regardless of
+// whatever active_reply_client currently holds). Reuses the same file-scope
+// fbuff PacketMessage() uses; safe because every caller of this function
+// finishes sending before returning, so two builds into fbuff never
+// overlap in time (the same assumption the rest of this file already
+// depends on for fbuff and xbuff).
+void WifiProvider::send_framed_to_identified_wifi_clients(char cmd, const uint8_t* payload, size_t length) {
+	fbuff[0] = (HEADER >> 8) & 0xFF;
+	fbuff[1] = HEADER & 0xFF;
+	fbuff[4] = cmd;
+	if (length != 0) memcpy(&fbuff[5], payload, length);
+	const unsigned int len = static_cast<unsigned int>(length) + 3;
+	fbuff[2] = (len >> 8) & 0xFF;
+	fbuff[3] = len & 0xFF;
+	const int crc = crc16::ccitt(&fbuff[2], len);
+	fbuff[length + 5] = (crc >> 8) & 0xFF;
+	fbuff[length + 6] = crc & 0xFF;
+	fbuff[length + 7] = (FOOTER >> 8) & 0xFF;
+	fbuff[length + 8] = FOOTER & 0xFF;
+	broadcast_to_identified_wifi_clients(fbuff, len + 6);
+}
+
+// Proactive status publish (contract section 6.9), at the configured rate,
+// to every identified WiFi client -- on top of, not instead of, the
+// existing per-client query_flag reply above. Naturally pauses during an
+// upload: this whole function is only reached from on_idle()'s Makera-mode
+// branch, and on_idle() already returns immediately if
+// THEKERNEL->is_uploading() (see the top of on_idle()).
+void WifiProvider::publish_status_if_due(uint32_t now_ms) {
+	if (!multiclient::publish_due(now_ms, last_status_publish_ms, status_publish_interval_ms)) return;
+	last_status_publish_ms = now_ms;
+	const std::string status = THEKERNEL->get_query_string();
+	send_framed_to_identified_wifi_clients(PTYPE_STATUS_RES, reinterpret_cast<const uint8_t *>(status.c_str()),
+	                                        status.size());
+}
+
+// Publishes `text` (a command's own text, or its reply) as one or more
+// published-console-line fragments (protocol contract section 6.10),
+// tagged with client_index's id/name, to every identified client across
+// every transport -- see StreamOutput::publish_multiclient() and
+// StreamOutputPool::publish_multiclient().
+void WifiProvider::publish_console_line(int client_index, const char* text, size_t length) {
+	const multiclient::Client *client = multiclient::shared_client_table().wifi_at(client_index);
+	if (client == nullptr) return;
+
+	// A do/while, not a while: an empty line (length 0) is still one
+	// published line, with one empty-text fragment, not zero fragments.
+	uint8_t frame[8 + 1 + multiclient::max_name_length + 1 + multiclient::max_console_line_text_bytes];
+	size_t offset = 0;
+	do {
+		const size_t chunk_length = multiclient::console_line_chunk_length(length - offset);
+		const bool more = multiclient::console_line_has_more(length - offset, chunk_length);
+		const size_t frame_length = multiclient::build_console_line_frame(
+			client->id, client->name, client->name_len, text + offset, chunk_length, more, frame, sizeof(frame));
+		if (frame_length == 0) return; // should not happen: frame is sized for the worst case
+		THEKERNEL->streams->publish_multiclient(PTYPE_PUBLISHED_LINE, frame, frame_length);
+		offset += chunk_length;
+	} while (offset < length);
+}
+
+// Reached through THEKERNEL->streams->publish_multiclient() (see
+// libs/StreamOutputPool.h), so this is called once per publish regardless
+// of which transport, or which module (Player.cpp is the one that
+// discovers an event -- see its on_halt()/on_second_tick(), and
+// upload_command()/play_command()), triggered it. Sends to this
+// transport's own identified WiFi clients; a lone unidentified client
+// never sees any of this, same as it never saw the messages #17 added.
+void WifiProvider::publish_multiclient(char cmd, const uint8_t* payload, size_t length) {
+	if (communication_protocol != PROTOCOL_MAKERA) return;
+	send_framed_to_identified_wifi_clients(cmd, payload, length);
 }
 
 // Sends a framed reply addressed to `client_index` regardless of whatever
@@ -656,6 +774,23 @@ void WifiProvider::forget_wifi_client(int client_index) {
 // indefinitely and push the driver toward its own client limit.
 void WifiProvider::reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_clients[]) {
 	auto &table = multiclient::shared_client_table();
+
+	// First, reap anyone a send has already proved is gone. send_to_wifi_client()
+	// only flags them, because it runs while a caller is walking this same
+	// table. Doing the removal here keeps every removal in one place, and
+	// means a client whose socket died is dropped on the next tick rather
+	// than being published to at 5 Hz forever.
+	//
+	// The module may still list such a client as connected for a moment, so
+	// this runs ahead of the present/absent comparison below rather than
+	// relying on it.
+	for (int i = 0; i < static_cast<int>(multiclient::max_wifi_clients); ++i) {
+		multiclient::Client *client = table.wifi_at(i);
+		if (client == nullptr || !client->send_failed) continue;
+		disconnect_wifi_client(client->address, "the machine could no longer send to it", false);
+		table.remove_wifi(i);
+		forget_wifi_client(i);
+	}
 
 	for (int i = 0; i < static_cast<int>(multiclient::max_wifi_clients); ++i) {
 		const multiclient::Client *client = table.wifi_at(i);
@@ -957,6 +1092,8 @@ void WifiProvider::on_idle(void *argument)
 			puts(THEKERNEL->get_diagnose_string().c_str(), 0);
 		}
 	} else {
+		publish_status_if_due(us_ticker_read() / 1000);
+
 		// Each WiFi client polls independently, so its query/diagnose reply
 		// must go back to that client, not whichever one is handled first.
 		for (size_t i = 0; i < multiclient::max_wifi_clients; ++i) {
@@ -1012,6 +1149,14 @@ void WifiProvider::on_main_loop(void *argument)
 			message.message.assign(reinterpret_cast<const char *>(packet.data), packet.data_length);
 			message.stream = this;
 			message.line = 0;
+
+			// Publish the command's own text before dispatching it, tagged
+			// with its source -- only for an ordinary command (PTYPE_CTRL_MULTI):
+			// a file-transfer start (PTYPE_FILE_START) is not text and stays
+			// point to point (protocol contract section 6.10).
+			if (packet.type == PTYPE_CTRL_MULTI) {
+				publish_console_line(client_index, message.message.c_str(), message.message.size());
+			}
 
 			command_waiting = false;
 			command_waiting_client = -1;
@@ -1091,8 +1236,23 @@ void WifiProvider::PacketMessage(char cmd, const char* s, int size)
 	fbuff[total_length+6] = crc&0xFF;
 	fbuff[total_length+7] = (FOOTER>>8)&0xFF;
 	fbuff[total_length+8] = FOOTER&0xFF;
-	
+
 	puts((char *)fbuff, len+6);
+
+	// Publish a targeted command reply to every identified client, tagged
+	// with the client it was for. Gated the same way puts() itself decides
+	// "targeted vs. broadcast" (active_reply_client, StreamOutputPool::
+	// is_broadcasting()), and further to PTYPE_NORMAL_INFO: the type every
+	// ordinary command reply (an "ok", an error, ls/cat output, ...) is sent
+	// as (see WifiProvider::printf()/printfcmd()). This excludes the status
+	// and diagnose replies (their own thing, published separately at
+	// PTYPE_STATUS_RES already), hello ack, the client-list reply and the
+	// file-transfer cancel "ok" -- none of those are the command/reply text
+	// section 6.10 means.
+	if (cmd == PTYPE_NORMAL_INFO && communication_protocol == PROTOCOL_MAKERA &&
+	    active_reply_client >= 0 && !StreamOutputPool::is_broadcasting()) {
+		publish_console_line(active_reply_client, s, total_length);
+	}
 }
 
 int WifiProvider::printfcmd(const char cmd, const char *format, ...)

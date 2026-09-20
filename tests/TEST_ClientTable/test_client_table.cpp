@@ -532,6 +532,102 @@ int main() {
     CHECK(table.any_identified_present());  // and the exemption stops applying to anyone else
   }
 
+  {
+    TEST("record_heartbeat updates last_heartbeat_ms and nothing else");
+    multiclient::ClientTable table;
+    const int index = table.add_wifi(address(1, 1, 1, 1, 1), 100);
+    multiclient::Client *client = table.wifi_at(index);
+    CHECK(client->last_heartbeat_ms == 100);  // set by add_wifi
+    multiclient::record_heartbeat(*client, 5000);
+    CHECK(client->last_heartbeat_ms == 5000);
+    CHECK(!client->identified);  // a heartbeat never identifies a client
+  }
+
+  {
+    TEST("only the error codes that mean gone mean gone");
+    // The codes the driver documents as the client no longer being there.
+    CHECK(multiclient::send_error_means_client_gone(0x14));  // connection not present
+    CHECK(multiclient::send_error_means_client_gone(0x15));  // connection closed
+    CHECK(multiclient::send_error_means_client_gone(0x1A));  // no such client
+
+    // The one that matters most: a full send buffer is what a healthy
+    // client hits under load. Dropping anyone for it would disconnect
+    // people for being busy, exactly when the machine is publishing hardest.
+    CHECK(!multiclient::send_error_means_client_gone(0x12));
+    CHECK(!multiclient::send_error_means_client_gone(0x10));  // SPI buffer timeout
+    CHECK(!multiclient::send_error_means_client_gone(0x11));  // send timeout
+    CHECK(!multiclient::send_error_means_client_gone(0x1D));  // still connecting
+
+    // Our own mistakes, not the client's.
+    CHECK(!multiclient::send_error_means_client_gone(0x13));  // wrong link number
+    CHECK(!multiclient::send_error_means_client_gone(0x19));  // wrong link type
+    CHECK(!multiclient::send_error_means_client_gone(0x1F));  // unspecified
+    CHECK(!multiclient::send_error_means_client_gone(0x00));  // no error at all
+  }
+
+  {
+    TEST("a send that says the client is gone marks it at once");
+    multiclient::ClientTable table;
+    const int index = table.add_wifi(address(1, 1, 1, 1, 1), 0);
+    multiclient::Client *client = table.wifi_at(index);
+    CHECK(!client->send_failed);
+    multiclient::note_send_result(*client, false, 0x15);
+    CHECK(client->send_failed);
+    // One such error is enough; it does not wait for a run of them.
+    CHECK(client->consecutive_send_failures == 0);
+  }
+
+  {
+    TEST("a busy client survives a long run of full buffers, but not an endless one");
+    multiclient::ClientTable table;
+    const int index = table.add_wifi(address(1, 1, 1, 1, 1), 0);
+    multiclient::Client *client = table.wifi_at(index);
+
+    for (uint8_t i = 1; i < multiclient::max_consecutive_send_failures; ++i) {
+      multiclient::note_send_result(*client, false, 0x12);
+      CHECK(!client->send_failed);  // still just busy, all the way to the last one
+    }
+    // The one that tips it over: this client has accepted nothing for the
+    // whole window, which no client that is reading at all ever does.
+    multiclient::note_send_result(*client, false, 0x12);
+    CHECK(client->send_failed);
+  }
+
+  {
+    TEST("one good send clears the run, so back-pressure never accumulates");
+    multiclient::ClientTable table;
+    const int index = table.add_wifi(address(1, 1, 1, 1, 1), 0);
+    multiclient::Client *client = table.wifi_at(index);
+
+    for (uint8_t i = 0; i < multiclient::max_consecutive_send_failures - 1; ++i) {
+      multiclient::note_send_result(*client, false, 0x12);
+    }
+    CHECK(client->consecutive_send_failures == multiclient::max_consecutive_send_failures - 1);
+
+    multiclient::note_send_result(*client, true, 0);
+    CHECK(client->consecutive_send_failures == 0);
+    CHECK(!client->send_failed);
+
+    // And from there it takes the full run again, not one more.
+    for (uint8_t i = 0; i < multiclient::max_consecutive_send_failures - 1; ++i) {
+      multiclient::note_send_result(*client, false, 0x12);
+      CHECK(!client->send_failed);
+    }
+  }
+
+  {
+    TEST("a reused slot starts clean");
+    multiclient::ClientTable table;
+    const int index = table.add_wifi(address(1, 1, 1, 1, 1), 0);
+    multiclient::note_send_result(*table.wifi_at(index), false, 0x15);
+    CHECK(table.wifi_at(index)->send_failed);
+
+    table.remove_wifi(index);
+    const int reused = table.add_wifi(address(2, 2, 2, 2, 2), 1000);
+    CHECK(!table.wifi_at(reused)->send_failed);
+    CHECK(table.wifi_at(reused)->consecutive_send_failures == 0);
+  }
+
   std::printf("\n%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

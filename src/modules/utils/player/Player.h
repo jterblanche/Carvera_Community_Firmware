@@ -150,6 +150,22 @@ class Player : public Module {
         unsigned long last_played_lines;
         unsigned int last_percent_complete;
         unsigned long last_elapsed_secs;
+        // Set from playing_file at the end of every on_second_tick(), so the
+        // next tick can tell a false transition (playback just stopped, for
+        // any reason -- finished, aborted, halted) from "still not
+        // playing". Drives the job-ended event (protocol contract section
+        // 6.8); see on_second_tick().
+        bool last_published_playing = false;
+        // Set from THEKERNEL->is_halted() at the end of every
+        // on_second_tick(), the same way, so the next tick can publish the
+        // alarm/halt event on entering halt exactly once. Read one tick
+        // later rather than from on_halt() itself, because several call
+        // sites (Robot.cpp among them) call THEKERNEL->call_event(ON_HALT,...)
+        // -- which runs every registered module's on_halt() synchronously --
+        // *before* THEKERNEL->set_halt_reason(...), so the reason is not
+        // yet meaningful inside on_halt() at every call site; by the next
+        // tick it always is.
+        bool last_published_halted = false;
         uint8_t current_motion_mode;
         float saved_position[3]; // only saves XYZ
         float saved_spindle_rpm;
