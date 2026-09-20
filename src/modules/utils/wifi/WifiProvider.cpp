@@ -816,9 +816,16 @@ void WifiProvider::on_idle(void *argument)
 		} else {
 			// Halt affects every connected controller, not just whoever
 			// caused it (or nobody, if the kernel raised it on its own), so
-			// this goes to every client: active_reply_client is already -1
-			// here, which is what makes puts() broadcast.
+			// this must broadcast -- active_reply_client is NOT reliably -1
+			// here: this whole function can run nested inside another
+			// client's dispatch (a jog loop calls ON_IDLE every iteration),
+			// in which case it's that client's index. Force it to -1 for
+			// this one message, then restore, the same as the other
+			// save/restore sites above.
+			const int saved_reply_client = active_reply_client;
+			active_reply_client = -1;
 			PacketMessage(PTYPE_NORMAL_INFO, "ERROR: Abort during cycle\r\n", 0);
+			active_reply_client = saved_reply_client;
 		}
     }
 }
