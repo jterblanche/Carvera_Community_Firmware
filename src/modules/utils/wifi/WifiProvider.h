@@ -78,7 +78,7 @@ private:
     // Makera-mode per-client routing. `client_index` is a slot in
     // `wifi_streams`/the shared ClientTable's WiFi entries, in [0, max_wifi_clients).
     int route_makera_client(const u8 remote_ip[4], u16 remote_port, uint32_t now_ms);
-    void disconnect_wifi_client(const multiclient::Address& address, const char* reason);
+    void disconnect_wifi_client(const multiclient::Address& address, const char* reason, bool log = true);
     void send_to_wifi_client(int client_index, const u8* data, size_t length);
     void broadcast_to_wifi_clients(const u8* data, size_t length);
     void reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_clients[]);
@@ -170,6 +170,14 @@ private:
     int pending_wifi_client = -1;
     uint16_t pending_wifi_offset = 0;
     uint16_t pending_wifi_count = 0;
+
+    // Addresses already logged as refused-but-still-present by
+    // reconcile_wifi_clients(), so a disconnect call that the WiFi module
+    // doesn't honour doesn't repeat the same log line every second. See
+    // reconcile_wifi_clients() in WifiProvider.cpp.
+    static constexpr size_t max_logged_refusals = 4;
+    multiclient::Address logged_refusals[max_logged_refusals];
+    uint8_t logged_refusal_count = 0;
 };
 
 #endif /* WIFIPROVIDER_H_ */

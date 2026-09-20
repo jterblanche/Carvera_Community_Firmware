@@ -427,8 +427,10 @@ void WifiProvider::disconnect_wifi_client(const multiclient::Address& address, c
 	victim.remote_port = address.port;
 	u16 status = 0;
 	M8266WIFI_SPI_Disconnect_TcpClient(tcp_link_no, &victim, &status);
-	THEKERNEL->streams->printf("WIFI: closed a connection from %u.%u.%u.%u:%u (%s)\n",
-		address.ip[0], address.ip[1], address.ip[2], address.ip[3], address.port, reason);
+	if (log) {
+		THEKERNEL->streams->printf("WIFI: closed a connection from %u.%u.%u.%u:%u (%s)\n",
+			address.ip[0], address.ip[1], address.ip[2], address.ip[3], address.port, reason);
+	}
 }
 
 void WifiProvider::send_to_wifi_client(int client_index, const u8* data, size_t length) {
@@ -514,13 +516,35 @@ void WifiProvider::reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_
 		forget_wifi_client(i);
 	}
 
-	if (table.wifi_count() < multiclient::max_wifi_clients) return;
+	if (table.wifi_count() < multiclient::max_wifi_clients) {
+		// There's room again; a straggler seen later is a fresh situation,
+		// worth its own log line if it recurs.
+		logged_refusal_count = 0;
+		return;
+	}
 	for (uint8_t j = 0; j < client_num; ++j) {
 		multiclient::Address seen;
 		memcpy(seen.ip, remote_clients[j].remote_ip, sizeof(seen.ip));
 		seen.port = remote_clients[j].remote_port;
 		if (table.find_wifi(seen) >= 0) continue; // already ours
-		disconnect_wifi_client(seen, "beyond the 3-client cap, never admitted");
+
+		bool already_logged = false;
+		for (uint8_t k = 0; k < logged_refusal_count; ++k) {
+			if (multiclient::same_address(logged_refusals[k], seen)) {
+				already_logged = true;
+				break;
+			}
+		}
+		// Retry the disconnect every tick -- it's cheap, and this is exactly
+		// the case where it might not be working -- but only log it once per
+		// address, in case it isn't: the module still showing this
+		// connection next tick doesn't necessarily mean the call failed
+		// (there's a short delay either way), but repeating either way would
+		// spam the console every second for as long as the module holds it.
+		disconnect_wifi_client(seen, "beyond the 3-client cap, never admitted", !already_logged);
+		if (!already_logged && logged_refusal_count < max_logged_refusals) {
+			logged_refusals[logged_refusal_count++] = seen;
+		}
 	}
 }
 
@@ -858,6 +882,7 @@ void WifiProvider::on_protocol_changed()
 	command_waiting_client = -1;
 	active_reply_client = -1;
 	pending_wifi_client = -1;
+	logged_refusal_count = 0;
 	for (size_t i = 0; i < multiclient::max_wifi_clients; ++i) wifi_streams[i].clear();
 	// M485 switches the protocol for the whole link. Every WiFi client's
 	// parser state is for the protocol that just ended, so none of it means
