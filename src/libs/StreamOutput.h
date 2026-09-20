@@ -9,6 +9,8 @@
 #define STREAMOUTPUT_H
 
 #include <cstdarg>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <stdio.h>
 
@@ -41,6 +43,14 @@ class StreamOutput {
         virtual bool frames_protocol_output() const { return false; }
         virtual void on_protocol_changed() {}
         virtual int printfcmd(const char cmd, const char *format, ...) __attribute__ ((format(printf, 3, 4)));
+
+        // Publishes `payload` (a frame of type `cmd`, already encoded --
+        // see libs/Publish.h) to this stream's own identified clients, if
+        // it has any. Called through THEKERNEL->streams so it reaches every
+        // transport at once (libs/StreamOutputPool.h); a stream that has no
+        // notion of "identified clients" (a log file, the pool itself)
+        // leaves the default no-op.
+        virtual void publish_multiclient(char cmd, const uint8_t *payload, std::size_t length) { (void)cmd; (void)payload; (void)length; }
 
         static NullStreamOutput NullStream;
         void PacketMessage(char cmd, const char* s, int size);
