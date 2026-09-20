@@ -515,8 +515,16 @@ void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, u
 	if (!self->identified) {
 		const int stale = table.find_wifi_by_id(hello.id, client_index);
 		if (stale >= 0) {
+			// Close the stale connection at the driver too, not just our own
+			// bookkeeping -- otherwise it lingers as a zombie in the WiFi
+			// module's own client list until the module's own idle timeout
+			// reaps it, holding one of the module's connection slots for no
+			// reason. Read the address before forgetting it: remove_wifi()
+			// clears the slot.
+			const multiclient::Address stale_address = table.wifi_at(stale)->address;
 			forget_wifi_client(stale);
 			table.remove_wifi(stale);
+			disconnect_wifi_client(stale_address, "reconnected under the same id");
 		} else if (table.usb_has_id(hello.id)) {
 			table.clear_usb_identity();
 		}
