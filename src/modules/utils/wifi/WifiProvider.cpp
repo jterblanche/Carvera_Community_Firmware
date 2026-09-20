@@ -461,9 +461,21 @@ void WifiProvider::disconnect_wifi_client(const multiclient::Address& address, c
 	}
 }
 
-void WifiProvider::send_to_wifi_client(int client_index, const u8* data, size_t length) {
-	const multiclient::Client *client = multiclient::shared_client_table().wifi_at(client_index);
-	if (client == nullptr) return;
+// Sends `data` to one WiFi client, and reports what happened so the caller
+// can tell a lost message from a lost client.
+//
+// A frame is never split here in practice: WIFI_DATA_MAX_SIZE is a whole TCP
+// segment (1460 B) and every message this firmware publishes is a few
+// hundred bytes, so the loop runs exactly once. The loop remains for the
+// point-to-point reply path, which can carry more.
+//
+// The driver's status word carries an error code in its low byte, and the
+// header documents it as meaningful only when an error was encountered, so
+// it is read only when the send came up short. Reading it after a full send
+// would act on a stale value and drop a client that is perfectly fine.
+WifiProvider::SendOutcome WifiProvider::send_to_wifi_client(int client_index, const u8* data, size_t length) {
+	multiclient::Client *client = multiclient::shared_client_table().wifi_at(client_index);
+	if (client == nullptr) return SendOutcome::dropped;
 	char ip_str[16];
 	snprintf(ip_str, sizeof(ip_str), "%u.%u.%u.%u",
 		client->address.ip[0], client->address.ip[1], client->address.ip[2], client->address.ip[3]);
@@ -475,8 +487,20 @@ void WifiProvider::send_to_wifi_client(int client_index, const u8* data, size_t 
 		const u16 sent = M8266WIFI_SPI_Send_Data_to_TcpClient(
 			const_cast<u8*>(data + sent_index), static_cast<u16>(chunk), tcp_link_no, ip_str, client->address.port, &status);
 		sent_index += sent;
-		if (sent != chunk) break;
+		if (sent != chunk) {
+			// The decision itself lives in ClientTable, away from the module
+			// and the Kernel, so it can be tested on the host: which error
+			// codes mean gone, and how long a run of temporary failures is
+			// allowed to go on. All this does is flag the client -- removing
+			// it here would invalidate the index of whichever caller is
+			// walking the table right now. reconcile_wifi_clients() reaps it
+			// on its next pass.
+			multiclient::note_send_result(*client, false, static_cast<uint8_t>(status & 0xFF));
+			return sent_index == 0 ? SendOutcome::dropped : SendOutcome::truncated;
+		}
 	}
+	multiclient::note_send_result(*client, true, 0);
+	return SendOutcome::sent_all;
 }
 
 void WifiProvider::broadcast_to_wifi_clients(const u8* data, size_t length) {
@@ -738,6 +762,23 @@ void WifiProvider::forget_wifi_client(int client_index) {
 // indefinitely and push the driver toward its own client limit.
 void WifiProvider::reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_clients[]) {
 	auto &table = multiclient::shared_client_table();
+
+	// First, reap anyone a send has already proved is gone. send_to_wifi_client()
+	// only flags them, because it runs while a caller is walking this same
+	// table. Doing the removal here keeps every removal in one place, and
+	// means a client whose socket died is dropped on the next tick rather
+	// than being published to at 5 Hz forever.
+	//
+	// The module may still list such a client as connected for a moment, so
+	// this runs ahead of the present/absent comparison below rather than
+	// relying on it.
+	for (int i = 0; i < static_cast<int>(multiclient::max_wifi_clients); ++i) {
+		multiclient::Client *client = table.wifi_at(i);
+		if (client == nullptr || !client->send_failed) continue;
+		disconnect_wifi_client(client->address, "the machine could no longer send to it", false);
+		table.remove_wifi(i);
+		forget_wifi_client(i);
+	}
 
 	for (int i = 0; i < static_cast<int>(multiclient::max_wifi_clients); ++i) {
 		const multiclient::Client *client = table.wifi_at(i);

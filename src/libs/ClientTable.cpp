@@ -57,6 +57,25 @@ int ClientTable::add_wifi(const Address& address, uint32_t now_ms) {
   return -1;
 }
 
+bool send_error_means_client_gone(uint8_t errcode) {
+  return errcode == 0x14   // connection by link_no not present
+      || errcode == 0x15   // connection by link_no closed
+      || errcode == 0x1A;  // no such client
+}
+
+void note_send_result(Client& client, bool sent_everything, uint8_t errcode) {
+  if (sent_everything) {
+    client.consecutive_send_failures = 0;
+    return;
+  }
+  if (send_error_means_client_gone(errcode)) {
+    client.send_failed = true;
+    return;
+  }
+  if (client.consecutive_send_failures < 0xFF) ++client.consecutive_send_failures;
+  if (client.consecutive_send_failures >= max_consecutive_send_failures) client.send_failed = true;
+}
+
 bool ClientTable::remove_wifi(int index) {
   if (index < 0 || static_cast<std::size_t>(index) >= max_wifi_clients || !wifi_[index].in_use) return false;
   wifi_[index] = Slot{};

@@ -68,7 +68,51 @@ struct Client {
   // present once it is actually talking.
   bool hello_window_started = false;
   uint32_t hello_window_start_ms = 0;
+
+  // Set when a send to this client fails in a way that means the client is
+  // gone, rather than merely busy. Nothing is removed from the table here:
+  // sends happen while a caller is iterating the table, so removing from
+  // inside one would invalidate that caller's index. The reaping pass
+  // (WifiProvider::reconcile_wifi_clients) clears it out on its next run,
+  // which keeps every removal in one place.
+  bool send_failed = false;
+
+  // Consecutive sends to this client that went nowhere for a reason that is
+  // normally temporary, such as the module's send buffer being full. One or
+  // two of these is ordinary back-pressure and means nothing. A client that
+  // never drains, though, looks exactly the same from here and is
+  // effectively gone, so the count is what tells the two apart. Reset to 0
+  // by any send that fully succeeds.
+  uint8_t consecutive_send_failures = 0;
 };
+
+// How many consecutive temporary send failures mark a client as gone. At
+// the default status rate of 5 Hz this is about four seconds of a client
+// never accepting a byte, which no healthy client does: the module's buffer
+// is declared full at 5 KB or 8 queued packets, and a client that is
+// reading at all clears that within one or two ticks.
+constexpr uint8_t max_consecutive_send_failures = 20;
+
+// True for the WiFi module's own error codes that mean this client is gone,
+// rather than merely busy. Which codes are absent matters as much as which
+// are present. 0x12 ("module sending buffer full", which the driver declares
+// at 5 KB queued or 8 queued packets) is the one a perfectly healthy client
+// hits under load, precisely when the machine is publishing hardest, so
+// treating it as a dead client would disconnect people for being busy. 0x10
+// and 0x11 are timeouts waiting on the module, and 0x1D is "connection is
+// being established, please wait" -- all temporary. 0x13 and 0x19 are a
+// wrong link number and a wrong link type: mistakes on our side, not the
+// client's, so they must not drop anyone either.
+bool send_error_means_client_gone(uint8_t errcode);
+
+// Records the outcome of one send to `client`. A send that delivered
+// everything clears the run of failures. A send that did not either marks
+// the client gone outright, when the error says so, or counts towards
+// max_consecutive_send_failures, which catches the client that is not
+// reading at all: temporary in kind, but unending in practice, and
+// invisible to the module's own dead-client timer because that timer counts
+// what a client sends us, never what it accepts from us.
+void note_send_result(Client& client, bool sent_everything, uint8_t errcode);
 
 // Records `id`/`name` on `client` and marks it identified. Does not touch
 // the hello-window fields. `name_len` beyond max_name_length is clamped (the

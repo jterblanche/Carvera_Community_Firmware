@@ -82,7 +82,15 @@ private:
     // `wifi_streams`/the shared ClientTable's WiFi entries, in [0, max_wifi_clients).
     int route_makera_client(const u8 remote_ip[4], u16 remote_port, uint32_t now_ms);
     void disconnect_wifi_client(const multiclient::Address& address, const char* reason, bool log = true);
-    void send_to_wifi_client(int client_index, const u8* data, size_t length);
+    // What one send to one client actually did. Callers that publish treat
+    // `dropped` as an ordinary loss and carry on; the point-to-point reply
+    // path keeps today's behaviour of simply stopping.
+    enum class SendOutcome : uint8_t {
+        sent_all,   // every byte went to the module
+        dropped,    // nothing went; the frame was not put on the wire at all
+        truncated,  // part of the frame went; the receiver will have to resync
+    };
+    SendOutcome send_to_wifi_client(int client_index, const u8* data, size_t length);
     void broadcast_to_wifi_clients(const u8* data, size_t length);
     void broadcast_to_identified_wifi_clients(const u8* data, size_t length);
     void reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_clients[]);
