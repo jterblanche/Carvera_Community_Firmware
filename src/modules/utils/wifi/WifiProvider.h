@@ -77,7 +77,7 @@ private:
     void receive_wifi_data();
     int CheckFilePacket(char** buf);
 
-    void PacketMessage(char cmd, const char* s, int size);
+    void PacketMessage(char cmd, const char* s, int size) override;
 
     // Makera-mode per-client routing. `client_index` is a slot in
     // `wifi_streams`/the shared ClientTable's WiFi entries, in [0, max_wifi_clients).

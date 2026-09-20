@@ -43,7 +43,7 @@ class SerialConsole : public Module, public StreamOutput {
         bool ready();
         bool frames_protocol_output() const { return true; }
         void on_protocol_changed();
-        void PacketMessage(char cmd, const char* s, int size);
+        void PacketMessage(char cmd, const char* s, int size) override;
         void publish_multiclient(char cmd, const uint8_t* payload, size_t length);
         void reset();
         char getc_result;

@@ -53,7 +53,15 @@ class StreamOutput {
         virtual void publish_multiclient(char cmd, const uint8_t *payload, std::size_t length) { (void)cmd; (void)payload; (void)length; }
 
         static NullStreamOutput NullStream;
-        void PacketMessage(char cmd, const char* s, int size);
+
+        // Virtual because printf()/printfcmd() above call it to frame their
+        // output, and a transport that needs to do something more with that
+        // frame -- publishing a copy to the other connected clients -- can
+        // only get the chance if the call dispatches to its own version.
+        // Left non-virtual, a derived PacketMessage silently shadows this
+        // one instead of overriding it, and every reply sent through
+        // printf() runs this base version and nothing else.
+        virtual void PacketMessage(char cmd, const char* s, int size);
 };
 
 class NullStreamOutput : public StreamOutput {
