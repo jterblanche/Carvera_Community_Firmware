@@ -60,6 +60,15 @@
 // the module accepts 1 to 15 simultaneous TCP clients on a server link
 #define WIFI_MAX_CLIENTS_MIN         1
 #define WIFI_MAX_CLIENTS_MAX         15
+// Keep the module's own client limit comfortably above the firmware's own
+// 3-client WiFi cap (multiclient::max_wifi_clients). Exceeding the module's
+// *own* configured limit doesn't just refuse the new connection -- measured
+// on the machine, the attempt itself can disconnect the oldest already-
+// connected client as a side effect (see version.txt). Keeping two spare
+// slots above our cap means the module never has to make that choice: the
+// firmware always notices and closes an over-cap connection itself first.
+#define WIFI_MAX_CLIENTS_FLOOR        (multiclient::max_wifi_clients + 2)
+#define WIFI_MAX_CLIENTS_DEFAULT      5
 
 #define WIFI_AP_ON_DELAY_S           5
 #define WIFI_STA_FLAP_WINDOW_S       (5 * 60)   // count reconnect cycles in this window
@@ -70,12 +79,10 @@
 extern unsigned char xbuff[XBUFF_LENGTH];
 extern unsigned char fbuff[4096];
 enum { MAKERA_MAX_RECEIVE_CALLS = 10 };
-static makera::Packet makera_packet;
 
 
 
 WifiProvider::WifiProvider()
-    : makera_frame_decoder(makera_packet)
 {
 	tcp_link_no = 0;
 	udp_link_no = 1;
@@ -83,8 +90,6 @@ WifiProvider::WifiProvider()
 	has_data_flag = false;
 	makera_file_cancel = false;
 	command_waiting = false;
-	makera_remote_port = 0;
-	makera_remote_known = false;
 	connection_fail_count = 0;
 	sta_down_seconds = 0;
 	last_sta_connection_status = 0xff;
@@ -113,13 +118,21 @@ void WifiProvider::on_module_loaded()
 	this->udp_send_port = THEKERNEL->config->value(wifi_checksum, udp_send_port_checksum)->as_int(3333);
 	this->udp_recv_port = THEKERNEL->config->value(wifi_checksum, udp_recv_port_checksum)->as_int(4444);
 	this->tcp_timeout_s = THEKERNEL->config->value(wifi_checksum, tcp_timeout_s_checksum)->as_int(10);
-	int configured_max_clients = THEKERNEL->config->value(wifi_checksum, max_clients_checksum)->as_int(1);
+	int configured_max_clients = THEKERNEL->config->value(wifi_checksum, max_clients_checksum)->as_int(WIFI_MAX_CLIENTS_DEFAULT);
 	if (configured_max_clients < WIFI_MAX_CLIENTS_MIN || configured_max_clients > WIFI_MAX_CLIENTS_MAX) {
 		THEKERNEL->streams->printf("WIFI: wifi.max_clients %d out of range 1-15, clamped to %d\n",
 			configured_max_clients,
 			std::clamp(configured_max_clients, WIFI_MAX_CLIENTS_MIN, WIFI_MAX_CLIENTS_MAX));
 	}
-	this->max_clients = std::clamp(configured_max_clients, WIFI_MAX_CLIENTS_MIN, WIFI_MAX_CLIENTS_MAX);
+	int clamped_max_clients = std::clamp(configured_max_clients, WIFI_MAX_CLIENTS_MIN, WIFI_MAX_CLIENTS_MAX);
+	if (clamped_max_clients < WIFI_MAX_CLIENTS_FLOOR) {
+		THEKERNEL->streams->printf(
+			"WIFI: wifi.max_clients %d is at or below the firmware's own %u-client WiFi cap; raised to %d "
+			"so the module's own client limit never causes it to disconnect an existing controller\n",
+			clamped_max_clients, (unsigned)multiclient::max_wifi_clients, WIFI_MAX_CLIENTS_FLOOR);
+		clamped_max_clients = WIFI_MAX_CLIENTS_FLOOR;
+	}
+	this->max_clients = clamped_max_clients;
 	std::string config_name = THEKERNEL->config->value(wifi_checksum, machine_name_checksum)->as_string("CARVERA");
 	this->ap_auto_disable = THEKERNEL->config->value(wifi_checksum, ap_auto_disable_checksum)->as_bool(true);
     strncpy(this->machine_name, config_name.c_str(), sizeof(this->machine_name) - 1);
@@ -268,51 +281,53 @@ void WifiProvider::receive_wifi_data() {
 	const int max_frames = 16;
 	int frames = 0;
 	int receive_calls = 0;
-	uint16_t header_errors = 0;
 	// The M8266 receive side buffers six TCP segments (8,760 bytes, measured on
 	// hardware) and closes its advertised window when they fill. Leave unread
 	// commands there and let TCP apply backpressure instead of duplicating that
 	// buffer in the LPC's limited RAM.
+	//
+	// Each WiFi client now has its own frame decoder (see WifiProvider.h), so
+	// unlike the old single-decoder version a single RecvData_ex call cannot
+	// be pre-sized to "exactly what finishes the current frame": which
+	// client answers next isn't known until after the call returns. Instead,
+	// a completed command breaks out of the byte loop below immediately, so
+	// a chunk can never decode past the client whose command it just
+	// finished into the start of that same client's next frame.
 	while (frames < max_frames && receive_calls < MAKERA_MAX_RECEIVE_CALLS && !command_waiting) {
-		uint16_t wanted = static_cast<uint16_t>(makera_frame_decoder.bytes_wanted());
-		if (wanted > WIFI_DATA_MAX_SIZE) wanted = WIFI_DATA_MAX_SIZE;
-		if (frames > 0 && !makera_frame_decoder.has_header() && !M8266WIFI_SPI_Has_DataReceived()) return;
-
 		u8 remote_ip[4];
 		u16 remote_port = 0;
 		++receive_calls;
 		uint16_t count = M8266WIFI_SPI_RecvData_ex(
-			WifiData, wanted, WIFI_DATA_TIMEOUT_MS, &link_no, remote_ip, &remote_port, &status);
+			WifiData, WIFI_DATA_MAX_SIZE, WIFI_DATA_TIMEOUT_MS, &link_no, remote_ip, &remote_port, &status);
 		if (count == 0) return;
-		if (count > wanted) count = wanted;
+		if (count > WIFI_DATA_MAX_SIZE) count = WIFI_DATA_MAX_SIZE;
 		if (link_no == udp_link_no) return;
-		if (!makera_remote_known || remote_port != makera_remote_port ||
-			memcmp(remote_ip, makera_remote_ip, sizeof(makera_remote_ip)) != 0) {
-			makera_frame_decoder.reset();
-			memcpy(makera_remote_ip, remote_ip, sizeof(makera_remote_ip));
-			makera_remote_port = remote_port;
-			makera_remote_known = true;
-		}
 
 		const uint32_t now_ms = us_ticker_read() / 1000;
+		const int client_index = route_makera_client(remote_ip, remote_port, now_ms);
+		if (client_index < 0) continue; // refused and disconnected; these bytes are dropped
+
+		WifiClientStream &client = wifi_streams[client_index];
 		for (uint16_t i = 0; i < count; ++i) {
-			const bool looking_for_header = !makera_frame_decoder.has_header();
-			const makera::DecodeResult result = makera_frame_decoder.decode_byte(WifiData[i], now_ms);
+			const bool looking_for_header = !client.decoder.has_header();
+			const makera::DecodeResult result = client.decoder.decode_byte(WifiData[i], now_ms);
 			if (result == makera::DecodeResult::incomplete) {
-				if (looking_for_header && !makera_frame_decoder.has_header() && ++header_errors >= 20) {
+				if (looking_for_header && !client.decoder.has_header() && ++client.header_errors >= 20) {
+					active_reply_client = client_index;
 					puts("ERROR: no valid frame found. If this is a Community Controller "
 					     "older than 2.2.0, please update it.\r\n", 0);
-					makera_frame_decoder.reset();
+					active_reply_client = -1;
+					client.decoder.reset();
 					return;
 				}
 				continue;
 			}
 
 			++frames;
-			header_errors = 0;
+			client.header_errors = 0;
 			if (result != makera::DecodeResult::complete) continue;
 
-			const makera::Packet &packet = makera_frame_decoder.packet();
+			const makera::Packet &packet = client.decoder.packet();
 			if (packet.type == PTYPE_CTRL_SINGLE && packet.data_length > 0) {
 				const makera::ControlAction action = makera::decode_control(packet.data[0]);
 				if (action == makera::ControlAction::stop) {
@@ -321,33 +336,163 @@ void WifiProvider::receive_wifi_data() {
 					makera::handle_control(packet.data[0]);
 				}
 				switch (action) {
-					case makera::ControlAction::query: query_flag = true; break;
-					case makera::ControlAction::diagnose: diagnose_flag = true; break;
-					case makera::ControlAction::halt: halt_flag = true; break;
+					case makera::ControlAction::query: client.query_flag = true; break;
+					case makera::ControlAction::diagnose: client.diagnose_flag = true; break;
+					case makera::ControlAction::halt: halt_flag = true; break; // broadcast, see puts()
 					default: break;
 				}
 				continue;
 			}
 
 			if (packet.type == PTYPE_CTRL_MULTI && makera::is_diagnostic_request(packet.data, packet.data_length)) {
-				diagnose_flag = true;
+				client.diagnose_flag = true;
 				continue;
 			}
 
 			if (packet.type != PTYPE_CTRL_MULTI && packet.type != PTYPE_FILE_START) continue;
 
 			if (packet.data_length == 0) {
-				if (packet.type == PTYPE_FILE_START) makera_file_cancel = true;
+				if (packet.type == PTYPE_FILE_START) {
+					makera_file_cancel = true;
+					makera_file_cancel_client = client_index;
+				}
 				continue;
 			}
 
 			command_waiting = true;
+			command_waiting_client = client_index;
 			if (packet.type == PTYPE_FILE_START) return;
+			break; // this client's packet is now reserved for dispatch; stop decoding into it
 		}
 	}
 
 }
 
+// Looks up `remote_ip`/`remote_port` in the shared client table, admitting it
+// if it is new and there is room. Returns the wifi_streams index to decode
+// into, or -1 if the client was refused (already disconnected by this call)
+// -- the caller must not decode any of this chunk's bytes in that case.
+int WifiProvider::route_makera_client(const u8 remote_ip[4], u16 remote_port, uint32_t now_ms) {
+	multiclient::Address address;
+	memcpy(address.ip, remote_ip, sizeof(address.ip));
+	address.port = remote_port;
+
+	auto &table = multiclient::shared_client_table();
+	int index = table.find_wifi(address);
+	if (index >= 0) return index;
+
+	index = table.add_wifi(address, now_ms);
+	if (index < 0) {
+		disconnect_wifi_client(address, "beyond the 3-client cap");
+		return -1;
+	}
+
+	wifi_streams[index].clear();
+	return index;
+}
+
+void WifiProvider::disconnect_wifi_client(const multiclient::Address& address, const char* reason) {
+	ClientInfo victim{};
+	victim.remote_ip[0] = address.ip[0];
+	victim.remote_ip[1] = address.ip[1];
+	victim.remote_ip[2] = address.ip[2];
+	victim.remote_ip[3] = address.ip[3];
+	victim.remote_port = address.port;
+	u16 status = 0;
+	M8266WIFI_SPI_Disconnect_TcpClient(tcp_link_no, &victim, &status);
+	THEKERNEL->streams->printf("WIFI: closed a connection from %u.%u.%u.%u:%u (%s)\n",
+		address.ip[0], address.ip[1], address.ip[2], address.ip[3], address.port, reason);
+}
+
+void WifiProvider::send_to_wifi_client(int client_index, const u8* data, size_t length) {
+	const multiclient::Client *client = multiclient::shared_client_table().wifi_at(client_index);
+	if (client == nullptr) return;
+	char ip_str[16];
+	snprintf(ip_str, sizeof(ip_str), "%u.%u.%u.%u",
+		client->address.ip[0], client->address.ip[1], client->address.ip[2], client->address.ip[3]);
+
+	size_t sent_index = 0;
+	while (sent_index < length) {
+		const size_t chunk = (length - sent_index) > WIFI_DATA_MAX_SIZE ? WIFI_DATA_MAX_SIZE : (length - sent_index);
+		u16 status = 0;
+		const u16 sent = M8266WIFI_SPI_Send_Data_to_TcpClient(
+			const_cast<u8*>(data + sent_index), static_cast<u16>(chunk), tcp_link_no, ip_str, client->address.port, &status);
+		sent_index += sent;
+		if (sent != chunk) break;
+	}
+}
+
+void WifiProvider::broadcast_to_wifi_clients(const u8* data, size_t length) {
+	for (size_t i = 0; i < multiclient::max_wifi_clients; ++i) {
+		if (multiclient::shared_client_table().wifi_at(static_cast<int>(i)) != nullptr) {
+			send_to_wifi_client(static_cast<int>(i), data, length);
+		}
+	}
+}
+
+void WifiProvider::forget_wifi_client(int client_index) {
+	if (client_index < 0 || static_cast<size_t>(client_index) >= multiclient::max_wifi_clients) return;
+	wifi_streams[client_index].clear();
+	if (command_waiting_client == client_index) {
+		command_waiting = false;
+		command_waiting_client = -1;
+	}
+	if (makera_file_cancel_client == client_index) {
+		makera_file_cancel = false;
+		makera_file_cancel_client = -1;
+	}
+}
+
+// Called once a second (see on_second_tick) with the driver's current client
+// list. Reaps table entries for clients that disappeared since the last
+// call, logging the driver's own last-disconnect-cause query so an eviction
+// by the module shows up in the log rather than looking like a silent drop.
+// As a safety net, also closes any connection the driver is still holding
+// that this firmware never admitted -- for example one that connected but
+// never sent a byte -- once the WiFi table is at its cap, so a connection we
+// never got a chance to refuse in route_makera_client() cannot sit there
+// indefinitely and push the driver toward its own client limit.
+void WifiProvider::reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_clients[]) {
+	auto &table = multiclient::shared_client_table();
+
+	for (int i = 0; i < static_cast<int>(multiclient::max_wifi_clients); ++i) {
+		const multiclient::Client *client = table.wifi_at(i);
+		if (client == nullptr) continue;
+
+		bool still_present = false;
+		for (uint8_t j = 0; j < client_num; ++j) {
+			multiclient::Address seen;
+			memcpy(seen.ip, remote_clients[j].remote_ip, sizeof(seen.ip));
+			seen.port = remote_clients[j].remote_port;
+			if (multiclient::same_address(seen, client->address)) {
+				still_present = true;
+				break;
+			}
+		}
+		if (still_present) continue;
+
+		s8 disconnect_cause = 0;
+		u16 status = 0;
+		M8266WIFI_SPI_Query_Last_Tcp_Disconnect_Cause(tcp_link_no, &disconnect_cause, &status);
+		THEKERNEL->streams->printf(
+			"WIFI: client %u.%u.%u.%u:%u disappeared, module's last TCP disconnect cause %d "
+			"(-3 send timeout, -9 remote reset, -20 closed by remote, -21/-22 closed locally; "
+			"reflects whichever client left most recently if more than one left this tick)\n",
+			client->address.ip[0], client->address.ip[1], client->address.ip[2], client->address.ip[3],
+			client->address.port, int(disconnect_cause));
+		table.remove_wifi(i);
+		forget_wifi_client(i);
+	}
+
+	if (table.wifi_count() < multiclient::max_wifi_clients) return;
+	for (uint8_t j = 0; j < client_num; ++j) {
+		multiclient::Address seen;
+		memcpy(seen.ip, remote_clients[j].remote_ip, sizeof(seen.ip));
+		seen.port = remote_clients[j].remote_port;
+		if (table.find_wifi(seen) >= 0) continue; // already ours
+		disconnect_wifi_client(seen, "beyond the 3-client cap, never admitted");
+	}
+}
 
 bool WifiProvider::ready() {
 	return M8266WIFI_SPI_Has_DataReceived();
@@ -488,6 +633,10 @@ void WifiProvider::on_second_tick(void *)
 
 		M8266WIFI_SPI_List_Clients_On_A_TCP_Server(tcp_link_no, &client_num, RemoteClients, &status);
 
+		// This branch only runs in Makera mode (the other branch, above,
+		// handles Smoothie mode, which is always single-client).
+		reconcile_wifi_clients(client_num, RemoteClients);
+
 		if (M8266WIFI_SPI_Get_STA_Connection_Status(&connection_status, &status)) {
 			if (connection_status == 5) {
 				// get ip and netmask
@@ -556,27 +705,41 @@ void WifiProvider::on_idle(void *argument)
 	if (makera_file_cancel) {
 		makera_file_cancel = false;
 		static const char cancel_payload[] = "ok\r\n";
+		if (communication_protocol == PROTOCOL_MAKERA) active_reply_client = makera_file_cancel_client;
 		PacketMessage(PTYPE_FILE_CAN, cancel_payload, sizeof(cancel_payload));
+		active_reply_client = -1;
+		makera_file_cancel_client = -1;
 	}
 
-    if (query_flag) {
-        query_flag = false;
-		if (communication_protocol == PROTOCOL_SMOOTHIE) {
+	if (communication_protocol == PROTOCOL_SMOOTHIE) {
+		// Smoothie mode is always single-client; unchanged.
+		if (query_flag) {
+			query_flag = false;
 			puts(THEKERNEL->get_query_string().c_str());
-		} else {
-			PacketMessage(PTYPE_STATUS_RES,THEKERNEL->get_query_string().c_str(),0);
 		}
-    }
-
-    if (diagnose_flag) {
-    	diagnose_flag = false;
-		if (communication_protocol == PROTOCOL_SMOOTHIE) {
+		if (diagnose_flag) {
+			diagnose_flag = false;
 			puts(THEKERNEL->get_diagnose_string().c_str(), 0);
-		} else {
-			PacketMessage(PTYPE_DIAG_RES,THEKERNEL->get_diagnose_string().c_str(),0);
 		}
-    	
-    }
+	} else {
+		// Each WiFi client polls independently, so its query/diagnose reply
+		// must go back to that client, not whichever one is handled first.
+		for (size_t i = 0; i < multiclient::max_wifi_clients; ++i) {
+			WifiClientStream &client = wifi_streams[i];
+			if (client.query_flag) {
+				client.query_flag = false;
+				active_reply_client = static_cast<int>(i);
+				PacketMessage(PTYPE_STATUS_RES, THEKERNEL->get_query_string().c_str(), 0);
+				active_reply_client = -1;
+			}
+			if (client.diagnose_flag) {
+				client.diagnose_flag = false;
+				active_reply_client = static_cast<int>(i);
+				PacketMessage(PTYPE_DIAG_RES, THEKERNEL->get_diagnose_string().c_str(), 0);
+				active_reply_client = -1;
+			}
+		}
+	}
 
     if (halt_flag) {
         halt_flag = false;
@@ -586,6 +749,10 @@ void WifiProvider::on_idle(void *argument)
 		if (communication_protocol == PROTOCOL_SMOOTHIE) {
 			puts("ERROR: Controller Abort during cycle\r\n");
 		} else {
+			// Halt affects every connected controller, not just whoever
+			// caused it (or nobody, if the kernel raised it on its own), so
+			// this goes to every client: active_reply_client is already -1
+			// here, which is what makes puts() broadcast.
 			PacketMessage(PTYPE_NORMAL_INFO, "ERROR: Abort during cycle\r\n", 0);
 		}
     }
@@ -594,15 +761,19 @@ void WifiProvider::on_idle(void *argument)
 void WifiProvider::on_main_loop(void *argument)
 {
 	if (communication_protocol == PROTOCOL_MAKERA) {
-		if (command_waiting && !THEKERNEL->is_dispatching_console_line()) {
-			const makera::Packet &packet = makera_frame_decoder.packet();
+		if (command_waiting && command_waiting_client >= 0 && !THEKERNEL->is_dispatching_console_line()) {
+			const int client_index = command_waiting_client;
+			const makera::Packet &packet = wifi_streams[client_index].decoder.packet();
 			struct SerialMessage message;
 			message.message.assign(reinterpret_cast<const char *>(packet.data), packet.data_length);
 			message.stream = this;
 			message.line = 0;
 
 			command_waiting = false;
+			command_waiting_client = -1;
+			active_reply_client = client_index;
 			THEKERNEL->dispatch_console_line(message);
+			active_reply_client = -1;
 		}
 		return;
 	}
@@ -634,9 +805,15 @@ void WifiProvider::on_protocol_changed()
 	halt_flag = false;
 	diagnose_flag = false;
 	makera_file_cancel = false;
+	makera_file_cancel_client = -1;
 	command_waiting = false;
-	makera_remote_known = false;
-	makera_frame_decoder.reset();
+	command_waiting_client = -1;
+	active_reply_client = -1;
+	for (size_t i = 0; i < multiclient::max_wifi_clients; ++i) wifi_streams[i].clear();
+	// A protocol switch invalidates every WiFi client's identify/parser
+	// state (see the protocol contract); nobody is a known client of the
+	// new protocol until it hellos/polls again.
+	multiclient::shared_client_table().clear_wifi();
 	reset();
 }
 
@@ -740,33 +917,48 @@ int WifiProvider::printf(const char *format, ...)
 int WifiProvider::puts(const char* s, int size)
 {
 	size_t total_length = size == 0 ? strlen(s) : size;
-    size_t sent_index = 0;
-	u16 status = 0;
-	u32 sent = 0;
-	u32 to_send = 0;
-    while (sent_index < total_length) {
-    	to_send = total_length - sent_index > WIFI_DATA_MAX_SIZE ? WIFI_DATA_MAX_SIZE : total_length - sent_index;
-    	memcpy(WifiData, s + sent_index, to_send);
-		// errcode:
-		// 	0x13: Wrong link_no used
-		// 	0x14: connection by link_no not present
-		// 	0x15: connection by link_no closed
-		// 	0x18: No clients connecting to this TCP server
-		// 	0x1E: too many errors ecountered during sending can not fixed
-		// 	0x1F: Other errors
-		if (communication_protocol == PROTOCOL_SMOOTHIE) {
+
+	if (communication_protocol == PROTOCOL_SMOOTHIE) {
+		// Smoothie mode is always single-client; unchanged -- "send to the
+		// latest connected remote" is the only remote there is.
+		size_t sent_index = 0;
+		u16 status = 0;
+		u32 sent = 0;
+		u32 to_send = 0;
+		while (sent_index < total_length) {
+			to_send = total_length - sent_index > WIFI_DATA_MAX_SIZE ? WIFI_DATA_MAX_SIZE : total_length - sent_index;
+			memcpy(WifiData, s + sent_index, to_send);
+			// errcode:
+			// 	0x13: Wrong link_no used
+			// 	0x14: connection by link_no not present
+			// 	0x15: connection by link_no closed
+			// 	0x18: No clients connecting to this TCP server
+			// 	0x1E: too many errors ecountered during sending can not fixed
+			// 	0x1F: Other errors
 			sent = M8266WIFI_SPI_Send_BlockData(WifiData, to_send, 5000, tcp_link_no, NULL, 0, &status);
-		} else {
-			sent = M8266WIFI_SPI_Send_BlockData(WifiData, to_send, 500, tcp_link_no, NULL, 0, &status);
+			sent_index += sent;
+			if (sent == to_send) {
+				continue;
+			} else {
+				break;
+			}
 		}
-    	sent_index += sent;
-		if (sent == to_send) {
-			continue;
-		} else {
-    		break;
-		}
-    }
-    return sent_index;
+		return sent_index;
+	}
+
+	// Makera mode: a reply goes only to the client whose command caused it
+	// (active_reply_client, set for the duration of that client's dispatch
+	// or query/diagnose reply). With nobody specific waiting -- a halt
+	// notice, or any message the kernel prints on its own -- it goes to
+	// every connected WiFi client instead of "whoever connected most
+	// recently", which is what today's driver call does.
+	const u8* data = reinterpret_cast<const u8*>(s);
+	if (active_reply_client >= 0) {
+		send_to_wifi_client(active_reply_client, data, total_length);
+	} else {
+		broadcast_to_wifi_clients(data, total_length);
+	}
+	return static_cast<int>(total_length);
 }
 
 int WifiProvider::_putc(int c)

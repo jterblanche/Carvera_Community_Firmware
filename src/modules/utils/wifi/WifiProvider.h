@@ -19,6 +19,7 @@ using namespace std;
 #include "M8266WIFIDrv.h"
 #include "libs/RingBuffer.h"
 #include "libs/MakeraFrame.h"
+#include "libs/ClientTable.h"
 
 #define WIFI_DATA_MAX_SIZE 1460
 #define WIFI_DATA_TIMEOUT_MS 10
@@ -74,6 +75,15 @@ private:
 
     void PacketMessage(char cmd, const char* s, int size);
 
+    // Makera-mode per-client routing. `client_index` is a slot in
+    // `wifi_streams`/the shared ClientTable's WiFi entries, in [0, max_wifi_clients).
+    int route_makera_client(const u8 remote_ip[4], u16 remote_port, uint32_t now_ms);
+    void disconnect_wifi_client(const multiclient::Address& address, const char* reason);
+    void send_to_wifi_client(int client_index, const u8* data, size_t length);
+    void broadcast_to_wifi_clients(const u8* data, size_t length);
+    void reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_clients[]);
+    void forget_wifi_client(int client_index);
+
     mbed::InterruptIn *wifi_interrupt_pin; // Interrupt pin for measuring speed
 
     RingBuffer<char, 256> buffer; // Receive buffer
@@ -92,7 +102,6 @@ private:
 	uint32_t ap_hold_remaining_s; // keep AP up while > 0 after STA flapping
 	u8 last_sta_connection_status;
 	uint8_t sta_flap_count;
-	u8 makera_remote_ip[4];
 	char machine_name[64]; // Fixed-size buffer to avoid std::string heap allocation
 	char ap_address[16];
 	char ap_netmask[16];
@@ -108,19 +117,48 @@ private:
     	bool ap_manually_disabled:1; // sticky from `ap disable` until `ap enable`
     	bool sta_was_connected:1;
     	bool sta_down_since_connected:1;
-    	volatile bool halt_flag:1;
-    	volatile bool query_flag:1;
-    	volatile bool diagnose_flag:1;
+    	volatile bool halt_flag:1;      // Smoothie mode only; Makera mode broadcasts on halt instead (see puts())
+    	volatile bool query_flag:1;     // Smoothie mode only; Makera mode uses wifi_streams[i].query_flag
+    	volatile bool diagnose_flag:1;  // Smoothie mode only; Makera mode uses wifi_streams[i].diagnose_flag
     	volatile bool has_data_flag:1;
-		bool makera_remote_known:1;
-		bool command_waiting:1;
+		bool command_waiting:1;         // Makera mode: some client's command is decoded and awaiting dispatch
     };
     bool makera_file_cancel;
-    u16 makera_remote_port;
-    makera::FrameDecoder makera_frame_decoder;
-    ParseState currentState = WAIT_HEADER;    
+    ParseState currentState = WAIT_HEADER;
     int ptrData;
     int ptr_xbuff;
+
+    // Makera mode: one frame decoder per WiFi client, so an interleaved
+    // second client can never corrupt another client's in-progress frame.
+    // Only one command is dispatched at a time (matching the kernel's own
+    // sequential dispatch), so `command_waiting`/`command_waiting_client`
+    // stay single-valued rather than one per client.
+    struct WifiClientStream {
+    	makera::Packet packet{};
+    	makera::FrameDecoder decoder{packet};
+    	bool query_flag = false;
+    	bool diagnose_flag = false;
+    	uint16_t header_errors = 0;
+
+    	// FrameDecoder holds a reference to `packet`, so this struct has no
+    	// copy/move assignment; reset it in place instead.
+    	void clear() {
+    		decoder.reset();
+    		query_flag = false;
+    		diagnose_flag = false;
+    		header_errors = 0;
+    	}
+    };
+    WifiClientStream wifi_streams[multiclient::max_wifi_clients];
+
+    // Index into wifi_streams for the client a reply is being sent to right
+    // now (set for the duration of a dispatch or a query/diagnose reply),
+    // or -1 when nothing specific is being answered -- puts() then
+    // broadcasts, which is what a halt notice or an unprompted kernel
+    // message wants.
+    int active_reply_client = -1;
+    int command_waiting_client = -1;
+    int makera_file_cancel_client = -1;
 };
 
 #endif /* WIFIPROVIDER_H_ */
