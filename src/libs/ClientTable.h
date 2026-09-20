@@ -27,6 +27,21 @@ constexpr std::size_t max_name_length = 31;
 // hello before it is treated as an old (pre-identify) client.
 constexpr uint32_t hello_window_ms = 5000;
 
+// How long a USB entry can go with no frame at all before its session is
+// considered over: its identity and hello-window progress are reset, the
+// same as a protocol switch does, so it stops counting as present until
+// something arrives on it again. Matches the WiFi module's own default
+// dead-client timeout, kept as one rule across links.
+constexpr uint32_t usb_idle_timeout_ms = 10000;
+
+// True if `a` happened before `b`, correct across a millisecond-counter
+// wrap: the same signed-subtraction idiom every timeout check in this
+// codebase already relies on, applied to a direct comparison between two
+// timestamps instead of a "how long ago" check.
+constexpr bool ms_before(uint32_t a, uint32_t b) {
+  return static_cast<int32_t>(a - b) < 0;
+}
+
 // One connected client. `identified`, `id`, `name`, `name_len` and the two
 // timestamps are written by whoever runs the identify handshake and the
 // control gate; this module only stores them.
@@ -65,6 +80,14 @@ void set_identity(Client& client, uint64_t id, const char* name, uint8_t name_le
 // other millisecond timestamp in this firmware does; the subtraction is
 // correct across a wrap.
 bool client_is_old(const Client& client, uint32_t now_ms);
+
+// True once a USB entry's hello window has started and at least
+// usb_idle_timeout_ms has passed since the last byte received on it
+// (`last_activity_ms`, tracked by the caller -- SerialConsole, not this
+// table). When this becomes true, the caller is expected to call
+// ClientTable::clear_usb_identity() to end that session; false again
+// immediately afterwards, since hello_window_started is then false.
+bool usb_session_expired(bool hello_window_started, uint32_t now_ms, uint32_t last_activity_ms);
 
 // Engineering limit: 3 WiFi clients plus the one USB link. See version.txt
 // and WifiProvider.cpp for why the WiFi module's own client limit is kept
@@ -149,6 +172,21 @@ class ClientTable {
   // decide whether the discovery beacon should report one present (no
   // exclusions there).
   bool has_old_client(uint32_t now_ms, int except_wifi_index = -1, bool exclude_usb = false) const;
+
+  // True if every currently-present client (see present_count()) is old
+  // (client_is_old) -- nobody identified, and nobody still within their
+  // own window either. Used by the old-client rule: disconnecting every
+  // old client when this is true would just have them reconnect and
+  // repeat (two old controllers evicting each other, forever), so the
+  // earliest-admitted one is kept instead in that one case.
+  bool every_present_is_old(uint32_t now_ms) const;
+
+  // True if WiFi index `wifi_index` is the earliest-admitted client
+  // currently present (WiFi or USB), by hello_window_start_ms. Ties (an
+  // identical timestamp) are treated as "earliest" on both sides, so nobody
+  // is evicted in that vanishingly unlikely case. Used together with
+  // every_present_is_old() to decide which old WiFi client to spare.
+  bool is_earliest_present(int wifi_index) const;
 
  private:
   struct Slot {

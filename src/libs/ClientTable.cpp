@@ -19,6 +19,11 @@ bool client_is_old(const Client& client, uint32_t now_ms) {
   return now_ms - client.hello_window_start_ms >= hello_window_ms;
 }
 
+bool usb_session_expired(bool hello_window_started, uint32_t now_ms, uint32_t last_activity_ms) {
+  if (!hello_window_started) return false;
+  return now_ms - last_activity_ms >= usb_idle_timeout_ms;
+}
+
 int ClientTable::find_wifi(const Address& address) const {
   for (std::size_t i = 0; i < max_wifi_clients; ++i) {
     if (wifi_[i].in_use && same_address(wifi_[i].client.address, address)) return static_cast<int>(i);
@@ -131,6 +136,30 @@ bool ClientTable::has_old_client(uint32_t now_ms, int except_wifi_index, bool ex
   }
   if (exclude_usb) return false;
   return usb_.in_use && client_is_old(usb_.client, now_ms);
+}
+
+bool ClientTable::every_present_is_old(uint32_t now_ms) const {
+  for (std::size_t i = 0; i < max_wifi_clients; ++i) {
+    if (!wifi_[i].in_use) continue;
+    if (!client_is_old(wifi_[i].client, now_ms)) return false;
+  }
+  if (usb_.in_use && usb_.client.hello_window_started && !client_is_old(usb_.client, now_ms)) return false;
+  return true;
+}
+
+bool ClientTable::is_earliest_present(int wifi_index) const {
+  const Client* candidate = wifi_at(wifi_index);
+  if (candidate == nullptr) return false;
+
+  for (std::size_t i = 0; i < max_wifi_clients; ++i) {
+    if (static_cast<int>(i) == wifi_index || !wifi_[i].in_use) continue;
+    if (ms_before(wifi_[i].client.hello_window_start_ms, candidate->hello_window_start_ms)) return false;
+  }
+  if (usb_.in_use && usb_.client.hello_window_started &&
+      ms_before(usb_.client.hello_window_start_ms, candidate->hello_window_start_ms)) {
+    return false;
+  }
+  return true;
 }
 
 ClientTable& shared_client_table() {

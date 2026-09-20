@@ -246,6 +246,21 @@ void SerialConsole::on_idle(void * argument)
         }
     }
 
+    // A USB entry whose hello window has started but has gone quiet for
+    // usb_idle_timeout_ms is treated as no longer present: its identity and
+    // hello-window progress are cleared, the same reset a protocol switch
+    // already does, so it stops counting toward "present" (and, if it never
+    // identified, toward "old and not alone") until something arrives on it
+    // again. Without this, a single USB session anywhere in a power cycle
+    // would count forever, since nothing else ever un-counts it.
+    if (communication_protocol == PROTOCOL_MAKERA) {
+        auto &table = multiclient::shared_client_table();
+        const multiclient::Client *usb = table.usb();
+        if (usb != nullptr && multiclient::usb_session_expired(usb->hello_window_started, now_ms, last_activity_ms)) {
+            table.clear_usb_identity();
+        }
+    }
+
 #if defined(MACHINE_FAMILY_CARVERA)
     if (temp_baud_rate != 0) {
         if ((now_ms - last_activity_ms) >= 15000) {

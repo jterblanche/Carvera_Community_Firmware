@@ -560,6 +560,17 @@ void WifiProvider::handle_wifi_client_list_request(int client_index) {
 // firmware has no way to sever that link, so an old, not-alone USB
 // controller simply stays unidentified and limited to request-and-reply,
 // same as it would be alone.
+//
+// One exception: if every present client is old (nobody identified, and
+// nobody still within their own window), disconnecting all of them would
+// just have them reconnect and repeat -- two old controllers would evict
+// each other every window, forever, and neither could ever be used. In
+// that one case, the earliest-admitted client is spared; every other old
+// WiFi client is still disconnected as usual. As soon as anyone present
+// stops being old -- identifies, or is simply still within their own
+// window -- the exception no longer applies and the spared client is
+// disconnected too on the next tick, same as any other old client that
+// is no longer alone.
 void WifiProvider::enforce_old_client_rule(uint32_t now_ms) {
 	auto &table = multiclient::shared_client_table();
 	if (table.present_count() <= 1) {
@@ -569,9 +580,12 @@ void WifiProvider::enforce_old_client_rule(uint32_t now_ms) {
 		return;
 	}
 
+	const bool spare_earliest = table.every_present_is_old(now_ms);
+
 	for (int i = 0; i < static_cast<int>(multiclient::max_wifi_clients); ++i) {
 		const multiclient::Client *client = table.wifi_at(i);
 		if (client == nullptr || !multiclient::client_is_old(*client, now_ms)) continue;
+		if (spare_earliest && table.is_earliest_present(i)) continue;
 
 		bool already_logged = false;
 		for (uint8_t k = 0; k < logged_old_client_disconnect_count; ++k) {
