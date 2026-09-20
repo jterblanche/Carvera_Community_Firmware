@@ -290,6 +290,14 @@ void WifiProvider::receive_wifi_data() {
 	// already pulled off the wire are saved in pending_wifi_* and replayed
 	// from WifiData, instead of being silently dropped, the next time this
 	// function runs (see pending_wifi_client's declaration in WifiProvider.h).
+	//
+	// Junk that never resolves into a header (a plain-text probe, a stale
+	// Smoothie-mode line) is handled by client.decoder itself -- see
+	// libs/FrameResync.h -- which resynchronises on its own threshold and
+	// tells the caller at most once per connection whether to show the
+	// diagnostic. The byte loop below never returns on that path, only
+	// `continue`s: any bytes still in this same chunk after the junk,
+	// including a valid frame right behind a probe, keep being scanned.
 	while (frames < max_frames && receive_calls < MAKERA_MAX_RECEIVE_CALLS && !command_waiting) {
 		int client_index;
 		uint16_t count;
@@ -321,10 +329,16 @@ void WifiProvider::receive_wifi_data() {
 		const uint32_t now_ms = us_ticker_read() / 1000;
 		WifiClientStream &client = wifi_streams[client_index];
 		for (uint16_t i = start; i < count; ++i) {
-			const bool looking_for_header = !client.decoder.has_header();
-			const makera::DecodeResult result = client.decoder.decode_byte(WifiData[i], now_ms);
-			if (result == makera::DecodeResult::incomplete) {
-				if (looking_for_header && !client.decoder.has_header() && ++client.header_errors >= 20) {
+			const makera::ResyncResult result = client.decoder.decode_byte(WifiData[i], now_ms);
+			if (result == makera::ResyncResult::header_error) {
+				// The decoder has already resynchronised itself (reset,
+				// ready to try the very next byte as a fresh header) --
+				// see ResyncingDecoder::decode_byte(). Junk before a frame
+				// must never stop a frame that follows it from being
+				// decoded, so this does not return: it shows the
+				// diagnostic at most once per connection, then keeps
+				// scanning the rest of this chunk for the next header.
+				if (client.decoder.consume_notify_pending()) {
 					// receive_wifi_data() runs from on_idle(), which can
 					// itself be re-entered cooperatively while another
 					// client's command is dispatching (a jog loop calls
@@ -336,15 +350,13 @@ void WifiProvider::receive_wifi_data() {
 					puts("ERROR: no valid frame found. If this is a Community Controller "
 					     "older than 2.2.0, please update it.\r\n", 0);
 					active_reply_client = saved_reply_client;
-					client.decoder.reset();
-					return;
 				}
 				continue;
 			}
+			if (result == makera::ResyncResult::incomplete) continue;
 
 			++frames;
-			client.header_errors = 0;
-			if (result != makera::DecodeResult::complete) continue;
+			if (result != makera::ResyncResult::complete) continue;
 
 			const makera::Packet &packet = client.decoder.packet();
 			if (packet.type == PTYPE_CTRL_SINGLE && packet.data_length > 0) {
