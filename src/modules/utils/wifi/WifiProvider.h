@@ -21,6 +21,7 @@ using namespace std;
 #include "libs/MakeraFrame.h"
 #include "libs/ClientTable.h"
 #include "libs/Hello.h"
+#include "libs/Publish.h"
 
 #define WIFI_DATA_MAX_SIZE 1460
 #define WIFI_DATA_TIMEOUT_MS 10
@@ -41,6 +42,7 @@ public:
     void on_get_public_data(void* argument);
     void on_set_public_data(void* argument);
     void on_protocol_changed();
+    void publish_multiclient(char cmd, const uint8_t* payload, size_t length);
 
     int gets(char** buf, int size = 0);
     int puts(const char*, int size = 0);
@@ -94,6 +96,31 @@ private:
     // Sends a framed reply addressed to one specific client, regardless of
     // whatever active_reply_client currently holds (saves and restores it).
     void send_wifi_packet(int client_index, char cmd, const uint8_t* payload, size_t length);
+
+    // Proactive status publish (contract section 6.9, "reuses 0x81"), at
+    // the configured rate, to every identified WiFi client -- independent
+    // of any client's own query_flag poll, which is still answered
+    // separately (on_idle). Already inherits the existing "no status while
+    // uploading" pause, since this runs from on_idle which bails out on
+    // THEKERNEL->is_uploading() before either mechanism runs.
+    void publish_status_if_due(uint32_t now_ms);
+
+    // Publishes `text` (a command's own text, or its reply) as one or more
+    // published-console-line (0x69) fragments, tagged with client_index's
+    // id/name, to every identified client across every transport (WiFi and
+    // USB) -- see StreamOutput::publish_multiclient().
+    void publish_console_line(int client_index, const char* text, size_t length);
+
+    // Sends the wire-framed bytes built from `cmd`+`payload` to every
+    // identified WiFi client. The framing helper both publish_console_line
+    // (via THEKERNEL->streams->publish_multiclient(), which calls back into
+    // this override) and publish_status_if_due() ultimately go through.
+    void send_framed_to_identified_wifi_clients(char cmd, const uint8_t* payload, size_t length);
+
+    // multi_client.status_publish_hz, converted once at load time
+    // (on_module_loaded) from the configured rate.
+    uint32_t status_publish_interval_ms;
+    uint32_t last_status_publish_ms = 0;
 
     mbed::InterruptIn *wifi_interrupt_pin; // Interrupt pin for measuring speed
 
