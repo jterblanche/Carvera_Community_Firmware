@@ -30,8 +30,10 @@ constexpr uint32_t hello_window_ms = 5000;
 // How long a USB entry can go with no frame at all before its session is
 // considered over: its identity and hello-window progress are reset, the
 // same as a protocol switch does, so it stops counting as present until
-// something arrives on it again. Matches the WiFi module's own default
-// dead-client timeout, kept as one rule across links.
+// something arrives on it again. This is unrelated to hello_window_ms
+// above (5 s, how long an unidentified client has before it is old) --
+// it matches the WiFi module's own default dead-client timeout instead
+// (10 s, kept as one rule across links).
 constexpr uint32_t usb_idle_timeout_ms = 10000;
 
 // True if `a` happened before `b`, correct across a millisecond-counter
@@ -87,6 +89,16 @@ bool client_is_old(const Client& client, uint32_t now_ms);
 // table). When this becomes true, the caller is expected to call
 // ClientTable::clear_usb_identity() to end that session; false again
 // immediately afterwards, since hello_window_started is then false.
+//
+// The caller samples `now_ms` and then reads `last_activity_ms` as two
+// separate steps, and `last_activity_ms` is written from an interrupt that
+// can fire in between -- so `last_activity_ms` can end up later than the
+// `now_ms` already sampled, meaning a byte arrived after the check started.
+// The subtraction is done as a signed difference specifically so that
+// case (a timestamp that turns out to be in the future) yields a small
+// negative number, safely less than the timeout, rather than the huge
+// value plain unsigned subtraction would wrap around to -- which would
+// otherwise read as "expired" and end an actively-talking session.
 bool usb_session_expired(bool hello_window_started, uint32_t now_ms, uint32_t last_activity_ms);
 
 // Engineering limit: 3 WiFi clients plus the one USB link. See version.txt
@@ -173,19 +185,27 @@ class ClientTable {
   // exclusions there).
   bool has_old_client(uint32_t now_ms, int except_wifi_index = -1, bool exclude_usb = false) const;
 
-  // True if every currently-present client (see present_count()) is old
-  // (client_is_old) -- nobody identified, and nobody still within their
-  // own window either. Used by the old-client rule: disconnecting every
-  // old client when this is true would just have them reconnect and
-  // repeat (two old controllers evicting each other, forever), so the
-  // earliest-admitted one is kept instead in that one case.
-  bool every_present_is_old(uint32_t now_ms) const;
+  // True if some currently-present client (WiFi or USB) is identified.
+  // Used by the old-client rule: while nobody present has identified, an
+  // old client is not disconnected just because another present client
+  // hasn't decided yet (is simply still within its own window) -- see
+  // is_earliest_present() below for how that case is actually settled.
+  // Once anyone present has identified, this is true, because a hello can
+  // never succeed while an old client is already known to be in the mix
+  // (see has_old_client()) -- so an identified peer's mere presence
+  // already proves no old client needs protecting from it.
+  bool any_identified_present() const;
 
   // True if WiFi index `wifi_index` is the earliest-admitted client
   // currently present (WiFi or USB), by hello_window_start_ms. Ties (an
   // identical timestamp) are treated as "earliest" on both sides, so nobody
   // is evicted in that vanishingly unlikely case. Used together with
-  // every_present_is_old() to decide which old WiFi client to spare.
+  // any_identified_present() to decide which old WiFi client to spare:
+  // while nobody present has identified, the earliest-admitted one present
+  // is never disconnected by the old-client rule, whether or not it has
+  // itself been decided old yet -- matching today's single-client world,
+  // where whoever connected first holds the link regardless of anyone
+  // else's timing.
   bool is_earliest_present(int wifi_index) const;
 
  private:

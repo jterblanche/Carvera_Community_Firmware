@@ -378,6 +378,16 @@ int main() {
   }
 
   {
+    TEST("usb_session_expired is false when last_activity_ms is ahead of now_ms");
+    // The caller samples now_ms, then reads last_activity_ms as a second
+    // step; a byte can arrive on the interrupt in between, leaving
+    // last_activity_ms momentarily ahead of the already-sampled now_ms.
+    // Plain unsigned subtraction would wrap to a huge value here and
+    // wrongly report "expired" on an actively-talking link.
+    CHECK(!multiclient::usb_session_expired(true, 1000, 1001));
+  }
+
+  {
     TEST("a USB session that goes quiet for the idle timeout is reset, then can restart");
     multiclient::ClientTable table;
     table.set_usb_present(true, 0);
@@ -400,38 +410,39 @@ int main() {
   }
 
   {
-    TEST("every_present_is_old is true only when nobody present is identified or still pending");
+    TEST("any_identified_present is false when nobody present has identified");
     multiclient::ClientTable table;
+    CHECK(!table.any_identified_present());  // nobody connected
+
     const int a = table.add_wifi(address(1, 1, 1, 1, 1), 0);
-    const uint32_t old_enough = multiclient::hello_window_ms;
-    CHECK(table.every_present_is_old(old_enough));  // alone, old
+    CHECK(!table.any_identified_present());  // unidentified, whether old or not
 
-    const int b = table.add_wifi(address(2, 2, 2, 2, 2), 0);
-    CHECK(table.every_present_is_old(old_enough));  // both old
-
-    multiclient::set_identity(*table.wifi_at(b), 1, "B", 1);
-    CHECK(!table.every_present_is_old(old_enough));  // b is identified now
-
-    table.wifi_at(b)->identified = false;  // simulate b still within its own window
-    table.wifi_at(b)->hello_window_start_ms = old_enough;  // just started, not old yet
-    CHECK(!table.every_present_is_old(old_enough));
+    table.add_wifi(address(2, 2, 2, 2, 2), 0);
+    CHECK(!table.any_identified_present());  // still nobody identified
 
     (void)a;
   }
 
   {
-    TEST("every_present_is_old accounts for a talking USB entry too");
+    TEST("any_identified_present is true once any present WiFi client identifies");
     multiclient::ClientTable table;
-    table.add_wifi(address(1, 1, 1, 1, 1), 0);
-    table.set_usb_present(true, 0);
-    const uint32_t old_enough = multiclient::hello_window_ms;
-    CHECK(table.every_present_is_old(old_enough));  // USB hasn't talked: doesn't count
+    const int a = table.add_wifi(address(1, 1, 1, 1, 1), 0);
+    table.add_wifi(address(2, 2, 2, 2, 2), 0);  // left unidentified, and old later
+    CHECK(!table.any_identified_present());
 
+    multiclient::set_identity(*table.wifi_at(a), 1, "A", 1);
+    CHECK(table.any_identified_present());
+  }
+
+  {
+    TEST("any_identified_present accounts for an identified USB entry too");
+    multiclient::ClientTable table;
+    table.set_usb_present(true, 0);
     table.start_usb_hello_window(0);
-    CHECK(table.every_present_is_old(old_enough));  // now it counts, and it's old too
+    CHECK(!table.any_identified_present());
 
     multiclient::set_identity(*table.usb(), 9, "USB", 3);
-    CHECK(!table.every_present_is_old(old_enough));  // USB identified: not everyone is old
+    CHECK(table.any_identified_present());
   }
 
   {
@@ -458,27 +469,67 @@ int main() {
   }
 
   {
-    TEST("two old clients: the earliest is spared, the other keeps being flagged old");
+    TEST("two old clients a few seconds apart: the later one is old and not spared");
     // This mirrors what enforce_old_client_rule() in WifiProvider.cpp does:
-    // spare_earliest = table.every_present_is_old(now); then, for every
-    // client still old, skip it if it is the earliest present one.
+    // spare_earliest = !table.any_identified_present(); then, for every
+    // client that is old, skip it if it is the earliest present one.
     multiclient::ClientTable table;
-    const int first = table.add_wifi(address(1, 1, 1, 1, 1), 1000);
-    const int second = table.add_wifi(address(2, 2, 2, 2, 2), 2000);
-    const uint32_t now = 2000 + multiclient::hello_window_ms;
+    const int first = table.add_wifi(address(1, 1, 1, 1, 1), 0);
+    const int second = table.add_wifi(address(2, 2, 2, 2, 2), 3000);  // 3s later
 
-    CHECK(multiclient::client_is_old(*table.wifi_at(first), now));
-    CHECK(multiclient::client_is_old(*table.wifi_at(second), now));
-    CHECK(table.every_present_is_old(now));
+    // At 5s, first is old; second (only 2s into its own window) is not --
+    // not yet decided, not a reason to disconnect anyone.
+    const uint32_t at_5s = 5000;
+    CHECK(multiclient::client_is_old(*table.wifi_at(first), at_5s));
+    CHECK(!multiclient::client_is_old(*table.wifi_at(second), at_5s));
+    CHECK(!table.any_identified_present());
+    CHECK(table.is_earliest_present(first));  // spared regardless -- it's the earliest present
+
+    // At 8s, second's own window has also run out: now both are old, but
+    // only the later one (second) is fair game -- first stays spared as
+    // the earliest, for as long as it remains present, whether or not it
+    // has itself been decided old.
+    const uint32_t at_8s = 8000;
+    CHECK(multiclient::client_is_old(*table.wifi_at(first), at_8s));
+    CHECK(multiclient::client_is_old(*table.wifi_at(second), at_8s));
+    CHECK(!table.any_identified_present());
     CHECK(table.is_earliest_present(first));
     CHECK(!table.is_earliest_present(second));
-    // first would be spared; second would still be disconnected.
+    // enforce_old_client_rule() would disconnect second and leave first.
+  }
 
-    // Once a third client shows up that is not old yet (just admitted,
-    // still within its own window), the exception no longer applies and
-    // the earliest one is fair game again.
-    table.add_wifi(address(3, 3, 3, 3, 3), now);
-    CHECK(!table.every_present_is_old(now));
+  {
+    TEST("once the earliest disconnects, the next-earliest present becomes the keeper");
+    multiclient::ClientTable table;
+    const int first = table.add_wifi(address(1, 1, 1, 1, 1), 0);
+    table.add_wifi(address(2, 2, 2, 2, 2), 3000);
+    const int third = table.add_wifi(address(3, 3, 3, 3, 3), 6000);
+
+    CHECK(table.is_earliest_present(first));
+    table.remove_wifi(first);  // as if enforce_old_client_rule()'s driver disconnect took
+
+    // second is now the earliest of what remains.
+    const int second_index = table.find_wifi(address(2, 2, 2, 2, 2));
+    CHECK(table.is_earliest_present(second_index));
+    CHECK(!table.is_earliest_present(third));
+  }
+
+  {
+    TEST("a client that identifies ends its own candidacy, and everyone else's exemption");
+    multiclient::ClientTable table;
+    const int first = table.add_wifi(address(1, 1, 1, 1, 1), 0);
+    table.add_wifi(address(2, 2, 2, 2, 2), 3000);
+    const uint32_t now = 8000;  // both old, per the earlier scenario
+
+    CHECK(!table.any_identified_present());
+    CHECK(multiclient::client_is_old(*table.wifi_at(first), now));
+
+    // The spared, earliest client identifies (a late hello, still
+    // accepted -- has_old_client() excludes its own index, so nothing
+    // stops this).
+    multiclient::set_identity(*table.wifi_at(first), 42, "First", 5);
+    CHECK(!multiclient::client_is_old(*table.wifi_at(first), now));  // no longer a candidate itself
+    CHECK(table.any_identified_present());  // and the exemption stops applying to anyone else
   }
 
   std::printf("\n%d checks, %d failures\n", checks, failures);

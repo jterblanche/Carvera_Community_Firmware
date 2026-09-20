@@ -569,16 +569,24 @@ void WifiProvider::handle_wifi_client_list_request(int client_index) {
 // controller simply stays unidentified and limited to request-and-reply,
 // same as it would be alone.
 //
-// One exception: if every present client is old (nobody identified, and
-// nobody still within their own window), disconnecting all of them would
-// just have them reconnect and repeat -- two old controllers would evict
-// each other every window, forever, and neither could ever be used. In
-// that one case, the earliest-admitted client is spared; every other old
-// WiFi client is still disconnected as usual. As soon as anyone present
-// stops being old -- identifies, or is simply still within their own
-// window -- the exception no longer applies and the spared client is
-// disconnected too on the next tick, same as any other old client that
-// is no longer alone.
+// While nobody present has identified, ordering among the unidentified is
+// decided by who arrived first, not by whether everyone happens to be old
+// at this exact instant: the earliest-admitted one present is never
+// disconnected by this rule, and every other old client is disconnected
+// once its own window has expired. This matches today's single-client
+// world, where whoever connected first holds the link regardless of who
+// else shows up later. A client still inside its own window is not a
+// reason to disconnect anyone -- it is simply not yet decided, and this
+// loop only ever considers a client once client_is_old() is true for it.
+// The earliest one keeps being spared for as long as it remains both
+// present and the earliest -- including while it is itself old -- until
+// either it disconnects on its own (the next-earliest present client then
+// becomes the one spared) or it identifies, which ends its candidacy for
+// this rule entirely (client_is_old() is then false for it) and, from that
+// moment on, every other old client is disconnected without exception:
+// see has_old_client(), which never lets a hello succeed while an old
+// client is already known to be in the mix, so an identified peer's mere
+// presence already proves no old client needed protecting from it.
 void WifiProvider::enforce_old_client_rule(uint32_t now_ms) {
 	auto &table = multiclient::shared_client_table();
 	if (table.present_count() <= 1) {
@@ -588,7 +596,7 @@ void WifiProvider::enforce_old_client_rule(uint32_t now_ms) {
 		return;
 	}
 
-	const bool spare_earliest = table.every_present_is_old(now_ms);
+	const bool spare_earliest = !table.any_identified_present();
 
 	for (int i = 0; i < static_cast<int>(multiclient::max_wifi_clients); ++i) {
 		const multiclient::Client *client = table.wifi_at(i);
