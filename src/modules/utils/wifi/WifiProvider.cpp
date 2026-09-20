@@ -281,34 +281,61 @@ void WifiProvider::receive_wifi_data() {
 	// Each WiFi client now has its own frame decoder (see WifiProvider.h), so
 	// unlike the old single-decoder version a single RecvData_ex call cannot
 	// be pre-sized to "exactly what finishes the current frame": which
-	// client answers next isn't known until after the call returns. Instead,
-	// a completed command breaks out of the byte loop below immediately, so
-	// a chunk can never decode past the client whose command it just
-	// finished into the start of that same client's next frame.
+	// client answers next isn't known until after the call returns. A read
+	// can therefore hold more than one frame -- the controller does not wait
+	// for "ok" before sending its next command -- so a completed command
+	// breaks out of the byte loop below immediately (so a chunk can never
+	// decode past the client whose command it just finished into the start
+	// of that same client's next frame), and any bytes after it that were
+	// already pulled off the wire are saved in pending_wifi_* and replayed
+	// from WifiData, instead of being silently dropped, the next time this
+	// function runs (see pending_wifi_client's declaration in WifiProvider.h).
 	while (frames < max_frames && receive_calls < MAKERA_MAX_RECEIVE_CALLS && !command_waiting) {
-		u8 remote_ip[4];
-		u16 remote_port = 0;
-		++receive_calls;
-		uint16_t count = M8266WIFI_SPI_RecvData_ex(
-			WifiData, WIFI_DATA_MAX_SIZE, WIFI_DATA_TIMEOUT_MS, &link_no, remote_ip, &remote_port, &status);
-		if (count == 0) return;
-		if (count > WIFI_DATA_MAX_SIZE) count = WIFI_DATA_MAX_SIZE;
-		if (link_no == udp_link_no) return;
+		int client_index;
+		uint16_t count;
+		uint16_t start;
+
+		if (pending_wifi_client >= 0 && multiclient::shared_client_table().wifi_at(pending_wifi_client) != nullptr) {
+			client_index = pending_wifi_client;
+			count = pending_wifi_count;
+			start = pending_wifi_offset;
+			pending_wifi_client = -1;
+		} else {
+			pending_wifi_client = -1; // the client it was for disappeared; drop it rather than replay into the wrong one
+
+			u8 remote_ip[4];
+			u16 remote_port = 0;
+			++receive_calls;
+			count = M8266WIFI_SPI_RecvData_ex(
+				WifiData, WIFI_DATA_MAX_SIZE, WIFI_DATA_TIMEOUT_MS, &link_no, remote_ip, &remote_port, &status);
+			if (count == 0) return;
+			if (count > WIFI_DATA_MAX_SIZE) count = WIFI_DATA_MAX_SIZE;
+			if (link_no == udp_link_no) return;
+
+			const uint32_t admit_now_ms = us_ticker_read() / 1000;
+			client_index = route_makera_client(remote_ip, remote_port, admit_now_ms);
+			if (client_index < 0) continue; // refused and disconnected; these bytes are dropped
+			start = 0;
+		}
 
 		const uint32_t now_ms = us_ticker_read() / 1000;
-		const int client_index = route_makera_client(remote_ip, remote_port, now_ms);
-		if (client_index < 0) continue; // refused and disconnected; these bytes are dropped
-
 		WifiClientStream &client = wifi_streams[client_index];
-		for (uint16_t i = 0; i < count; ++i) {
+		for (uint16_t i = start; i < count; ++i) {
 			const bool looking_for_header = !client.decoder.has_header();
 			const makera::DecodeResult result = client.decoder.decode_byte(WifiData[i], now_ms);
 			if (result == makera::DecodeResult::incomplete) {
 				if (looking_for_header && !client.decoder.has_header() && ++client.header_errors >= 20) {
+					// receive_wifi_data() runs from on_idle(), which can
+					// itself be re-entered cooperatively while another
+					// client's command is dispatching (a jog loop calls
+					// ON_IDLE every iteration). Save/restore rather than
+					// reset to -1, so this doesn't clobber that dispatch's
+					// own reply target.
+					const int saved_reply_client = active_reply_client;
 					active_reply_client = client_index;
 					puts("ERROR: no valid frame found. If this is a Community Controller "
 					     "older than 2.2.0, please update it.\r\n", 0);
-					active_reply_client = -1;
+					active_reply_client = saved_reply_client;
 					client.decoder.reset();
 					return;
 				}
@@ -353,7 +380,15 @@ void WifiProvider::receive_wifi_data() {
 
 			command_waiting = true;
 			command_waiting_client = client_index;
-			if (packet.type == PTYPE_FILE_START) return;
+			if (packet.type == PTYPE_FILE_START) return; // the rest of this read is file data for Player::gets(), not a frame
+			if (static_cast<uint16_t>(i + 1) < count) {
+				// More bytes already sat in WifiData past this frame's end --
+				// the next call to this function replays them before asking
+				// the driver for anything new, rather than dropping them.
+				pending_wifi_client = client_index;
+				pending_wifi_offset = static_cast<uint16_t>(i + 1);
+				pending_wifi_count = count;
+			}
 			break; // this client's packet is now reserved for dispatch; stop decoding into it
 		}
 	}
@@ -383,7 +418,7 @@ int WifiProvider::route_makera_client(const u8 remote_ip[4], u16 remote_port, ui
 	return index;
 }
 
-void WifiProvider::disconnect_wifi_client(const multiclient::Address& address, const char* reason) {
+void WifiProvider::disconnect_wifi_client(const multiclient::Address& address, const char* reason, bool log) {
 	ClientInfo victim{};
 	victim.remote_ip[0] = address.ip[0];
 	victim.remote_ip[1] = address.ip[1];
@@ -432,6 +467,9 @@ void WifiProvider::forget_wifi_client(int client_index) {
 	if (makera_file_cancel_client == client_index) {
 		makera_file_cancel = false;
 		makera_file_cancel_client = -1;
+	}
+	if (pending_wifi_client == client_index) {
+		pending_wifi_client = -1;
 	}
 }
 
@@ -801,10 +839,12 @@ void WifiProvider::on_protocol_changed()
 	command_waiting = false;
 	command_waiting_client = -1;
 	active_reply_client = -1;
+	pending_wifi_client = -1;
 	for (size_t i = 0; i < multiclient::max_wifi_clients; ++i) wifi_streams[i].clear();
-	// A protocol switch invalidates every WiFi client's identify/parser
-	// state (see the protocol contract); nobody is a known client of the
-	// new protocol until it hellos/polls again.
+	// M485 switches the protocol for the whole link. Every WiFi client's
+	// parser state is for the protocol that just ended, so none of it means
+	// anything under the new one; nobody is treated as a known client again
+	// until they send something under the protocol now in effect.
 	multiclient::shared_client_table().clear_wifi();
 	reset();
 }

@@ -159,6 +159,17 @@ private:
     int active_reply_client = -1;
     int command_waiting_client = -1;
     int makera_file_cancel_client = -1;
+
+    // A read in receive_wifi_data() can hold more than one frame from the
+    // same client (the controller doesn't wait for "ok" before sending its
+    // next command). When a completed command breaks out of the byte loop,
+    // any bytes already read past it -- still sitting in WifiData -- are
+    // saved here and replayed before the next RecvData_ex call, instead of
+    // being dropped. pending_wifi_client is -1 when there is nothing
+    // pending.
+    int pending_wifi_client = -1;
+    uint16_t pending_wifi_offset = 0;
+    uint16_t pending_wifi_count = 0;
 };
 
 #endif /* WIFIPROVIDER_H_ */
