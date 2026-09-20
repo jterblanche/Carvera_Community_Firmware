@@ -39,6 +39,13 @@ using std::string;
 #define uart_checksum CHECKSUM("uart")
 #define XBUFF_LENGTH 8208
 
+// Governs both WiFi and USB -- see the protocol contract, "Limits and
+// settings" -- so it lives in its own namespace rather than under "uart.".
+// Same checksum values as WifiProvider.cpp's own copy of these two defines
+// (CHECKSUM() hashes the string, not the symbol).
+#define multi_client_checksum      CHECKSUM("multi_client")
+#define status_publish_hz_checksum CHECKSUM("status_publish_hz")
+
 extern unsigned char xbuff[XBUFF_LENGTH];
 
 static makera::Packet makera_packet;
@@ -63,6 +70,7 @@ SerialConsole::SerialConsole( PinName tx_pin, PinName rx_pin, int baud_rate )
     this->default_baud_rate = baud_rate;
     this->temp_baud_rate = 0;
     this->last_activity_ms = 0;
+    this->status_publish_interval_ms = multiclient::status_publish_interval_ms(multiclient::default_status_publish_hz);
     this->makera_rx_overflow = false;
     this->command_waiting = false;
     this->makera_frame_decoder.reset();
@@ -87,6 +95,13 @@ void SerialConsole::on_module_loaded() {
     halt_flag = false;
     diagnose_flag = false;
     makera_file_cancel = false;
+
+    // multi_client., not uart. -- this also governs WiFi's own proactive
+    // status publish (WifiProvider).
+    int configured_publish_hz =
+        THEKERNEL->config->value(multi_client_checksum, status_publish_hz_checksum)->as_int(multiclient::default_status_publish_hz);
+    if (configured_publish_hz < 0) configured_publish_hz = multiclient::default_status_publish_hz;
+    this->status_publish_interval_ms = multiclient::status_publish_interval_ms(static_cast<uint16_t>(configured_publish_hz));
 
 #if defined(MACHINE_FAMILY_CARVERA)
     default_baud_rate = THEKERNEL->config->value(uart_checksum, baud_rate_setting_checksum)->as_number(current_baud_rate);
@@ -273,13 +288,25 @@ void SerialConsole::on_idle(void * argument)
 
     if (makera_rx_overflow) {
         makera_rx_overflow = false;
-        PacketMessage(PTYPE_NORMAL_INFO, "ERROR: serial receive buffer full\r\n", 0);
+        // Bypasses PacketMessage()'s own publish hook via the explicit
+        // base-class call: this is a transport-raised notice, not a
+        // command's reply, so it should not be tagged and published as one.
+        StreamOutput::PacketMessage(PTYPE_NORMAL_INFO, "ERROR: serial receive buffer full\r\n", 0);
     }
 
     if (makera_file_cancel) {
         makera_file_cancel = false;
         static const char cancel_payload[] = "ok\r\n";
         PacketMessage(PTYPE_FILE_CAN, cancel_payload, sizeof(cancel_payload));
+    }
+
+    if (communication_protocol == PROTOCOL_MAKERA &&
+        multiclient::publish_due(now_ms, last_status_publish_ms, status_publish_interval_ms)) {
+        last_status_publish_ms = now_ms;
+        const multiclient::Client *usb = multiclient::shared_client_table().usb();
+        if (usb != nullptr && usb->identified) {
+            PacketMessage(PTYPE_STATUS_RES, THEKERNEL->get_query_string().c_str(), 0);
+        }
     }
 
     if (query_flag ) {
@@ -305,7 +332,11 @@ void SerialConsole::on_idle(void * argument)
         THEKERNEL->set_halt_reason(MANUAL);
         
         if (communication_protocol == PROTOCOL_MAKERA) {
-            PacketMessage(PTYPE_NORMAL_INFO, "ERROR: Abort during cycle\r\n", 0);
+            // Bypasses the publish hook the same way the overflow notice
+            // above does, and for the same reason -- this is reported
+            // separately as the alarm/halt event (Player::on_halt()), not
+            // as a published console line.
+            StreamOutput::PacketMessage(PTYPE_NORMAL_INFO, "ERROR: Abort during cycle\r\n", 0);
         } else if(THEKERNEL->is_grbl_mode()) {
             puts("ERROR: Abort during cycle\r\n", 0);
         } else {
@@ -333,6 +364,15 @@ void SerialConsole::on_main_loop(void * argument){
             message.message.assign(reinterpret_cast<const char *>(packet.data), packet.data_length);
             message.stream = this;
             message.line = 0;
+
+            // Publish the command's own text before dispatching it, tagged
+            // with this USB link's identity -- only for an ordinary command
+            // (PTYPE_CTRL_MULTI): a file-transfer start (PTYPE_FILE_START)
+            // is not text and stays point to point (protocol contract
+            // section 6.10).
+            if (packet.type == PTYPE_CTRL_MULTI) {
+                publish_console_line(message.message.c_str(), message.message.size());
+            }
 
             command_waiting = false;
             THEKERNEL->dispatch_console_line(message);
@@ -469,6 +509,12 @@ void SerialConsole::process_makera_byte(uint8_t received)
         return;
     }
 
+    if (packet.type == PTYPE_HEARTBEAT) {
+        multiclient::Client *self = multiclient::shared_client_table().usb();
+        if (self != nullptr) multiclient::record_heartbeat(*self, last_activity_ms);
+        return;
+    }
+
     if (packet.type == PTYPE_CTRL_MULTI || packet.type == PTYPE_FILE_START) {
         if (packet.data_length == 0) {
             if (packet.type == PTYPE_FILE_START) makera_file_cancel = true;
@@ -528,6 +574,53 @@ void SerialConsole::handle_client_list_request() {
     const std::size_t length =
         multiclient::build_client_list_reply(multiclient::shared_client_table(), payload, sizeof(payload));
     PacketMessage(PTYPE_CLIENT_LIST_REPLY, reinterpret_cast<const char*>(payload), static_cast<int>(length));
+}
+
+// Reuses the base StreamOutput::PacketMessage() to build and send the frame
+// (this link has only one client, so "targeted" and "broadcast" are the
+// same send), then, for an ordinary command reply, also publishes it --
+// see WifiProvider::PacketMessage() for the full reasoning behind the
+// PTYPE_NORMAL_INFO gate, which is identical here.
+void SerialConsole::PacketMessage(char cmd, const char* s, int size) {
+    StreamOutput::PacketMessage(cmd, s, size);
+
+    if (cmd == PTYPE_NORMAL_INFO && communication_protocol == PROTOCOL_MAKERA) {
+        const size_t total_length = size == 0 ? (s == nullptr ? 0 : strlen(s)) : static_cast<size_t>(size);
+        publish_console_line(s, total_length);
+    }
+}
+
+// Publishes `text` as one or more published-console-line fragments, tagged
+// with this USB link's own id/name (all-zero/empty if it hasn't
+// identified -- see WifiProvider::publish_console_line() for why an
+// unidentified sender is still tagged and published, just with nothing
+// useful in the tag).
+void SerialConsole::publish_console_line(const char* text, size_t length) {
+    const multiclient::Client *self = multiclient::shared_client_table().usb();
+    if (self == nullptr) return;
+
+    uint8_t frame[8 + 1 + multiclient::max_name_length + 1 + multiclient::max_console_line_text_bytes];
+    size_t offset = 0;
+    do {
+        const size_t chunk_length = multiclient::console_line_chunk_length(length - offset);
+        const bool more = multiclient::console_line_has_more(length - offset, chunk_length);
+        const size_t frame_length = multiclient::build_console_line_frame(
+            self->id, self->name, self->name_len, text + offset, chunk_length, more, frame, sizeof(frame));
+        if (frame_length == 0) return; // should not happen: frame is sized for the worst case
+        THEKERNEL->streams->publish_multiclient(PTYPE_PUBLISHED_LINE, frame, frame_length);
+        offset += chunk_length;
+    } while (offset < length);
+}
+
+// Reached through THEKERNEL->streams->publish_multiclient() (see
+// libs/StreamOutputPool.h). Sends to this USB link's own client, if it is
+// identified -- an unidentified one never sees any of this, same as it
+// never saw the messages #17 added.
+void SerialConsole::publish_multiclient(char cmd, const uint8_t* payload, size_t length) {
+    if (communication_protocol != PROTOCOL_MAKERA) return;
+    const multiclient::Client *usb = multiclient::shared_client_table().usb();
+    if (usb == nullptr || !usb->identified) return;
+    StreamOutput::PacketMessage(cmd, reinterpret_cast<const char*>(payload), static_cast<int>(length));
 }
 
 int SerialConsole::receive_packet(makera::Packet& packet, uint32_t timeout_ms)

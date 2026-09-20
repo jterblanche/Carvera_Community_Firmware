@@ -18,6 +18,7 @@ using std::string;
 #include "libs/StreamOutput.h"
 #include "libs/MakeraFrame.h"
 #include "libs/Hello.h"
+#include "libs/Publish.h"
 
 
 #define baud_rate_setting_checksum CHECKSUM("baud_rate")
@@ -42,6 +43,8 @@ class SerialConsole : public Module, public StreamOutput {
         bool ready();
         bool frames_protocol_output() const { return true; }
         void on_protocol_changed();
+        void PacketMessage(char cmd, const char* s, int size);
+        void publish_multiclient(char cmd, const uint8_t* payload, size_t length);
         void reset();
         char getc_result;
 
@@ -82,6 +85,17 @@ class SerialConsole : public Module, public StreamOutput {
         int check_file_packet(char **buf);
         void handle_hello(const uint8_t* payload, uint16_t payload_length, uint32_t now_ms);
         void handle_client_list_request();
+
+        // Publishes `text` (a command's own text, or its reply) as one or
+        // more published-console-line fragments, tagged with this USB
+        // link's own id/name, to every identified client across every
+        // transport. See publish_multiclient() and WifiProvider's own
+        // equivalent.
+        void publish_console_line(const char* text, size_t length);
+
+        // multi_client.status_publish_hz, converted once at load time.
+        uint32_t status_publish_interval_ms;
+        uint32_t last_status_publish_ms = 0;
         struct {
           volatile bool query_flag:1;
           volatile bool halt_flag:1;

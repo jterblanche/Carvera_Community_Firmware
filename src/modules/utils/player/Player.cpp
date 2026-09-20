@@ -32,6 +32,7 @@
 #include "ATCHandlerPublicAccess.h"
 #include "PublicDataRequest.h"
 #include "PublicData.h"
+#include "libs/Publish.h"
 #include "PlayerPublicAccess.h"
 #include "TemperatureControlPublicAccess.h"
 #include "TemperatureControlPool.h"
@@ -210,6 +211,45 @@ void Player::on_halt(void* argument)
 
 void Player::on_second_tick(void *)
 {
+    // Publishes play-started (kind 2) and job-ended (kind 3) on a
+    // transition of playing_file, rather than hooking every place that
+    // sets it -- play_command() (the non-streamed build) and
+    // handle_link_packet()'s PTYPE_PLAY_VIEW case (the streamed build,
+    // STREAMED_JOB_PLAYBACK, the default -- see build/common.mk) both flip
+    // it, and one check here covers both without duplicating the hook.
+    // job-ended likewise covers every place that clears it (finished, user
+    // abort, halt-triggered abort): whatever stopped playback already ran
+    // save_last_progress() (directly, or via abort_command()) before
+    // clearing playing_file, so last_filename/last_percent_complete/
+    // last_played_lines/last_elapsed_secs already hold the right final
+    // snapshot by the time this runs.
+    if (!this->last_published_playing && this->playing_file) {
+        uint8_t payload[2 + multiclient::max_event_path_length];
+        const uint8_t path_len = multiclient::clamp_event_path_length(this->filename.size());
+        const size_t length = multiclient::build_play_started_event(this->filename.c_str(), path_len, payload, sizeof(payload));
+        if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+    }
+    if (this->last_published_playing && !this->playing_file) {
+        uint8_t payload[2 + multiclient::max_event_path_length + 1 + 4 + 4];
+        const uint8_t path_len = multiclient::clamp_event_path_length(this->last_filename.size());
+        const size_t length = multiclient::build_job_ended_event(
+            this->last_filename.c_str(), path_len, static_cast<uint8_t>(this->last_percent_complete),
+            this->last_played_lines, this->last_elapsed_secs, payload, sizeof(payload));
+        if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+    }
+    this->last_published_playing = this->playing_file;
+
+    // Publishes the alarm/halt event on entering halt -- see
+    // last_published_halted's own comment (Player.h) for why this is read
+    // here rather than from on_halt() itself.
+    const bool is_halted = THEKERNEL->is_halted();
+    if (is_halted && !this->last_published_halted) {
+        uint8_t payload[2];
+        const size_t length = multiclient::build_alarm_halt_event(THEKERNEL->get_halt_reason(), payload, sizeof(payload));
+        if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+    }
+    this->last_published_halted = is_halted;
+
     if(THEKERNEL->is_suspending() || THEKERNEL->is_waiting() || THEKERNEL->is_tool_waiting()) return;
     if(this->playing_file) this->elapsed_secs++;
 }
@@ -2480,6 +2520,20 @@ upload_success:
     	set_serial_rx_irq(true);
     }
 	stream->printf("Info: upload success: %s.\r\n", desfilename.c_str());
+
+	// Publishes the upload-finished event (protocol contract section 6.8)
+	// to every identified client. checksum_type is always "none" here: the
+	// MD5 this upload was verified against (above) is only ever compared,
+	// not kept anywhere after the fact, and recomputing it again just for
+	// this event would redo real work for a field the contract marks
+	// optional (checksum_type 0 is a defined, valid value).
+	{
+		const uint8_t path_len = multiclient::clamp_event_path_length(desfilename.size());
+		uint8_t payload[2 + multiclient::max_event_path_length + 4 + 1];
+		const size_t length =
+			multiclient::build_upload_finished_event(desfilename.c_str(), path_len, u32filesize, payload, sizeof(payload));
+		if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+	}
 }
 
 
