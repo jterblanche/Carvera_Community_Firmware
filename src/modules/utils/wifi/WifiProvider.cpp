@@ -60,15 +60,6 @@
 // the module accepts 1 to 15 simultaneous TCP clients on a server link
 #define WIFI_MAX_CLIENTS_MIN         1
 #define WIFI_MAX_CLIENTS_MAX         15
-// Keep the module's own client limit comfortably above the firmware's own
-// 3-client WiFi cap (multiclient::max_wifi_clients). Exceeding the module's
-// *own* configured limit doesn't just refuse the new connection -- measured
-// on the machine, the attempt itself can disconnect the oldest already-
-// connected client as a side effect (see version.txt). Keeping two spare
-// slots above our cap means the module never has to make that choice: the
-// firmware always notices and closes an over-cap connection itself first.
-#define WIFI_MAX_CLIENTS_FLOOR        (int(multiclient::max_wifi_clients) + 2)
-#define WIFI_MAX_CLIENTS_DEFAULT      5
 
 #define WIFI_AP_ON_DELAY_S           5
 #define WIFI_STA_FLAP_WINDOW_S       (5 * 60)   // count reconnect cycles in this window
@@ -118,21 +109,22 @@ void WifiProvider::on_module_loaded()
 	this->udp_send_port = THEKERNEL->config->value(wifi_checksum, udp_send_port_checksum)->as_int(3333);
 	this->udp_recv_port = THEKERNEL->config->value(wifi_checksum, udp_recv_port_checksum)->as_int(4444);
 	this->tcp_timeout_s = THEKERNEL->config->value(wifi_checksum, tcp_timeout_s_checksum)->as_int(10);
-	int configured_max_clients = THEKERNEL->config->value(wifi_checksum, max_clients_checksum)->as_int(WIFI_MAX_CLIENTS_DEFAULT);
+	// Default 1: unchanged behaviour unless a machine's config explicitly
+	// raises this. The firmware's own 3-client cap (ClientTable, enforced in
+	// route_makera_client()/reconcile_wifi_clients() below) does not depend
+	// on this setting -- it refuses a 4th WiFi client itself regardless of
+	// what the module's own limit is. Raising this setting is a separate,
+	// deliberate choice for whoever configures the machine to make (see
+	// version.txt): the module's own limit must stay clear of the firmware's
+	// cap, or a stray connection attempt can disconnect an existing client as
+	// a side effect of the module's own eviction behaviour at its limit.
+	int configured_max_clients = THEKERNEL->config->value(wifi_checksum, max_clients_checksum)->as_int(1);
 	if (configured_max_clients < WIFI_MAX_CLIENTS_MIN || configured_max_clients > WIFI_MAX_CLIENTS_MAX) {
 		THEKERNEL->streams->printf("WIFI: wifi.max_clients %d out of range 1-15, clamped to %d\n",
 			configured_max_clients,
 			std::clamp(configured_max_clients, WIFI_MAX_CLIENTS_MIN, WIFI_MAX_CLIENTS_MAX));
 	}
-	int clamped_max_clients = std::clamp(configured_max_clients, WIFI_MAX_CLIENTS_MIN, WIFI_MAX_CLIENTS_MAX);
-	if (clamped_max_clients < WIFI_MAX_CLIENTS_FLOOR) {
-		THEKERNEL->streams->printf(
-			"WIFI: wifi.max_clients %d is at or below the firmware's own %u-client WiFi cap; raised to %d "
-			"so the module's own client limit never causes it to disconnect an existing controller\n",
-			clamped_max_clients, (unsigned)multiclient::max_wifi_clients, WIFI_MAX_CLIENTS_FLOOR);
-		clamped_max_clients = WIFI_MAX_CLIENTS_FLOOR;
-	}
-	this->max_clients = clamped_max_clients;
+	this->max_clients = std::clamp(configured_max_clients, WIFI_MAX_CLIENTS_MIN, WIFI_MAX_CLIENTS_MAX);
 	std::string config_name = THEKERNEL->config->value(wifi_checksum, machine_name_checksum)->as_string("CARVERA");
 	this->ap_auto_disable = THEKERNEL->config->value(wifi_checksum, ap_auto_disable_checksum)->as_bool(true);
     strncpy(this->machine_name, config_name.c_str(), sizeof(this->machine_name) - 1);

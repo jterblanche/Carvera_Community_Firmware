@@ -1,6 +1,6 @@
 [unreleased]
-- Fixed: with more than one WiFi client connected, every reply went to whichever one connected most recently, not the one that sent the command, and an older client could sit connected but never hear back. Each WiFi client now has its own frame parser and gets its own replies. The firmware also now enforces its own cap of 3 WiFi clients (plus USB), refusing and disconnecting a 4th itself, and logs the WiFi module's own last-disconnect reason when a client disappears.
-- Enhancement: wifi.max_clients sets how many TCP clients the Wi-Fi module accepts at once, from 1 to 15. It now defaults to, and is raised to, at least 5 -- two more than the firmware's own 3-client cap above -- because exceeding the module's own configured limit can disconnect an already-connected client as a side effect of refusing the new one; keeping headroom means the firmware's own refusal is always what handles a 4th connection, not the module's.
+- Fixed: with more than one WiFi client connected, every reply went to whichever one connected most recently rather than the one that asked. Each WiFi client now gets its own frame parser and its own replies, and the firmware enforces its own cap of 3 WiFi clients (plus USB) so a 4th is refused by the firmware itself.
+- Enhancement: wifi.max_clients sets how many TCP clients the Wi-Fi module accepts at once, from 1 to 15. The default of 1 keeps today's behaviour; the firmware's own 3-client cap above applies regardless of this setting.
 - Changed: Aborting playback stops queued motion immediately before turning off the spindle.
 - Enhancement: Add support for Makera Z1 and Makera Z1 Pro.
 - Fixed: Suspending file playback no longer caused a stackoverflow crash
