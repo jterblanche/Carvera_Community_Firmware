@@ -17,6 +17,7 @@ using std::string;
 #include "libs/RingBuffer.h"
 #include "libs/StreamOutput.h"
 #include "libs/MakeraFrame.h"
+#include "libs/Hello.h"
 
 
 #define baud_rate_setting_checksum CHECKSUM("baud_rate")
@@ -79,6 +80,8 @@ class SerialConsole : public Module, public StreamOutput {
         void process_makera_byte(uint8_t received);
         void reset_file_parser();
         int check_file_packet(char **buf);
+        void handle_hello(const uint8_t* payload, uint16_t payload_length, uint32_t now_ms);
+        void handle_client_list_request();
         struct {
           volatile bool query_flag:1;
           volatile bool halt_flag:1;
