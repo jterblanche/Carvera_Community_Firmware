@@ -346,11 +346,13 @@ void SerialConsole::on_idle(void * argument)
     }
 
 #if defined(MACHINE_FAMILY_Z1)
-    const uint32_t now_us = us_ticker_read();
-    if (now_us - last_version_us > version_interval_us) {
+    // Named apart from the now_us read at the top of this function: both are
+    // at function scope, and this block wants its own reading taken here.
+    const uint32_t version_now_us = us_ticker_read();
+    if (version_now_us - last_version_us > version_interval_us) {
         Version version;
         PacketMessage(PTYPE_FIRM_VER, version.get_build(), 0);
-        last_version_us = now_us;
+        last_version_us = version_now_us;
     }
 #endif
 }
