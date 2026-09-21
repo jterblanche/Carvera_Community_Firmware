@@ -193,14 +193,14 @@ int main() {
     partial.resize(6);
     feed(decoder, partial, 10);
     CHECK(decoder->in_progress());
-    CHECK(feed(decoder, make_frame(0xA2, "next"), 10 + makera::frame_timeout_ms) == makera::DecodeResult::complete);
+    CHECK(feed(decoder, make_frame(0xA2, "next"), 10 + makera::frame_timeout_us) == makera::DecodeResult::complete);
     CHECK(packet_data(decoder->packet()) == "next");
   }
 
   {
     TEST("a slow frame survives while every inter-byte gap is bounded");
     Decoder decoder;
-    CHECK(feed(decoder, make_frame(0xA2, "slow"), 10, makera::frame_timeout_ms - 1) == makera::DecodeResult::complete);
+    CHECK(feed(decoder, make_frame(0xA2, "slow"), 10, makera::frame_timeout_us - 1) == makera::DecodeResult::complete);
   }
 
   {

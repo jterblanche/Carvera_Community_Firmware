@@ -79,7 +79,7 @@ int main() {
     CHECK(first == again);
     CHECK(table.wifi_count() == 1);
     // the second add does not disturb the stored client
-    CHECK(table.wifi_at(first)->last_user_ms == 5);
+    CHECK(table.wifi_at(first)->last_user_us == 5);
   }
 
   {
@@ -115,16 +115,16 @@ int main() {
     CHECK(client != nullptr);
     CHECK(client->link == multiclient::Link::wifi);
     CHECK(!client->identified);
-    CHECK(client->last_heartbeat_ms == 100);
+    CHECK(client->last_heartbeat_us == 100);
 
     client->identified = true;
-    client->last_user_ms = 200;
-    client->last_heartbeat_ms = 300;
+    client->last_user_us = 200;
+    client->last_heartbeat_us = 300;
 
     const multiclient::Client* reread = table.wifi_at(index);
     CHECK(reread->identified);
-    CHECK(reread->last_user_ms == 200);
-    CHECK(reread->last_heartbeat_ms == 300);
+    CHECK(reread->last_user_us == 200);
+    CHECK(reread->last_heartbeat_us == 300);
   }
 
   {
@@ -213,27 +213,27 @@ int main() {
     TEST("a client is not old before its hello window has elapsed");
     multiclient::Client client;
     client.hello_window_started = true;
-    client.hello_window_start_ms = 1000;
+    client.hello_window_start_us = 1000;
     CHECK(!multiclient::client_is_old(client, 1000));
-    CHECK(!multiclient::client_is_old(client, 1000 + multiclient::hello_window_ms - 1));
+    CHECK(!multiclient::client_is_old(client, 1000 + multiclient::hello_window_us - 1));
   }
 
   {
     TEST("a client is old once its hello window has elapsed without identifying");
     multiclient::Client client;
     client.hello_window_started = true;
-    client.hello_window_start_ms = 1000;
-    CHECK(multiclient::client_is_old(client, 1000 + multiclient::hello_window_ms));
-    CHECK(multiclient::client_is_old(client, 1000 + multiclient::hello_window_ms + 60'000));
+    client.hello_window_start_us = 1000;
+    CHECK(multiclient::client_is_old(client, 1000 + multiclient::hello_window_us));
+    CHECK(multiclient::client_is_old(client, 1000 + multiclient::hello_window_us + 60'000));
   }
 
   {
     TEST("an identified client is never old, however long its window has run");
     multiclient::Client client;
     client.hello_window_started = true;
-    client.hello_window_start_ms = 1000;
+    client.hello_window_start_us = 1000;
     client.identified = true;
-    CHECK(!multiclient::client_is_old(client, 1000 + multiclient::hello_window_ms + 60'000));
+    CHECK(!multiclient::client_is_old(client, 1000 + multiclient::hello_window_us + 60'000));
   }
 
   {
@@ -242,9 +242,9 @@ int main() {
     const int index = table.add_wifi(address(1, 2, 3, 4, 1), 5000);
     const multiclient::Client* client = table.wifi_at(index);
     CHECK(client->hello_window_started);
-    CHECK(client->hello_window_start_ms == 5000);
-    CHECK(!multiclient::client_is_old(*client, 5000 + multiclient::hello_window_ms - 1));
-    CHECK(multiclient::client_is_old(*client, 5000 + multiclient::hello_window_ms));
+    CHECK(client->hello_window_start_us == 5000);
+    CHECK(!multiclient::client_is_old(*client, 5000 + multiclient::hello_window_us - 1));
+    CHECK(multiclient::client_is_old(*client, 5000 + multiclient::hello_window_us));
   }
 
   {
@@ -257,12 +257,12 @@ int main() {
 
     table.start_usb_hello_window(2000);
     CHECK(table.usb()->hello_window_started);
-    CHECK(table.usb()->hello_window_start_ms == 2000);
-    CHECK(multiclient::client_is_old(*table.usb(), 2000 + multiclient::hello_window_ms));
+    CHECK(table.usb()->hello_window_start_us == 2000);
+    CHECK(multiclient::client_is_old(*table.usb(), 2000 + multiclient::hello_window_us));
 
     // Calling it again once started does not push the deadline back.
     table.start_usb_hello_window(9000);
-    CHECK(table.usb()->hello_window_start_ms == 2000);
+    CHECK(table.usb()->hello_window_start_us == 2000);
   }
 
   {
@@ -299,7 +299,7 @@ int main() {
     TEST("a lone unidentified WiFi client, past its window, is not old-and-not-alone");
     multiclient::ClientTable table;
     const int index = table.add_wifi(address(1, 1, 1, 1, 1), 0);
-    const uint32_t later = multiclient::hello_window_ms;
+    const uint32_t later = multiclient::hello_window_us;
     CHECK(multiclient::client_is_old(*table.wifi_at(index), later));
     CHECK(table.present_count() == 1);  // alone: today's behaviour, nothing to enforce
   }
@@ -309,7 +309,7 @@ int main() {
     multiclient::ClientTable table;
     const int first = table.add_wifi(address(1, 1, 1, 1, 1), 0);
     table.add_wifi(address(2, 2, 2, 2, 2), 0);
-    const uint32_t later = multiclient::hello_window_ms;
+    const uint32_t later = multiclient::hello_window_us;
     CHECK(multiclient::client_is_old(*table.wifi_at(first), later));
     CHECK(table.present_count() == 2);  // not alone
   }
@@ -318,7 +318,7 @@ int main() {
     TEST("has_old_client excludes the given WiFi index and, optionally, USB");
     multiclient::ClientTable table;
     const int old_index = table.add_wifi(address(1, 1, 1, 1, 1), 0);
-    const uint32_t later = multiclient::hello_window_ms;
+    const uint32_t later = multiclient::hello_window_us;
 
     CHECK(table.has_old_client(later));              // the WiFi entry is old
     CHECK(!table.has_old_client(later, old_index));  // excluded by index, nothing else present
@@ -368,20 +368,20 @@ int main() {
   {
     TEST("usb_session_expired is false before the idle timeout has elapsed");
     CHECK(!multiclient::usb_session_expired(true, 1000, 1000));
-    CHECK(!multiclient::usb_session_expired(true, 1000 + multiclient::usb_idle_timeout_ms - 1, 1000));
+    CHECK(!multiclient::usb_session_expired(true, 1000 + multiclient::usb_idle_timeout_us - 1, 1000));
   }
 
   {
     TEST("usb_session_expired is true once the idle timeout has elapsed");
-    CHECK(multiclient::usb_session_expired(true, 1000 + multiclient::usb_idle_timeout_ms, 1000));
-    CHECK(multiclient::usb_session_expired(true, 1000 + multiclient::usb_idle_timeout_ms + 60'000, 1000));
+    CHECK(multiclient::usb_session_expired(true, 1000 + multiclient::usb_idle_timeout_us, 1000));
+    CHECK(multiclient::usb_session_expired(true, 1000 + multiclient::usb_idle_timeout_us + 60'000, 1000));
   }
 
   {
-    TEST("usb_session_expired is false when last_activity_ms is ahead of now_ms");
-    // The caller samples now_ms, then reads last_activity_ms as a second
+    TEST("usb_session_expired is false when last_activity_us is ahead of now_us");
+    // The caller samples now_us, then reads last_activity_us as a second
     // step; a byte can arrive on the interrupt in between, leaving
-    // last_activity_ms momentarily ahead of the already-sampled now_ms.
+    // last_activity_us momentarily ahead of the already-sampled now_us.
     // Plain unsigned subtraction would wrap to a huge value here and
     // wrongly report "expired" on an actively-talking link.
     CHECK(!multiclient::usb_session_expired(true, 1000, 1001));
@@ -396,16 +396,16 @@ int main() {
 
     // Still short of the idle timeout: nothing to do yet (this is what the
     // caller checks before calling clear_usb_identity()).
-    CHECK(!multiclient::usb_session_expired(table.usb()->hello_window_started, multiclient::usb_idle_timeout_ms - 1, 0));
+    CHECK(!multiclient::usb_session_expired(table.usb()->hello_window_started, multiclient::usb_idle_timeout_us - 1, 0));
 
     // At the idle timeout, the caller resets the session.
-    CHECK(multiclient::usb_session_expired(table.usb()->hello_window_started, multiclient::usb_idle_timeout_ms, 0));
+    CHECK(multiclient::usb_session_expired(table.usb()->hello_window_started, multiclient::usb_idle_timeout_us, 0));
     table.clear_usb_identity();
     CHECK(table.present_count() == 0);  // no longer counts
 
     // A byte arriving later starts a fresh window.
     table.start_usb_hello_window(50'000);
-    CHECK(table.usb()->hello_window_start_ms == 50'000);
+    CHECK(table.usb()->hello_window_start_us == 50'000);
     CHECK(table.present_count() == 1);
   }
 
@@ -446,7 +446,7 @@ int main() {
   }
 
   {
-    TEST("is_earliest_present picks the lowest hello_window_start_ms, WiFi or USB");
+    TEST("is_earliest_present picks the lowest hello_window_start_us, WiFi or USB");
     multiclient::ClientTable table;
     const int a = table.add_wifi(address(1, 1, 1, 1, 1), 1000);
     const int b = table.add_wifi(address(2, 2, 2, 2, 2), 2000);
@@ -475,11 +475,11 @@ int main() {
     // client that is old, skip it if it is the earliest present one.
     multiclient::ClientTable table;
     const int first = table.add_wifi(address(1, 1, 1, 1, 1), 0);
-    const int second = table.add_wifi(address(2, 2, 2, 2, 2), 3000);  // 3s later
+    const int second = table.add_wifi(address(2, 2, 2, 2, 2), 3'000'000);  // 3s later
 
     // At 5s, first is old; second (only 2s into its own window) is not --
     // not yet decided, not a reason to disconnect anyone.
-    const uint32_t at_5s = 5000;
+    const uint32_t at_5s = 5'000'000;
     CHECK(multiclient::client_is_old(*table.wifi_at(first), at_5s));
     CHECK(!multiclient::client_is_old(*table.wifi_at(second), at_5s));
     CHECK(!table.any_identified_present());
@@ -489,7 +489,7 @@ int main() {
     // only the later one (second) is fair game -- first stays spared as
     // the earliest, for as long as it remains present, whether or not it
     // has itself been decided old.
-    const uint32_t at_8s = 8000;
+    const uint32_t at_8s = 8'000'000;
     CHECK(multiclient::client_is_old(*table.wifi_at(first), at_8s));
     CHECK(multiclient::client_is_old(*table.wifi_at(second), at_8s));
     CHECK(!table.any_identified_present());
@@ -502,8 +502,8 @@ int main() {
     TEST("once the earliest disconnects, the next-earliest present becomes the keeper");
     multiclient::ClientTable table;
     const int first = table.add_wifi(address(1, 1, 1, 1, 1), 0);
-    table.add_wifi(address(2, 2, 2, 2, 2), 3000);
-    const int third = table.add_wifi(address(3, 3, 3, 3, 3), 6000);
+    table.add_wifi(address(2, 2, 2, 2, 2), 3'000'000);
+    const int third = table.add_wifi(address(3, 3, 3, 3, 3), 6'000'000);
 
     CHECK(table.is_earliest_present(first));
     table.remove_wifi(first);  // as if enforce_old_client_rule()'s driver disconnect took
@@ -518,8 +518,8 @@ int main() {
     TEST("a client that identifies ends its own candidacy, and everyone else's exemption");
     multiclient::ClientTable table;
     const int first = table.add_wifi(address(1, 1, 1, 1, 1), 0);
-    table.add_wifi(address(2, 2, 2, 2, 2), 3000);
-    const uint32_t now = 8000;  // both old, per the earlier scenario
+    table.add_wifi(address(2, 2, 2, 2, 2), 3'000'000);
+    const uint32_t now = 8'000'000;  // both old, per the earlier scenario
 
     CHECK(!table.any_identified_present());
     CHECK(multiclient::client_is_old(*table.wifi_at(first), now));
@@ -533,13 +533,13 @@ int main() {
   }
 
   {
-    TEST("record_heartbeat updates last_heartbeat_ms and nothing else");
+    TEST("record_heartbeat updates last_heartbeat_us and nothing else");
     multiclient::ClientTable table;
     const int index = table.add_wifi(address(1, 1, 1, 1, 1), 100);
     multiclient::Client *client = table.wifi_at(index);
-    CHECK(client->last_heartbeat_ms == 100);  // set by add_wifi
+    CHECK(client->last_heartbeat_us == 100);  // set by add_wifi
     multiclient::record_heartbeat(*client, 5000);
-    CHECK(client->last_heartbeat_ms == 5000);
+    CHECK(client->last_heartbeat_us == 5000);
     CHECK(!client->identified);  // a heartbeat never identifies a client
   }
 
@@ -626,6 +626,93 @@ int main() {
     const int reused = table.add_wifi(address(2, 2, 2, 2, 2), 1000);
     CHECK(!table.wifi_at(reused)->send_failed);
     CHECK(table.wifi_at(reused)->consecutive_send_failures == 0);
+  }
+
+  // --- Wrap-boundary pins ---
+  //
+  // Every timestamp here is now a raw us_ticker_read() reading, which wraps
+  // at the full width of uint32_t (~71.58 minutes). Before this fix, the
+  // call sites divided that reading by 1000 first, producing a millisecond
+  // value that only ever ranges 0..4,294,967 -- because it resets to 0
+  // whenever the underlying raw counter wraps, not because uint32_t
+  // arithmetic overflows at that point. A signed- or unsigned-subtraction
+  // idiom that assumes its input wraps at its own type's full range breaks
+  // on a value with that narrower, artificial modulus. Each block below
+  // reconstructs the OLD call-site arithmetic inline (dividing by 1000
+  // exactly as WifiProvider.cpp and SerialConsole.cpp used to) to show it
+  // giving the wrong answer for a real scenario, then calls this file's
+  // actual (fixed) function with the same real scenario in raw microseconds
+  // to show the right one.
+
+  {
+    TEST("client_is_old: old call-site arithmetic misjudges a fresh client "
+         "as old right after a wrap; the fixed function does not");
+    // A raw counter reading 300 us before it wraps, and `now` 300 us later
+    // (i.e. 44 us after the wrap): 300 us of real elapsed time, nowhere
+    // near the 5 s hello window.
+    const uint32_t stored_raw = 0xFFFFFFFFu - 299u;  // 4294966996
+    const uint32_t now_raw = static_cast<uint32_t>(
+        static_cast<uint64_t>(stored_raw) + 300ull);  // wraps to 0
+    CHECK(now_raw < stored_raw);  // sanity: this really did wrap
+    CHECK(now_raw == 0u);
+
+    // Old call-site arithmetic: both sides divided by 1000 before being
+    // compared, exactly as WifiProvider::receive_wifi_data() and
+    // SerialConsole::process_makera_byte() used to do, against the old
+    // hello_window_ms of 5000.
+    const uint32_t old_stored_ms = stored_raw / 1000u;  // 4294966
+    const uint32_t old_now_ms = now_raw / 1000u;         // 0
+    const uint32_t old_hello_window_ms = 5000u;
+    const bool old_result = (old_now_ms - old_stored_ms) >= old_hello_window_ms;
+    CHECK(old_result);  // wrong: declares a 0.3 ms-old client "old"
+
+    // The fixed function, given the same real scenario as raw microseconds.
+    multiclient::Client client;
+    client.hello_window_started = true;
+    client.hello_window_start_us = stored_raw;
+    CHECK(!multiclient::client_is_old(client, now_raw));  // correct: not old
+  }
+
+  {
+    TEST("usb_session_expired: old call-site arithmetic misses a real "
+         "timeout that straddles a wrap; the fixed function catches it");
+    // A raw counter reading 5,000,000 us (5 s) before it wraps, and `now`
+    // 15,000,000 us (15 s) later: 15 s of real elapsed time, past the 10 s
+    // USB idle timeout.
+    const uint32_t last_activity_raw = 0xFFFFFFFFu - 4'999'999u;  // 4289967296
+    const uint32_t now_raw = static_cast<uint32_t>(
+        static_cast<uint64_t>(last_activity_raw) + 15'000'000ull);  // 10,000,000
+    CHECK(now_raw < last_activity_raw);  // sanity: this really did wrap
+    CHECK(now_raw == 10'000'000u);
+
+    // Old call-site arithmetic: both sides divided by 1000 first, against
+    // the old usb_idle_timeout_ms of 10000, using the same signed-cast
+    // idiom usb_session_expired() itself uses.
+    const uint32_t old_last_ms = last_activity_raw / 1000u;  // 4289967
+    const uint32_t old_now_ms = now_raw / 1000u;              // 10000
+    const uint32_t old_usb_idle_timeout_ms = 10000u;
+    const int32_t old_elapsed_ms = static_cast<int32_t>(old_now_ms - old_last_ms);
+    const bool old_result = old_elapsed_ms >= static_cast<int32_t>(old_usb_idle_timeout_ms);
+    CHECK(!old_result);  // wrong: a real 15 s gap reads as -4,279,967 ms
+
+    // The fixed function, given the same real scenario as raw microseconds.
+    CHECK(multiclient::usb_session_expired(true, now_raw, last_activity_raw));  // correct: expired
+  }
+
+  {
+    TEST("has_old_client (the old-client rule) is correct across a wrap, "
+         "using the fixed function on raw microseconds");
+    // Same shape as the client_is_old pair above, exercised through the
+    // table so the old-client rule that gates a new hello is pinned too.
+    const uint32_t stored_raw = 0xFFFFFFFFu - 29'999'999u;  // 4264967296
+    const uint32_t now_raw = static_cast<uint32_t>(
+        static_cast<uint64_t>(stored_raw) + 30'000'016ull);
+    CHECK(now_raw < stored_raw);  // sanity: this really did wrap
+
+    multiclient::ClientTable table;
+    const int index = table.add_wifi(address(1, 1, 1, 1, 1), stored_raw);
+    (void)index;
+    CHECK(table.has_old_client(now_raw));  // 30 s real gap, past the 5 s window
   }
 
   std::printf("\n%d checks, %d failures\n", checks, failures);
