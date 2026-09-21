@@ -39,6 +39,8 @@
 
 #include "libs/MakeraControl.h"
 #include "libs/MakeraFrame.h"
+#include "libs/ControlToken.h"
+#include "modules/utils/player/PlayerPublicAccess.h"
 #include "port_api.h"
 #include "InterruptIn.h"
 
@@ -1139,12 +1141,88 @@ void WifiProvider::on_idle(void *argument)
     }
 }
 
+// The control-token gate (libs/ControlToken.h): the one place a WiFi
+// client's command is decided against the shared control token, right
+// before it would otherwise be dispatched. See SerialConsole::gate_dispatch()
+// for the same gate on the USB link, against the same
+// multiclient::shared_control_token() -- this is deliberately one function
+// per transport rather than one shared free function, because this side
+// needs a client_index and an active_reply_client save/restore that USB's
+// single-client link has no equivalent for -- but both call into the same
+// ControlToken::gate() decision, so the rule itself lives in exactly one
+// place.
+bool WifiProvider::gate_dispatch(int client_index, const makera::Packet &packet) {
+	const multiclient::Traffic traffic = packet.type == PTYPE_FILE_START
+		? multiclient::classify_file_transfer_start()
+		: multiclient::classify_command_line(reinterpret_cast<const char*>(packet.data), packet.data_length);
+
+	const multiclient::Identity sender =
+		multiclient::identity_of(multiclient::shared_client_table().wifi_at(client_index));
+
+	// Kernel::get_state() == RUN is ambiguous between a running job, a jog,
+	// an MDI move and an automatic tool-change move; is_playing()
+	// disambiguates it. See libs/ControlToken.h's MotionState for why these
+	// three facts are enough.
+	const uint8_t machine_state = THEKERNEL->get_state();
+	multiclient::MotionState motion;
+	motion.run = (machine_state == RUN);
+	motion.homing = (machine_state == HOME);
+	bool playing = false;
+	if (PublicData::get_value(player_checksum, is_playing_checksum, &playing)) motion.job_playing = playing;
+
+	const multiclient::GateResult result = multiclient::shared_control_token().gate(sender, traffic, motion);
+
+	if (result.refused) {
+		// printf(), not puts(): a Makera-mode reply must go out through
+		// PacketMessage() so it is framed like any other reply. puts()
+		// itself sends raw bytes with no framing at all -- see
+		// PacketMessage() below, which builds the frame before calling it --
+		// and is only ever right for the one deliberately-unframed
+		// diagnostic in receive_wifi_data() aimed at pre-2.2.0 clients that
+		// don't speak the framed protocol yet.
+		const int saved_reply_client = active_reply_client;
+		active_reply_client = client_index;
+		const multiclient::Identity &holder = multiclient::shared_control_token().holder();
+		if (holder.identified) {
+			printf("error:Transfer refused -- %.*s has control and an interactive move is in progress\r\n",
+			       static_cast<int>(holder.name_len), holder.name);
+		} else {
+			printf("error:Transfer refused -- an interactive move is in progress\r\n");
+		}
+		active_reply_client = saved_reply_client;
+		return false;
+	}
+
+	if (result.holder_changed) {
+		const multiclient::Identity &holder = multiclient::shared_control_token().holder();
+		uint8_t payload[1 + 8 + 1 + multiclient::max_name_length];
+		const std::size_t length =
+			multiclient::build_control_changed_event(holder.id, holder.name, holder.name_len, payload, sizeof(payload));
+		if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+	}
+
+	return true;
+}
+
 void WifiProvider::on_main_loop(void *argument)
 {
 	if (communication_protocol == PROTOCOL_MAKERA) {
 		if (command_waiting && command_waiting_client >= 0 && !THEKERNEL->is_dispatching_console_line()) {
 			const int client_index = command_waiting_client;
 			const makera::Packet &packet = wifi_streams[client_index].decoder.packet();
+
+			// Cleared before the gate, not after: a refused command must not
+			// be retried on the next tick, and gate_dispatch() has already
+			// sent its own reply by the time it returns.
+			command_waiting = false;
+			command_waiting_client = -1;
+
+			// The control-token gate (libs/ControlToken.h): classifies this
+			// command, moves the token in single-user mode, or refuses it
+			// with a visible reason while interactive motion is in
+			// progress. A refused command is never published or dispatched.
+			if (!gate_dispatch(client_index, packet)) return;
+
 			struct SerialMessage message;
 			message.message.assign(reinterpret_cast<const char *>(packet.data), packet.data_length);
 			message.stream = this;
@@ -1158,8 +1236,6 @@ void WifiProvider::on_main_loop(void *argument)
 				publish_console_line(client_index, message.message.c_str(), message.message.size());
 			}
 
-			command_waiting = false;
-			command_waiting_client = -1;
 			// Resetting to -1 unconditionally (not save/restore) is correct
 			// here specifically: the is_dispatching_console_line() guard
 			// above means this call is never itself nested inside another
