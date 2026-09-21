@@ -96,4 +96,21 @@ std::size_t build_alarm_halt_event(uint8_t halt_reason, uint8_t* out, std::size_
   return 2;
 }
 
+std::size_t build_control_changed_event(uint64_t holder_id, const char* holder_name, uint8_t holder_name_len,
+                                         uint8_t* out, std::size_t out_capacity) {
+  const std::size_t needed = 1 + 8 + 1 + holder_name_len;
+  if (needed > out_capacity) return 0;
+
+  std::size_t offset = 0;
+  out[offset++] = event_kind_control_changed;
+  for (int i = 0; i < 8; ++i) out[offset + i] = static_cast<uint8_t>(holder_id >> (8 * (7 - i)));
+  offset += 8;
+  out[offset++] = holder_name_len;
+  if (holder_name_len != 0) {
+    std::memcpy(out + offset, holder_name, holder_name_len);
+    offset += holder_name_len;
+  }
+  return offset;
+}
+
 }  // namespace multiclient

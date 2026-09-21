@@ -79,6 +79,7 @@ constexpr uint8_t event_kind_upload_finished = 1;
 constexpr uint8_t event_kind_play_started = 2;
 constexpr uint8_t event_kind_job_ended = 3;
 constexpr uint8_t event_kind_alarm_halt = 4;
+constexpr uint8_t event_kind_control_changed = 5;
 
 // event_kind_upload_finished's checksum_type. This build always writes
 // event_checksum_none -- see the change explanation for why no digest is
@@ -118,5 +119,16 @@ std::size_t build_job_ended_event(const char* path, uint8_t path_len, uint8_t pe
 // (Kernel.h) -- reusing it rather than inventing a second vocabulary for
 // the same fact.
 std::size_t build_alarm_halt_event(uint8_t halt_reason, uint8_t* out, std::size_t out_capacity);
+
+// "control changed": kind(1) + holder_id(8, BE) + holder_name_len(1) +
+// holder_name. `holder_id == 0 && holder_name_len == 0` together mean
+// nobody has control (the holder disconnected or silently dropped) -- a
+// real client's id is vanishingly unlikely to be exactly 0, since it is a
+// random 64-bit value chosen once and kept forever (see the identify
+// handshake, ClientTable.h). Published by the control gate (libs/
+// ControlToken.h) whenever the holder actually changes, including to
+// nobody.
+std::size_t build_control_changed_event(uint64_t holder_id, const char* holder_name, uint8_t holder_name_len,
+                                         uint8_t* out, std::size_t out_capacity);
 
 }  // namespace multiclient
