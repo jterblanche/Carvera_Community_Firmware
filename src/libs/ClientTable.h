@@ -138,17 +138,30 @@ void record_heartbeat(Client& client, uint32_t now_us);
 
 // True once `client`'s hello window has run out without it identifying.
 // Always false once identified, and false while the window has not started
-// (an idle USB link) or has not elapsed yet. `now_us` and
-// `hello_window_start_us` are raw us_ticker_read() readings (see the
-// comment on hello_window_us above): plain unsigned subtraction recovers
-// the true elapsed time correctly across a wrap of the counter they are
-// readings of, for any true gap up to its full 2^32 range -- unlike the
-// signed idiom used elsewhere in this file, this does not need a half-range
-// margin. Left as plain unsigned subtraction deliberately, not the signed
-// idiom: nothing about "has this client's hello window expired" ever needs
-// to distinguish a negative gap from a very large positive one, so the
-// stronger (full-range) guarantee plain subtraction gives is strictly
-// better here, at no cost.
+// (an idle USB link) or has not elapsed yet. Called for either a WiFi slot
+// or the USB entry (see has_old_client()).
+//
+// For a WiFi slot, `hello_window_start_us` is stamped by add_wifi() before
+// the caller that admitted it ever samples a `now_us` to compare against,
+// so it can never be later than one. The USB entry is different:
+// start_usb_hello_window() runs from the USB receive interrupt
+// (SerialConsole::on_serial_char_received), while a caller such as
+// WifiProvider::receive_wifi_data() samples `now_us` once and only checks
+// other clients (via has_old_client()) some lines -- and possibly a whole
+// decode loop -- later. A byte can arrive on USB in that gap, starting its
+// hello window with a timestamp later than the `now_us` already sampled.
+//
+// The subtraction is done as a signed difference, the same idiom
+// usb_session_expired() below uses for the same reason, so that case (a
+// hello_window_start_us that turns out to be in the future) yields a small
+// negative number, safely under the window, rather than the huge value
+// plain unsigned subtraction would wrap around to -- which would otherwise
+// read as "old" and refuse a hello from a perfectly normal client for that
+// one call, on account of a USB entry that had only just started
+// listening. Being the signed idiom, this is only correct while the true
+// gap stays under ~35.8 minutes (half of 2^32 us) -- comfortably true
+// here, since a hello window is 5 s and a client that runs past it without
+// identifying is disconnected, not left to sit.
 bool client_is_old(const Client& client, uint32_t now_us);
 
 // True once a USB entry's hello window has started and at least
@@ -269,9 +282,15 @@ class ClientTable {
   bool any_identified_present() const;
 
   // True if WiFi index `wifi_index` is the earliest-admitted client
-  // currently present (WiFi or USB), by hello_window_start_us. Ties (an
-  // identical timestamp) are treated as "earliest" on both sides, so nobody
-  // is evicted in that vanishingly unlikely case. Used together with
+  // currently present (WiFi or USB), by hello_window_start_us. Two clients
+  // can be admitted in the same microsecond -- add_wifi() and
+  // start_usb_hello_window() each stamp with a single us_ticker_read()
+  // reading, which does not advance every call -- so a tied timestamp is
+  // broken by slot index rather than left to read as "earliest" on both
+  // sides, which would spare more than one client from the old-client rule
+  // at once. The USB entry sorts before every WiFi index for this purpose,
+  // so a tie between USB and a WiFi client resolves in USB's favour.
+  // Exactly one present client is ever earliest. Used together with
   // any_identified_present() to decide which old WiFi client to spare:
   // while nobody present has identified, the earliest-admitted one present
   // is never disconnected by the old-client rule, whether or not it has

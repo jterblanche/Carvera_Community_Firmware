@@ -237,6 +237,23 @@ int main() {
   }
 
   {
+    TEST("a client is not old when its hello window start races ahead of the "
+         "already-sampled now_us");
+    // start_usb_hello_window() can be called from the USB receive interrupt
+    // after a caller has already sampled now_us (see the comment on
+    // client_is_old in ClientTable.h), so hello_window_start_us can end up
+    // one microsecond later than the now_us it is about to be compared
+    // against. Plain unsigned subtraction of a stored timestamp that is
+    // later than now_us wraps to a value near 2^32, which reads as long
+    // expired; the signed idiom reads the same case as a small negative
+    // gap, safely under the window.
+    multiclient::Client client;
+    client.hello_window_started = true;
+    client.hello_window_start_us = 1000;
+    CHECK(!multiclient::client_is_old(client, 999));  // start is 1 us ahead of now
+  }
+
+  {
     TEST("a WiFi client's hello window starts the moment it is admitted");
     multiclient::ClientTable table;
     const int index = table.add_wifi(address(1, 2, 3, 4, 1), 5000);
@@ -457,6 +474,29 @@ int main() {
     table.start_usb_hello_window(500);  // earlier than both WiFi clients
     CHECK(!table.is_earliest_present(a));
     CHECK(!table.is_earliest_present(b));
+  }
+
+  {
+    TEST("is_earliest_present breaks a tied hello_window_start_us between "
+         "two WiFi clients by slot index");
+    // add_wifi() stamps hello_window_start_us from a single us_ticker_read()
+    // reading taken by the caller before either client is admitted, so two
+    // clients connecting in the same microsecond really can tie.
+    multiclient::ClientTable table;
+    const int a = table.add_wifi(address(1, 1, 1, 1, 1), 5000);
+    const int b = table.add_wifi(address(2, 2, 2, 2, 2), 5000);  // same microsecond as a
+    CHECK(a < b);  // sanity: admission order gives a the lower slot index
+    CHECK(table.is_earliest_present(a));
+    CHECK(!table.is_earliest_present(b));  // not also "earliest" on the tie
+  }
+
+  {
+    TEST("is_earliest_present breaks a tie between USB and a WiFi client in USB's favour");
+    multiclient::ClientTable table;
+    const int a = table.add_wifi(address(1, 1, 1, 1, 1), 5000);
+    table.set_usb_present(true, 0);
+    table.start_usb_hello_window(5000);  // same microsecond as a
+    CHECK(!table.is_earliest_present(a));  // USB, not a, is earliest on the tie
   }
 
   {

@@ -18,7 +18,8 @@ void record_heartbeat(Client& client, uint32_t now_us) { client.last_heartbeat_u
 bool client_is_old(const Client& client, uint32_t now_us) {
   if (client.identified) return false;
   if (!client.hello_window_started) return false;
-  return now_us - client.hello_window_start_us >= hello_window_us;
+  const int32_t elapsed_us = static_cast<int32_t>(now_us - client.hello_window_start_us);
+  return elapsed_us >= static_cast<int32_t>(hello_window_us);
 }
 
 bool usb_session_expired(bool hello_window_started, uint32_t now_us, uint32_t last_activity_us) {
@@ -167,16 +168,38 @@ bool ClientTable::any_identified_present() const {
   return usb_.in_use && usb_.client.identified;
 }
 
+namespace {
+
+// The USB entry has no WiFi slot index of its own; for the tiebreak below it
+// sorts before every WiFi index (0, 1, 2, ...), so a tie between USB and a
+// WiFi client resolves in USB's favour.
+constexpr int usb_slot_index = -1;
+
+// True if the client admitted at (ts_a, slot_a) is strictly earlier than the
+// one at (ts_b, slot_b). Equal timestamps are broken by slot index, so this
+// gives a strict order even when both clients were admitted in the same
+// microsecond.
+bool admitted_before(uint32_t ts_a, int slot_a, uint32_t ts_b, int slot_b) {
+  if (ts_a != ts_b) return before(ts_a, ts_b);
+  return slot_a < slot_b;
+}
+
+}  // namespace
+
 bool ClientTable::is_earliest_present(int wifi_index) const {
   const Client* candidate = wifi_at(wifi_index);
   if (candidate == nullptr) return false;
 
   for (std::size_t i = 0; i < max_wifi_clients; ++i) {
     if (static_cast<int>(i) == wifi_index || !wifi_[i].in_use) continue;
-    if (before(wifi_[i].client.hello_window_start_us, candidate->hello_window_start_us)) return false;
+    if (admitted_before(wifi_[i].client.hello_window_start_us, static_cast<int>(i),
+                         candidate->hello_window_start_us, wifi_index)) {
+      return false;
+    }
   }
   if (usb_.in_use && usb_.client.hello_window_started &&
-      before(usb_.client.hello_window_start_us, candidate->hello_window_start_us)) {
+      admitted_before(usb_.client.hello_window_start_us, usb_slot_index,
+                       candidate->hello_window_start_us, wifi_index)) {
     return false;
   }
   return true;
