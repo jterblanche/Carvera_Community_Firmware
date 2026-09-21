@@ -740,7 +740,7 @@ void WifiProvider::enforce_old_client_rule(uint32_t now_us) {
 				break;
 			}
 		}
-		disconnect_wifi_client(client->address, "old controller, another client is connected", !already_logged);
+		disconnect_wifi_client(client->address, "its controller needs updating to share the machine with another one", !already_logged);
 		if (!already_logged && logged_old_client_disconnect_count < max_logged_old_client_disconnects) {
 			logged_old_client_disconnects[logged_old_client_disconnect_count++] = client->address;
 		}
@@ -765,8 +765,10 @@ void WifiProvider::forget_wifi_client(int client_index) {
 
 // Called once a second (see on_second_tick) with the driver's current client
 // list. Reaps table entries for clients that disappeared since the last
-// call, logging the driver's own last-disconnect-cause query so an eviction
-// by the module shows up in the log rather than looking like a silent drop.
+// call. This covers every kind of departure, including a controller closing
+// its own connection normally, so nothing is logged here for it: see
+// disconnect_wifi_client() for the cases this firmware itself disconnects a
+// client, which are the ones worth telling a user about.
 // As a safety net, also closes any connection the driver is still holding
 // that this firmware never admitted -- for example one that connected but
 // never sent a byte -- once the WiFi table is at its cap, so a connection we
@@ -808,15 +810,12 @@ void WifiProvider::reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_
 		}
 		if (still_present) continue;
 
-		s8 disconnect_cause = 0;
-		u16 status = 0;
-		M8266WIFI_SPI_Query_Last_Tcp_Disconnect_Cause(tcp_link_no, &disconnect_cause, &status);
-		THEKERNEL->streams->printf(
-			"WIFI: client %u.%u.%u.%u:%u disappeared, module's last TCP disconnect cause %d "
-			"(-3 send timeout, -9 remote reset, -20 closed by remote, -21/-22 closed locally; "
-			"reflects whichever client left most recently if more than one left this tick)\n",
-			client->address.ip[0], client->address.ip[1], client->address.ip[2], client->address.ip[3],
-			client->address.port, int(disconnect_cause));
+		// The module already dropped this client on its own -- a normal
+		// disconnect (someone closing their controller) goes through here
+		// just as much as an abnormal one, so this is not logged; the
+		// driver's disconnect-cause query was a bring-up diagnostic for
+		// telling those two apart while this code was new, not something a
+		// user needs on every departure.
 		table.remove_wifi(i);
 		forget_wifi_client(i);
 	}
