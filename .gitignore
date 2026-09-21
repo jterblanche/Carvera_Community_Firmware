@@ -36,6 +36,7 @@
 /gcc-arm-none-eabi*
 /clang-format*
 /LPC1768
+/LPC1768-z1
 /build/cmake/
 /CMakeUserPresets.json
 /mbed/drop
