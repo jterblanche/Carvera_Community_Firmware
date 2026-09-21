@@ -13,18 +13,18 @@ void set_identity(Client& client, uint64_t id, const char* name, uint8_t name_le
   client.identified = true;
 }
 
-void record_heartbeat(Client& client, uint32_t now_ms) { client.last_heartbeat_ms = now_ms; }
+void record_heartbeat(Client& client, uint32_t now_us) { client.last_heartbeat_us = now_us; }
 
-bool client_is_old(const Client& client, uint32_t now_ms) {
+bool client_is_old(const Client& client, uint32_t now_us) {
   if (client.identified) return false;
   if (!client.hello_window_started) return false;
-  return now_ms - client.hello_window_start_ms >= hello_window_ms;
+  return now_us - client.hello_window_start_us >= hello_window_us;
 }
 
-bool usb_session_expired(bool hello_window_started, uint32_t now_ms, uint32_t last_activity_ms) {
+bool usb_session_expired(bool hello_window_started, uint32_t now_us, uint32_t last_activity_us) {
   if (!hello_window_started) return false;
-  const int32_t elapsed_ms = static_cast<int32_t>(now_ms - last_activity_ms);
-  return elapsed_ms >= static_cast<int32_t>(usb_idle_timeout_ms);
+  const int32_t elapsed_us = static_cast<int32_t>(now_us - last_activity_us);
+  return elapsed_us >= static_cast<int32_t>(usb_idle_timeout_us);
 }
 
 int ClientTable::find_wifi(const Address& address) const {
@@ -34,7 +34,7 @@ int ClientTable::find_wifi(const Address& address) const {
   return -1;
 }
 
-int ClientTable::add_wifi(const Address& address, uint32_t now_ms) {
+int ClientTable::add_wifi(const Address& address, uint32_t now_us) {
   const int existing = find_wifi(address);
   if (existing >= 0) return existing;
 
@@ -44,14 +44,14 @@ int ClientTable::add_wifi(const Address& address, uint32_t now_ms) {
     wifi_[i].client = Client{};
     wifi_[i].client.link = Link::wifi;
     wifi_[i].client.address = address;
-    wifi_[i].client.last_user_ms = now_ms;
-    wifi_[i].client.last_heartbeat_ms = now_ms;
+    wifi_[i].client.last_user_us = now_us;
+    wifi_[i].client.last_heartbeat_us = now_us;
     // The firmware only learns a WiFi client exists once it has sent
     // something, so "now" is the closest approximation available to when
     // the TCP connection was actually accepted -- the hello window starts
     // here.
     wifi_[i].client.hello_window_started = true;
-    wifi_[i].client.hello_window_start_ms = now_ms;
+    wifi_[i].client.hello_window_start_us = now_us;
     return static_cast<int>(i);
   }
   return -1;
@@ -104,7 +104,7 @@ void ClientTable::clear_wifi() {
   for (Slot& slot : wifi_) slot = Slot{};
 }
 
-void ClientTable::set_usb_present(bool present, uint32_t now_ms) {
+void ClientTable::set_usb_present(bool present, uint32_t now_us) {
   if (!present) {
     usb_ = Slot{};
     return;
@@ -113,18 +113,18 @@ void ClientTable::set_usb_present(bool present, uint32_t now_ms) {
   usb_.in_use = true;
   usb_.client = Client{};
   usb_.client.link = Link::usb;
-  usb_.client.last_user_ms = now_ms;
-  usb_.client.last_heartbeat_ms = now_ms;
+  usb_.client.last_user_us = now_us;
+  usb_.client.last_heartbeat_us = now_us;
 }
 
 Client* ClientTable::usb() { return usb_.in_use ? &usb_.client : nullptr; }
 
 const Client* ClientTable::usb() const { return usb_.in_use ? &usb_.client : nullptr; }
 
-void ClientTable::start_usb_hello_window(uint32_t now_ms) {
+void ClientTable::start_usb_hello_window(uint32_t now_us) {
   if (!usb_.in_use || usb_.client.hello_window_started) return;
   usb_.client.hello_window_started = true;
-  usb_.client.hello_window_start_ms = now_ms;
+  usb_.client.hello_window_start_us = now_us;
 }
 
 void ClientTable::clear_usb_identity() {
@@ -151,13 +151,13 @@ bool ClientTable::usb_has_id(uint64_t id) const {
   return usb_.in_use && usb_.client.identified && usb_.client.id == id;
 }
 
-bool ClientTable::has_old_client(uint32_t now_ms, int except_wifi_index, bool exclude_usb) const {
+bool ClientTable::has_old_client(uint32_t now_us, int except_wifi_index, bool exclude_usb) const {
   for (std::size_t i = 0; i < max_wifi_clients; ++i) {
     if (static_cast<int>(i) == except_wifi_index || !wifi_[i].in_use) continue;
-    if (client_is_old(wifi_[i].client, now_ms)) return true;
+    if (client_is_old(wifi_[i].client, now_us)) return true;
   }
   if (exclude_usb) return false;
-  return usb_.in_use && client_is_old(usb_.client, now_ms);
+  return usb_.in_use && client_is_old(usb_.client, now_us);
 }
 
 bool ClientTable::any_identified_present() const {
@@ -173,10 +173,10 @@ bool ClientTable::is_earliest_present(int wifi_index) const {
 
   for (std::size_t i = 0; i < max_wifi_clients; ++i) {
     if (static_cast<int>(i) == wifi_index || !wifi_[i].in_use) continue;
-    if (ms_before(wifi_[i].client.hello_window_start_ms, candidate->hello_window_start_ms)) return false;
+    if (before(wifi_[i].client.hello_window_start_us, candidate->hello_window_start_us)) return false;
   }
   if (usb_.in_use && usb_.client.hello_window_started &&
-      ms_before(usb_.client.hello_window_start_ms, candidate->hello_window_start_ms)) {
+      before(usb_.client.hello_window_start_us, candidate->hello_window_start_us)) {
     return false;
   }
   return true;

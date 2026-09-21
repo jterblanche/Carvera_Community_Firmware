@@ -2,8 +2,8 @@
 
 namespace makera {
 
-ResyncResult ResyncingDecoder::decode_byte(uint8_t byte, uint32_t now_ms) {
-  const DecodeResult result = decoder_.decode_byte(byte, now_ms);
+ResyncResult ResyncingDecoder::decode_byte(uint8_t byte, uint32_t now_us) {
+  const DecodeResult result = decoder_.decode_byte(byte, now_us);
 
   if (result == DecodeResult::incomplete) {
     // Once in_progress() (a header byte matched, or we're past the header

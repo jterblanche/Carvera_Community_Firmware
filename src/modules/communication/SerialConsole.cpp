@@ -51,7 +51,7 @@ extern unsigned char xbuff[XBUFF_LENGTH];
 static makera::Packet makera_packet;
 static RingBuffer<char, 1024> makera_rx_bytes;
 // Let a back-to-back burst finish before command handlers reply on the same UART.
-constexpr uint32_t makera_rx_quiet_ms = 2;
+constexpr uint32_t makera_rx_quiet_us = 2000;
 constexpr int uart_rx_error = -2;
 #if defined(MACHINE_FAMILY_Z1)
 static uint32_t last_version_us;
@@ -69,8 +69,8 @@ SerialConsole::SerialConsole( PinName tx_pin, PinName rx_pin, int baud_rate )
     this->current_baud_rate = baud_rate;
     this->default_baud_rate = baud_rate;
     this->temp_baud_rate = 0;
-    this->last_activity_ms = 0;
-    this->status_publish_interval_ms = multiclient::status_publish_interval_ms(multiclient::default_status_publish_hz);
+    this->last_activity_us = 0;
+    this->status_publish_interval_us = multiclient::status_publish_interval_us(multiclient::default_status_publish_hz);
     this->makera_rx_overflow = false;
     this->command_waiting = false;
     this->makera_frame_decoder.reset();
@@ -101,7 +101,7 @@ void SerialConsole::on_module_loaded() {
     int configured_publish_hz =
         THEKERNEL->config->value(multi_client_checksum, status_publish_hz_checksum)->as_int(multiclient::default_status_publish_hz);
     if (configured_publish_hz < 0) configured_publish_hz = multiclient::default_status_publish_hz;
-    this->status_publish_interval_ms = multiclient::status_publish_interval_ms(static_cast<uint16_t>(configured_publish_hz));
+    this->status_publish_interval_us = multiclient::status_publish_interval_us(static_cast<uint16_t>(configured_publish_hz));
 
 #if defined(MACHINE_FAMILY_CARVERA)
     default_baud_rate = THEKERNEL->config->value(uart_checksum, baud_rate_setting_checksum)->as_number(current_baud_rate);
@@ -118,7 +118,7 @@ void SerialConsole::on_module_loaded() {
     // chip's native USB is unused; this link is a UART), so unlike a WiFi
     // socket there is no connect/disconnect event to key this on -- it is
     // simply always present from boot.
-    multiclient::shared_client_table().set_usb_present(true, us_ticker_read() / 1000);
+    multiclient::shared_client_table().set_usb_present(true, us_ticker_read());
 
     // We only call the command dispatcher in the main loop, nowhere else
     this->register_for_event(ON_MAIN_LOOP);
@@ -133,7 +133,7 @@ void SerialConsole::set_baud_temporary(int new_baud) {
     this->temp_baud_rate = new_baud;
     this->current_baud_rate = new_baud;
     this->serial->baud(new_baud);
-    this->last_activity_ms = us_ticker_read() / 1000;
+    this->last_activity_us = us_ticker_read();
 }
 
 void SerialConsole::set_rx_enabled(bool enabled) {
@@ -166,7 +166,7 @@ void SerialConsole::on_serial_char_received() {
 	int received_byte;
 	while ((received_byte = this->read_byte()) >= 0) {
 		char received = static_cast<char>(received_byte);
-		last_activity_ms = us_ticker_read() / 1000;
+		last_activity_us = us_ticker_read();
 
 		if(THEKERNEL->is_cachewait()) {
 			continue;
@@ -176,7 +176,7 @@ void SerialConsole::on_serial_char_received() {
             // The firmware cannot detect a bare USB cable, only bytes
             // actually arriving on it -- this is where a USB controller
             // starts counting as present for the old-client rule.
-            multiclient::shared_client_table().start_usb_hello_window(last_activity_ms);
+            multiclient::shared_client_table().start_usb_hello_window(last_activity_us);
             const int next = makera_rx_bytes.next_block_index(makera_rx_bytes.head);
             if (next == makera_rx_bytes.tail) {
                 makera_rx_overflow = true;
@@ -209,7 +209,7 @@ void SerialConsole::on_serial_char_received() {
                 THEKERNEL->set_internal_stop_request(false);
             } else {
                 THEKERNEL->set_stop_request(true); // generic stop what you are doing request
-                THEKERNEL->set_stop_request_time(us_ticker_read() / 1000);
+                THEKERNEL->set_stop_request_time(us_ticker_read());
             }
             continue;
         }
@@ -250,9 +250,9 @@ void SerialConsole::on_idle(void * argument)
     if (rx_dispatch_enabled) on_serial_char_received();
 #endif
 
-    const uint32_t now_ms = us_ticker_read() / 1000;
+    const uint32_t now_us = us_ticker_read();
     if (communication_protocol == PROTOCOL_MAKERA && !command_waiting &&
-        now_ms - last_activity_ms >= makera_rx_quiet_ms) {
+        now_us - last_activity_us >= makera_rx_quiet_us) {
         while (!command_waiting && makera_rx_bytes.tail != makera_rx_bytes.head) {
             char received;
             makera_rx_bytes.pop_front(received);
@@ -262,7 +262,7 @@ void SerialConsole::on_idle(void * argument)
     }
 
     // A USB entry whose hello window has started but has gone quiet for
-    // usb_idle_timeout_ms is treated as no longer present: its identity and
+    // usb_idle_timeout_us is treated as no longer present: its identity and
     // hello-window progress are cleared, the same reset a protocol switch
     // already does, so it stops counting toward "present" (and, if it never
     // identified, toward "old and not alone") until something arrives on it
@@ -271,14 +271,14 @@ void SerialConsole::on_idle(void * argument)
     if (communication_protocol == PROTOCOL_MAKERA) {
         auto &table = multiclient::shared_client_table();
         const multiclient::Client *usb = table.usb();
-        if (usb != nullptr && multiclient::usb_session_expired(usb->hello_window_started, now_ms, last_activity_ms)) {
+        if (usb != nullptr && multiclient::usb_session_expired(usb->hello_window_started, now_us, last_activity_us)) {
             table.clear_usb_identity();
         }
     }
 
 #if defined(MACHINE_FAMILY_CARVERA)
     if (temp_baud_rate != 0) {
-        if ((now_ms - last_activity_ms) >= 15000) {
+        if ((now_us - last_activity_us) >= 15000000u) {
             this->serial->baud(default_baud_rate);
             this->current_baud_rate = default_baud_rate;
             this->temp_baud_rate = 0;
@@ -301,8 +301,8 @@ void SerialConsole::on_idle(void * argument)
     }
 
     if (communication_protocol == PROTOCOL_MAKERA &&
-        multiclient::publish_due(now_ms, last_status_publish_ms, status_publish_interval_ms)) {
-        last_status_publish_ms = now_ms;
+        multiclient::publish_due(now_us, last_status_publish_us, status_publish_interval_us)) {
+        last_status_publish_us = now_us;
         const multiclient::Client *usb = multiclient::shared_client_table().usb();
         if (usb != nullptr && usb->identified) {
             PacketMessage(PTYPE_STATUS_RES, THEKERNEL->get_query_string().c_str(), 0);
@@ -346,11 +346,13 @@ void SerialConsole::on_idle(void * argument)
     }
 
 #if defined(MACHINE_FAMILY_Z1)
-    const uint32_t now_us = us_ticker_read();
-    if (now_us - last_version_us > version_interval_us) {
+    // Named apart from the now_us read at the top of this function: both are
+    // at function scope, and this block wants its own reading taken here.
+    const uint32_t version_now_us = us_ticker_read();
+    if (version_now_us - last_version_us > version_interval_us) {
         Version version;
         PacketMessage(PTYPE_FIRM_VER, version.get_build(), 0);
-        last_version_us = now_us;
+        last_version_us = version_now_us;
     }
 #endif
 }
@@ -480,7 +482,7 @@ int SerialConsole::gets(char** buf, int size)
 
 void SerialConsole::process_makera_byte(uint8_t received)
 {
-    const makera::DecodeResult result = makera_frame_decoder.decode_byte(received, last_activity_ms);
+    const makera::DecodeResult result = makera_frame_decoder.decode_byte(received, last_activity_us);
     if (result != makera::DecodeResult::complete) return;
 
     const makera::Packet &packet = makera_frame_decoder.packet();
@@ -500,7 +502,7 @@ void SerialConsole::process_makera_byte(uint8_t received)
     }
 
     if (packet.type == PTYPE_HELLO) {
-        handle_hello(packet.data, packet.data_length, last_activity_ms);
+        handle_hello(packet.data, packet.data_length, last_activity_us);
         return;
     }
 
@@ -511,7 +513,7 @@ void SerialConsole::process_makera_byte(uint8_t received)
 
     if (packet.type == PTYPE_HEARTBEAT) {
         multiclient::Client *self = multiclient::shared_client_table().usb();
-        if (self != nullptr) multiclient::record_heartbeat(*self, last_activity_ms);
+        if (self != nullptr) multiclient::record_heartbeat(*self, last_activity_us);
         return;
     }
 
@@ -537,7 +539,7 @@ void SerialConsole::process_makera_byte(uint8_t received)
 // reused, which it already does on every admission). A first-time hello
 // while an old (never-identified, window-expired) client is already known
 // to be connected -- other than this USB link itself -- is refused.
-void SerialConsole::handle_hello(const uint8_t* payload, uint16_t payload_length, uint32_t now_ms) {
+void SerialConsole::handle_hello(const uint8_t* payload, uint16_t payload_length, uint32_t now_us) {
     auto &table = multiclient::shared_client_table();
     multiclient::Client *self = table.usb();
     if (self == nullptr) return;
@@ -549,7 +551,7 @@ void SerialConsole::handle_hello(const uint8_t* payload, uint16_t payload_length
         const int stale = table.find_wifi_by_id(hello.id);
         if (stale >= 0) table.remove_wifi(stale);
 
-        if (table.has_old_client(now_ms, -1, /*exclude_usb=*/true)) {
+        if (table.has_old_client(now_us, -1, /*exclude_usb=*/true)) {
             uint8_t ack[multiclient::hello_ack_length];
             const std::size_t ack_len = multiclient::build_hello_ack(
                 ack, multiclient::hello_result_old_controller_present, multiclient::hello_mode_single_user);
@@ -637,7 +639,7 @@ int SerialConsole::receive_packet(makera::Packet& packet, uint32_t timeout_ms)
         if (byte < 0) continue;
 
         const makera::DecodeResult result = makera_frame_decoder.decode_byte(
-            static_cast<uint8_t>(byte), us_ticker_read() / 1000);
+            static_cast<uint8_t>(byte), us_ticker_read());
         if (result == makera::DecodeResult::invalid_crc) {
             makera_frame_decoder.reset();
             return -3;
@@ -710,6 +712,11 @@ void SerialConsole::on_protocol_changed()
     // traffic yet under whichever protocol is now in effect, so the hello
     // window has not started either.
     multiclient::shared_client_table().clear_usb_identity();
+    // publish_due() is only checked from this file's Makera-mode branch of
+    // on_idle(), so last_status_publish_us stops being refreshed for as long
+    // as the link stays in Smoothie mode. See WifiProvider::on_protocol_changed()
+    // for why that matters and why "now", not 0, is the right value to reset it to.
+    last_status_publish_us = us_ticker_read();
 }
 
 int SerialConsole::_putc(int c)

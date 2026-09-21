@@ -9,46 +9,46 @@ void FrameDecoder::reset() {
   footer_high_ = 0;
   trailer_ = 0;
   calculated_crc_ = 0;
-  last_byte_ms_ = 0;
+  last_byte_us_ = 0;
   header_prefix_ = false;
   have_last_byte_ = false;
 }
 
-void FrameDecoder::restart_with(uint8_t byte, uint32_t now_ms) {
+void FrameDecoder::restart_with(uint8_t byte, uint32_t now_us) {
   reset();
   header_prefix_ = byte == static_cast<uint8_t>(header >> 8);
-  last_byte_ms_ = now_ms;
+  last_byte_us_ = now_us;
   have_last_byte_ = true;
 }
 
-void FrameDecoder::keep_consumed_header(uint32_t now_ms) {
+void FrameDecoder::keep_consumed_header(uint32_t now_us) {
   reset();
   received_ = 2;
-  last_byte_ms_ = now_ms;
+  last_byte_us_ = now_us;
   have_last_byte_ = true;
 }
 
-void FrameDecoder::restart_from_trailer(uint32_t now_ms) {
+void FrameDecoder::restart_from_trailer(uint32_t now_us) {
   const uint32_t trailer = trailer_;
   if ((trailer & 0xFFFF) == header) {
-    keep_consumed_header(now_ms);
+    keep_consumed_header(now_us);
     return;
   }
 
   if (((trailer >> 8) & 0xFFFF) == header) {
-    keep_consumed_header(now_ms);
-    decode_byte(static_cast<uint8_t>(trailer), now_ms);
+    keep_consumed_header(now_us);
+    decode_byte(static_cast<uint8_t>(trailer), now_us);
     return;
   }
 
   if ((trailer >> 16) == header) {
-    keep_consumed_header(now_ms);
-    decode_byte(static_cast<uint8_t>(trailer >> 8), now_ms);
-    decode_byte(static_cast<uint8_t>(trailer), now_ms);
+    keep_consumed_header(now_us);
+    decode_byte(static_cast<uint8_t>(trailer >> 8), now_us);
+    decode_byte(static_cast<uint8_t>(trailer), now_us);
     return;
   }
 
-  restart_with(static_cast<uint8_t>(trailer), now_ms);
+  restart_with(static_cast<uint8_t>(trailer), now_us);
 }
 
 std::size_t FrameDecoder::bytes_wanted() const {
@@ -57,9 +57,9 @@ std::size_t FrameDecoder::bytes_wanted() const {
   return expected_ - received_;
 }
 
-DecodeResult FrameDecoder::decode_byte(uint8_t byte, uint32_t now_ms) {
-  if (in_progress() && have_last_byte_ && now_ms - last_byte_ms_ >= frame_timeout_ms) reset();
-  last_byte_ms_ = now_ms;
+DecodeResult FrameDecoder::decode_byte(uint8_t byte, uint32_t now_us) {
+  if (in_progress() && have_last_byte_ && now_us - last_byte_us_ >= frame_timeout_us) reset();
+  last_byte_us_ = now_us;
   have_last_byte_ = true;
 
   if (received_ == 0) {
@@ -82,9 +82,9 @@ DecodeResult FrameDecoder::decode_byte(uint8_t byte, uint32_t now_ms) {
     const uint16_t length = (static_cast<uint16_t>(length_high_) << 8) | byte;
     if (length < 3 || length > max_data_size + 3) {
       if (length == header) {
-        keep_consumed_header(now_ms);
+        keep_consumed_header(now_us);
       } else {
-        restart_with(byte, now_ms);
+        restart_with(byte, now_us);
       }
       return DecodeResult::invalid_length;
     }
@@ -115,7 +115,7 @@ DecodeResult FrameDecoder::decode_byte(uint8_t byte, uint32_t now_ms) {
 
   const uint16_t received_footer = (static_cast<uint16_t>(footer_high_) << 8) | byte;
   if (position != expected_ - 1 || received_footer != footer) {
-    restart_from_trailer(now_ms);
+    restart_from_trailer(now_us);
     return DecodeResult::invalid_footer;
   }
 

@@ -81,7 +81,7 @@ private:
 
     // Makera-mode per-client routing. `client_index` is a slot in
     // `wifi_streams`/the shared ClientTable's WiFi entries, in [0, max_wifi_clients).
-    int route_makera_client(const u8 remote_ip[4], u16 remote_port, uint32_t now_ms);
+    int route_makera_client(const u8 remote_ip[4], u16 remote_port, uint32_t now_us);
     void disconnect_wifi_client(const multiclient::Address& address, const char* reason, bool log = true);
     // What one send to one client actually did. Callers that publish treat
     // `dropped` as an ordinary loss and carry on; the point-to-point reply
@@ -96,11 +96,11 @@ private:
     void broadcast_to_identified_wifi_clients(const u8* data, size_t length);
     void reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_clients[]);
     void forget_wifi_client(int client_index);
-    void enforce_old_client_rule(uint32_t now_ms);
+    void enforce_old_client_rule(uint32_t now_us);
 
     // Handles a decoded hello/client-list-request frame. Both reply inline,
     // addressed to that one client (see receive_wifi_data()).
-    void handle_wifi_hello(int client_index, const uint8_t* payload, uint16_t payload_length, uint32_t now_ms);
+    void handle_wifi_hello(int client_index, const uint8_t* payload, uint16_t payload_length, uint32_t now_us);
     void handle_wifi_client_list_request(int client_index);
     // Sends a framed reply addressed to one specific client, regardless of
     // whatever active_reply_client currently holds (saves and restores it).
@@ -112,7 +112,7 @@ private:
     // separately (on_idle). Already inherits the existing "no status while
     // uploading" pause, since this runs from on_idle which bails out on
     // THEKERNEL->is_uploading() before either mechanism runs.
-    void publish_status_if_due(uint32_t now_ms);
+    void publish_status_if_due(uint32_t now_us);
 
     // Publishes `text` (a command's own text, or its reply) as one or more
     // published-console-line (0x69) fragments, tagged with client_index's
@@ -128,8 +128,8 @@ private:
 
     // multi_client.status_publish_hz, converted once at load time
     // (on_module_loaded) from the configured rate.
-    uint32_t status_publish_interval_ms;
-    uint32_t last_status_publish_ms = 0;
+    uint32_t status_publish_interval_us;
+    uint32_t last_status_publish_us = 0;
 
     mbed::InterruptIn *wifi_interrupt_pin; // Interrupt pin for measuring speed
 

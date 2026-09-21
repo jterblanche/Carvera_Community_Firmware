@@ -18,17 +18,27 @@ namespace multiclient {
 // `multi_client.status_publish_hz` falls back to this when unset.
 constexpr uint16_t default_status_publish_hz = 5;
 
-// Converts a configured rate into an interval in milliseconds. A
+// Converts a configured rate into an interval in microseconds. A
 // configured value of 0, or anything above 50 Hz, is clamped -- 0 would
 // otherwise mean "publish every tick", and an unreasonably high rate would
 // spend more time sending status than doing anything else. 50 Hz is far
 // above the 5 Hz default and above any plausible reason to raise it.
-uint32_t status_publish_interval_ms(uint16_t hz);
+// Microseconds, not milliseconds: see publish_due() below for why.
+uint32_t status_publish_interval_us(uint16_t hz);
 
-// True once `interval_ms` has passed since `last_publish_ms`. Wrap-safe:
-// the same signed-subtraction idiom every other millisecond timeout in this
-// codebase already relies on.
-bool publish_due(uint32_t now_ms, uint32_t last_publish_ms, uint32_t interval_ms);
+// True once `interval` has passed since `last_publish`. Wrap-safe via the
+// signed-subtraction idiom every millisecond-scale timeout in this codebase
+// used to rely on -- but that idiom is only correct when the value wraps at
+// the full width of its type. Callers MUST pass raw us_ticker_read()
+// readings (or a difference of two such readings), never a value derived by
+// dividing one down to a coarser unit: a narrowed value wraps at a smaller
+// number than 2^32, and after that wrap this idiom sees a large negative
+// difference instead of a small one, so `now` never overtakes `last` again
+// -- `last_publish` latches at its pre-wrap value forever, because it is
+// only ever rewritten by the very publish this check gates. `interval` is
+// in the same units as `now`/`last_publish` -- this codebase always calls
+// it in microseconds now, via status_publish_interval_us() above.
+bool publish_due(uint32_t now, uint32_t last_publish, uint32_t interval);
 
 // --- Published console line (0x69) fragmentation ---
 

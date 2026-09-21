@@ -147,6 +147,12 @@ class Kernel {
         bool get_stop_request() const { return stop_request; }
         void set_stop_request(bool f) { stop_request= f; }
 
+        // A raw us_ticker_read() reading (microseconds), not milliseconds --
+        // every caller of set_stop_request_time() passes us_ticker_read()
+        // directly, and the one reader (SimpleShell.cpp's ^Y timeout check)
+        // compares it the same way. Dividing either side down to milliseconds
+        // first would wrap this value at a smaller number than the full
+        // 32-bit range, breaking the wrap-safe comparison the reader relies on.
         uint32_t get_stop_request_time() const { return stop_request_time; }
         void set_stop_request_time(uint32_t t) { stop_request_time = t; }
 

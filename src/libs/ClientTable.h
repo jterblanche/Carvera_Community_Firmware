@@ -24,23 +24,31 @@ inline bool same_address(const Address& a, const Address& b) {
 constexpr std::size_t max_name_length = 31;
 
 // How long a client has, from the moment its hello window starts, to send
-// hello before it is treated as an old (pre-identify) client.
-constexpr uint32_t hello_window_ms = 5000;
+// hello before it is treated as an old (pre-identify) client. Microseconds
+// -- every timestamp in this file is a raw us_ticker_read() reading (or a
+// difference of two), never one divided down to milliseconds. Dividing
+// would make it wrap at a value smaller than 2^32, which breaks the
+// wrap-safe idioms below (see Publish.h's publish_due() for the failure
+// mode this produces elsewhere in the multi-client work).
+constexpr uint32_t hello_window_us = 5000000;
 
 // How long a USB entry can go with no frame at all before its session is
 // considered over: its identity and hello-window progress are reset, the
 // same as a protocol switch does, so it stops counting as present until
-// something arrives on it again. This is unrelated to hello_window_ms
+// something arrives on it again. This is unrelated to hello_window_us
 // above (5 s, how long an unidentified client has before it is old) --
 // it matches the WiFi module's own default dead-client timeout instead
 // (10 s, kept as one rule across links).
-constexpr uint32_t usb_idle_timeout_ms = 10000;
+constexpr uint32_t usb_idle_timeout_us = 10000000;
 
-// True if `a` happened before `b`, correct across a millisecond-counter
-// wrap: the same signed-subtraction idiom every timeout check in this
-// codebase already relies on, applied to a direct comparison between two
-// timestamps instead of a "how long ago" check.
-constexpr bool ms_before(uint32_t a, uint32_t b) {
+// True if `a` happened before `b`, correct across a wrap of the counter
+// `a`/`b` are readings of, PROVIDED that counter wraps at the full width of
+// uint32_t: the signed-subtraction idiom every timeout check in this
+// codebase relies on, applied to a direct comparison between two
+// timestamps instead of a "how long ago" check. Only valid while the true
+// gap between `a` and `b` stays under half the counter's range (~35.8
+// minutes for a raw microsecond counter).
+constexpr bool before(uint32_t a, uint32_t b) {
   return static_cast<int32_t>(a - b) < 0;
 }
 
@@ -54,8 +62,8 @@ struct Client {
   uint64_t id = 0;
   char name[max_name_length + 1] = {0};  // NUL-terminated
   uint8_t name_len = 0;                  // length excluding the NUL, 0..max_name_length
-  uint32_t last_user_ms = 0;
-  uint32_t last_heartbeat_ms = 0;
+  uint32_t last_user_us = 0;
+  uint32_t last_heartbeat_us = 0;
 
   // When this client's hello window started. For a WiFi client this is set
   // as soon as the table admits it (add_wifi) -- the firmware only learns a
@@ -67,7 +75,7 @@ struct Client {
   // (ClientTable::start_usb_hello_window) -- a USB controller only counts as
   // present once it is actually talking.
   bool hello_window_started = false;
-  uint32_t hello_window_start_ms = 0;
+  uint32_t hello_window_start_us = 0;
 
   // Set when a send to this client fails in a way that means the client is
   // gone, rather than merely busy. Nothing is removed from the table here:
@@ -120,38 +128,50 @@ void note_send_result(Client& client, bool sent_everything, uint8_t errcode);
 // of defence).
 void set_identity(Client& client, uint64_t id, const char* name, uint8_t name_len);
 
-// Records that `client` sent a heartbeat at `now_ms`. Accepted from any
+// Records that `client` sent a heartbeat at `now_us`. Accepted from any
 // connected client, identified or not -- the WiFi module's own idle timeout
 // already treats traffic in either direction as keeping a link alive (see
 // the protocol contract's heartbeat section for why the heartbeat message
 // is kept anyway); this firmware only needs to remember when it last heard
 // one, not act on it itself.
-void record_heartbeat(Client& client, uint32_t now_ms);
+void record_heartbeat(Client& client, uint32_t now_us);
 
 // True once `client`'s hello window has run out without it identifying.
 // Always false once identified, and false while the window has not started
-// (an idle USB link) or has not elapsed yet. now_ms wraps the same way every
-// other millisecond timestamp in this firmware does; the subtraction is
-// correct across a wrap.
-bool client_is_old(const Client& client, uint32_t now_ms);
+// (an idle USB link) or has not elapsed yet. `now_us` and
+// `hello_window_start_us` are raw us_ticker_read() readings (see the
+// comment on hello_window_us above): plain unsigned subtraction recovers
+// the true elapsed time correctly across a wrap of the counter they are
+// readings of, for any true gap up to its full 2^32 range -- unlike the
+// signed idiom used elsewhere in this file, this does not need a half-range
+// margin. Left as plain unsigned subtraction deliberately, not the signed
+// idiom: nothing about "has this client's hello window expired" ever needs
+// to distinguish a negative gap from a very large positive one, so the
+// stronger (full-range) guarantee plain subtraction gives is strictly
+// better here, at no cost.
+bool client_is_old(const Client& client, uint32_t now_us);
 
 // True once a USB entry's hello window has started and at least
-// usb_idle_timeout_ms has passed since the last byte received on it
-// (`last_activity_ms`, tracked by the caller -- SerialConsole, not this
+// usb_idle_timeout_us has passed since the last byte received on it
+// (`last_activity_us`, tracked by the caller -- SerialConsole, not this
 // table). When this becomes true, the caller is expected to call
 // ClientTable::clear_usb_identity() to end that session; false again
 // immediately afterwards, since hello_window_started is then false.
 //
-// The caller samples `now_ms` and then reads `last_activity_ms` as two
-// separate steps, and `last_activity_ms` is written from an interrupt that
-// can fire in between -- so `last_activity_ms` can end up later than the
-// `now_ms` already sampled, meaning a byte arrived after the check started.
+// The caller samples `now_us` and then reads `last_activity_us` as two
+// separate steps, and `last_activity_us` is written from an interrupt that
+// can fire in between -- so `last_activity_us` can end up later than the
+// `now_us` already sampled, meaning a byte arrived after the check started.
 // The subtraction is done as a signed difference specifically so that
 // case (a timestamp that turns out to be in the future) yields a small
 // negative number, safely less than the timeout, rather than the huge
 // value plain unsigned subtraction would wrap around to -- which would
-// otherwise read as "expired" and end an actively-talking session.
-bool usb_session_expired(bool hello_window_started, uint32_t now_ms, uint32_t last_activity_ms);
+// otherwise read as "expired" and end an actively-talking session. Being
+// the signed idiom, this is only correct while the true gap stays under
+// ~35.8 minutes (half of 2^32 us) -- comfortably true here, since
+// `last_activity_us` is refreshed by every received byte and the timeout
+// itself is 10 s.
+bool usb_session_expired(bool hello_window_started, uint32_t now_us, uint32_t last_activity_us);
 
 // Engineering limit: 3 WiFi clients plus the one USB link. See version.txt
 // and WifiProvider.cpp for why the WiFi module's own client limit is kept
@@ -173,7 +193,7 @@ class ClientTable {
   // new connection itself. Adding an address already present is a no-op that
   // returns its existing index (a reconnect before the old entry was reaped
   // does not consume a second slot).
-  int add_wifi(const Address& address, uint32_t now_ms);
+  int add_wifi(const Address& address, uint32_t now_us);
 
   // Removes the WiFi client at `index`. Returns false if `index` is out of
   // range or already empty.
@@ -184,7 +204,7 @@ class ClientTable {
 
   // Returns the client at `index`, or nullptr if `index` is out of range or
   // the slot is empty. The returned pointer may be used to update
-  // `identified`, `last_user_ms` and `last_heartbeat_ms`; it is invalidated
+  // `identified`, `last_user_us` and `last_heartbeat_us`; it is invalidated
   // by any add_wifi/remove_wifi/clear_wifi call.
   Client* wifi_at(int index);
   const Client* wifi_at(int index) const;
@@ -199,14 +219,14 @@ class ClientTable {
   // The single USB entry. `set_usb_present(true, ...)` creates it if absent;
   // `set_usb_present(false, ...)` removes it. USB has no address, so unlike
   // WiFi there is nothing to key a reconnect on.
-  void set_usb_present(bool present, uint32_t now_ms);
+  void set_usb_present(bool present, uint32_t now_us);
   Client* usb();
   const Client* usb() const;
 
   // Marks the USB entry as now talking (its hello window starts), if it is
   // present and hasn't already -- see Client::hello_window_started. A no-op
   // if the USB slot is absent or already started.
-  void start_usb_hello_window(uint32_t now_ms);
+  void start_usb_hello_window(uint32_t now_us);
 
   // Resets the USB entry's identity and hello-window progress without
   // removing the slot itself (there is nothing to reconnect for USB). Used
@@ -235,7 +255,7 @@ class ClientTable {
   // never see itself as the reason its own hello is refused -- and to
   // decide whether the discovery beacon should report one present (no
   // exclusions there).
-  bool has_old_client(uint32_t now_ms, int except_wifi_index = -1, bool exclude_usb = false) const;
+  bool has_old_client(uint32_t now_us, int except_wifi_index = -1, bool exclude_usb = false) const;
 
   // True if some currently-present client (WiFi or USB) is identified.
   // Used by the old-client rule: while nobody present has identified, an
@@ -249,7 +269,7 @@ class ClientTable {
   bool any_identified_present() const;
 
   // True if WiFi index `wifi_index` is the earliest-admitted client
-  // currently present (WiFi or USB), by hello_window_start_ms. Ties (an
+  // currently present (WiFi or USB), by hello_window_start_us. Ties (an
   // identical timestamp) are treated as "earliest" on both sides, so nobody
   // is evicted in that vanishingly unlikely case. Used together with
   // any_identified_present() to decide which old WiFi client to spare:
