@@ -59,7 +59,7 @@ class ResyncingDecoder {
   // returning, so decode_byte() is always safe to call again immediately
   // with the next byte -- including a byte still sitting in the same
   // caller-side buffer as the one that just failed.
-  ResyncResult decode_byte(uint8_t byte, uint32_t now_ms);
+  ResyncResult decode_byte(uint8_t byte, uint32_t now_us);
 
   // Resets the wrapped decoder, the error count and the pending
   // notification, as if newly constructed. Call this whenever a slot is

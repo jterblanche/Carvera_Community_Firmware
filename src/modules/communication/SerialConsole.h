@@ -60,7 +60,7 @@ class SerialConsole : public Module, public StreamOutput {
         int current_baud_rate;
         int default_baud_rate;
         int temp_baud_rate;                       // non-zero = temporary baud active
-        uint32_t last_activity_ms;                // for 15s timeout revert
+        uint32_t last_activity_us;                // for 15s timeout revert (a raw us_ticker_read() reading, not a value divided down to ms)
         makera::FrameDecoder makera_frame_decoder;
 #if defined(SERIAL_RX_DMA)
         bool rx_dispatch_enabled;
@@ -83,7 +83,7 @@ class SerialConsole : public Module, public StreamOutput {
         void process_makera_byte(uint8_t received);
         void reset_file_parser();
         int check_file_packet(char **buf);
-        void handle_hello(const uint8_t* payload, uint16_t payload_length, uint32_t now_ms);
+        void handle_hello(const uint8_t* payload, uint16_t payload_length, uint32_t now_us);
         void handle_client_list_request();
 
         // Publishes `text` (a command's own text, or its reply) as one or
@@ -94,8 +94,8 @@ class SerialConsole : public Module, public StreamOutput {
         void publish_console_line(const char* text, size_t length);
 
         // multi_client.status_publish_hz, converted once at load time.
-        uint32_t status_publish_interval_ms;
-        uint32_t last_status_publish_ms = 0;
+        uint32_t status_publish_interval_us;
+        uint32_t last_status_publish_us = 0;
         struct {
           volatile bool query_flag:1;
           volatile bool halt_flag:1;

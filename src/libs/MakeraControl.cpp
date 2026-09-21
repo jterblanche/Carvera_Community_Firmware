@@ -13,7 +13,7 @@ ControlAction handle_control(uint8_t control) {
         THEKERNEL->set_internal_stop_request(false);
       } else {
         THEKERNEL->set_stop_request(true);
-        THEKERNEL->set_stop_request_time(us_ticker_read() / 1000);
+        THEKERNEL->set_stop_request_time(us_ticker_read());
       }
       break;
     case ControlAction::keep_alive:

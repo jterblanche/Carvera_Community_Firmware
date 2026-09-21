@@ -92,7 +92,7 @@ WifiProvider::WifiProvider()
 	wifi_seconds = 0;
 	sta_flap_count = 0;
 	ap_hold_remaining_s = 0;
-	status_publish_interval_ms = multiclient::status_publish_interval_ms(multiclient::default_status_publish_hz);
+	status_publish_interval_us = multiclient::status_publish_interval_us(multiclient::default_status_publish_hz);
 	ap_auto_disable = true;
 	ap_currently_on = true;
 	ap_manually_disabled = false;
@@ -136,7 +136,7 @@ void WifiProvider::on_module_loaded()
 	int configured_publish_hz =
 		THEKERNEL->config->value(multi_client_checksum, status_publish_hz_checksum)->as_int(multiclient::default_status_publish_hz);
 	if (configured_publish_hz < 0) configured_publish_hz = multiclient::default_status_publish_hz;
-	this->status_publish_interval_ms = multiclient::status_publish_interval_ms(static_cast<uint16_t>(configured_publish_hz));
+	this->status_publish_interval_us = multiclient::status_publish_interval_us(static_cast<uint16_t>(configured_publish_hz));
 	std::string config_name = THEKERNEL->config->value(wifi_checksum, machine_name_checksum)->as_string("CARVERA");
 	this->ap_auto_disable = THEKERNEL->config->value(wifi_checksum, ap_auto_disable_checksum)->as_bool(true);
     strncpy(this->machine_name, config_name.c_str(), sizeof(this->machine_name) - 1);
@@ -332,16 +332,16 @@ void WifiProvider::receive_wifi_data() {
 			if (count > WIFI_DATA_MAX_SIZE) count = WIFI_DATA_MAX_SIZE;
 			if (link_no == udp_link_no) return;
 
-			const uint32_t admit_now_ms = us_ticker_read() / 1000;
-			client_index = route_makera_client(remote_ip, remote_port, admit_now_ms);
+			const uint32_t admit_now_us = us_ticker_read();
+			client_index = route_makera_client(remote_ip, remote_port, admit_now_us);
 			if (client_index < 0) continue; // refused and disconnected; these bytes are dropped
 			start = 0;
 		}
 
-		const uint32_t now_ms = us_ticker_read() / 1000;
+		const uint32_t now_us = us_ticker_read();
 		WifiClientStream &client = wifi_streams[client_index];
 		for (uint16_t i = start; i < count; ++i) {
-			const makera::ResyncResult result = client.decoder.decode_byte(WifiData[i], now_ms);
+			const makera::ResyncResult result = client.decoder.decode_byte(WifiData[i], now_us);
 			if (result == makera::ResyncResult::header_error) {
 				// The decoder has already resynchronised itself (reset,
 				// ready to try the very next byte as a fresh header) --
@@ -393,7 +393,7 @@ void WifiProvider::receive_wifi_data() {
 			}
 
 			if (packet.type == PTYPE_HELLO) {
-				handle_wifi_hello(client_index, packet.data, packet.data_length, now_ms);
+				handle_wifi_hello(client_index, packet.data, packet.data_length, now_us);
 				continue;
 			}
 
@@ -404,7 +404,7 @@ void WifiProvider::receive_wifi_data() {
 
 			if (packet.type == PTYPE_HEARTBEAT) {
 				multiclient::Client *self = multiclient::shared_client_table().wifi_at(client_index);
-				if (self != nullptr) multiclient::record_heartbeat(*self, now_ms);
+				if (self != nullptr) multiclient::record_heartbeat(*self, now_us);
 				continue;
 			}
 
@@ -439,7 +439,7 @@ void WifiProvider::receive_wifi_data() {
 // if it is new and there is room. Returns the wifi_streams index to decode
 // into, or -1 if the client was refused (already disconnected by this call)
 // -- the caller must not decode any of this chunk's bytes in that case.
-int WifiProvider::route_makera_client(const u8 remote_ip[4], u16 remote_port, uint32_t now_ms) {
+int WifiProvider::route_makera_client(const u8 remote_ip[4], u16 remote_port, uint32_t now_us) {
 	multiclient::Address address;
 	memcpy(address.ip, remote_ip, sizeof(address.ip));
 	address.port = remote_port;
@@ -448,7 +448,7 @@ int WifiProvider::route_makera_client(const u8 remote_ip[4], u16 remote_port, ui
 	int index = table.find_wifi(address);
 	if (index >= 0) return index;
 
-	index = table.add_wifi(address, now_ms);
+	index = table.add_wifi(address, now_us);
 	if (index < 0) {
 		disconnect_wifi_client(address, "beyond the 3-client cap");
 		return -1;
@@ -572,9 +572,9 @@ void WifiProvider::send_framed_to_identified_wifi_clients(char cmd, const uint8_
 // upload: this whole function is only reached from on_idle()'s Makera-mode
 // branch, and on_idle() already returns immediately if
 // THEKERNEL->is_uploading() (see the top of on_idle()).
-void WifiProvider::publish_status_if_due(uint32_t now_ms) {
-	if (!multiclient::publish_due(now_ms, last_status_publish_ms, status_publish_interval_ms)) return;
-	last_status_publish_ms = now_ms;
+void WifiProvider::publish_status_if_due(uint32_t now_us) {
+	if (!multiclient::publish_due(now_us, last_status_publish_us, status_publish_interval_us)) return;
+	last_status_publish_us = now_us;
 	const std::string status = THEKERNEL->get_query_string();
 	send_framed_to_identified_wifi_clients(PTYPE_STATUS_RES, reinterpret_cast<const uint8_t *>(status.c_str()),
 	                                        status.size());
@@ -634,7 +634,7 @@ void WifiProvider::send_wifi_packet(int client_index, char cmd, const uint8_t* p
 // dropped first. A first-time hello while an old (never-identified,
 // window-expired) client is already known to be connected is refused, so
 // this client never becomes a peer while that's true.
-void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, uint16_t payload_length, uint32_t now_ms) {
+void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, uint16_t payload_length, uint32_t now_us) {
 	auto &table = multiclient::shared_client_table();
 	multiclient::Client *self = table.wifi_at(client_index);
 	if (self == nullptr) return;
@@ -659,7 +659,7 @@ void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, u
 			table.clear_usb_identity();
 		}
 
-		if (table.has_old_client(now_ms, client_index)) {
+		if (table.has_old_client(now_us, client_index)) {
 			uint8_t ack[multiclient::hello_ack_length];
 			const std::size_t ack_len = multiclient::build_hello_ack(
 				ack, multiclient::hello_result_old_controller_present, multiclient::hello_mode_single_user);
@@ -717,7 +717,7 @@ void WifiProvider::handle_wifi_client_list_request(int client_index) {
 // see has_old_client(), which never lets a hello succeed while an old
 // client is already known to be in the mix, so an identified peer's mere
 // presence already proves no old client needed protecting from it.
-void WifiProvider::enforce_old_client_rule(uint32_t now_ms) {
+void WifiProvider::enforce_old_client_rule(uint32_t now_us) {
 	auto &table = multiclient::shared_client_table();
 	if (table.present_count() <= 1) {
 		// Alone (or nobody connected): nothing to enforce. A straggler seen
@@ -730,7 +730,7 @@ void WifiProvider::enforce_old_client_rule(uint32_t now_ms) {
 
 	for (int i = 0; i < static_cast<int>(multiclient::max_wifi_clients); ++i) {
 		const multiclient::Client *client = table.wifi_at(i);
-		if (client == nullptr || !multiclient::client_is_old(*client, now_ms)) continue;
+		if (client == nullptr || !multiclient::client_is_old(*client, now_us)) continue;
 		if (spare_earliest && table.is_earliest_present(i)) continue;
 
 		bool already_logged = false;
@@ -995,8 +995,8 @@ void WifiProvider::on_second_tick(void *)
 		// This branch only runs in Makera mode (the other branch, above,
 		// handles Smoothie mode, which is always single-client).
 		reconcile_wifi_clients(client_num, RemoteClients);
-		enforce_old_client_rule(us_ticker_read() / 1000);
-		const bool old_controller_present = multiclient::shared_client_table().has_old_client(us_ticker_read() / 1000);
+		enforce_old_client_rule(us_ticker_read());
+		const bool old_controller_present = multiclient::shared_client_table().has_old_client(us_ticker_read());
 
 		if (M8266WIFI_SPI_Get_STA_Connection_Status(&connection_status, &status)) {
 			if (connection_status == 5) {
@@ -1092,7 +1092,7 @@ void WifiProvider::on_idle(void *argument)
 			puts(THEKERNEL->get_diagnose_string().c_str(), 0);
 		}
 	} else {
-		publish_status_if_due(us_ticker_read() / 1000);
+		publish_status_if_due(us_ticker_read());
 
 		// Each WiFi client polls independently, so its query/diagnose reply
 		// must go back to that client, not whichever one is handled first.
@@ -1214,6 +1214,17 @@ void WifiProvider::on_protocol_changed()
 	// anything under the new one; nobody is treated as a known client again
 	// until they send something under the protocol now in effect.
 	multiclient::shared_client_table().clear_wifi();
+	// publish_status_if_due() is only reached from this function's Makera-mode
+	// caller (on_idle), so last_status_publish_us stops being refreshed for as
+	// long as the link stays in Smoothie mode -- which can be indefinitely.
+	// The wrap-safe comparison in publish_due() is only valid while the true
+	// gap since the last refresh stays under ~35.8 minutes (see Publish.h);
+	// left alone, a longer stay in Smoothie mode would make the first check
+	// after switching back see an apparently-negative gap and refuse to
+	// publish for up to that same ~35.8 minutes. Stamping the current time
+	// here -- not 0, which is a real point on the counter -- means the very
+	// next due check starts counting from a known-fresh baseline.
+	last_status_publish_us = us_ticker_read();
 	reset();
 }
 

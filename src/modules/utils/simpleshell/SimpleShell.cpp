@@ -2801,7 +2801,12 @@ void SimpleShell::jog(string parameters, StreamOutput *stream)
     // this would result in continuous movement, not a good thing.
     // so check if stop request is true and abort if it is, this means we must leave stop request false after this
     if(THEKERNEL->get_stop_request()) {
-        if((us_ticker_read() / 1000) - THEKERNEL->get_stop_request_time() > 500) {
+        // 500,000 us = the same 500 ms window this always meant. Both sides of
+        // this comparison are raw us_ticker_read() readings now (see
+        // set_stop_request_time()'s callers): dividing either one down to
+        // milliseconds first would wrap it at a smaller number than the full
+        // 32-bit range, breaking this comparison after ~71 minutes of uptime.
+        if(us_ticker_read() - THEKERNEL->get_stop_request_time() > 500000) {
             stream->printf("Stop request timeout\n");
             THEKERNEL->set_stop_request(false);
         }else{

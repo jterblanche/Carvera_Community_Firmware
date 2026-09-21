@@ -10,13 +10,13 @@ constexpr uint16_t min_status_publish_hz = 1;
 constexpr uint16_t max_status_publish_hz = 50;
 }  // namespace
 
-uint32_t status_publish_interval_ms(uint16_t hz) {
+uint32_t status_publish_interval_us(uint16_t hz) {
   const uint16_t clamped = std::clamp(hz, min_status_publish_hz, max_status_publish_hz);
-  return 1000u / clamped;
+  return 1000000u / clamped;
 }
 
-bool publish_due(uint32_t now_ms, uint32_t last_publish_ms, uint32_t interval_ms) {
-  return static_cast<int32_t>(now_ms - last_publish_ms) >= static_cast<int32_t>(interval_ms);
+bool publish_due(uint32_t now, uint32_t last_publish, uint32_t interval) {
+  return static_cast<int32_t>(now - last_publish) >= static_cast<int32_t>(interval);
 }
 
 std::size_t build_console_line_frame(uint64_t source_id, const char* source_name, uint8_t source_name_len,

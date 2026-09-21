@@ -18,7 +18,12 @@ constexpr uint16_t footer = 0x55AA;
 constexpr std::size_t max_frame_size = 544;
 constexpr std::size_t frame_overhead = 9;
 constexpr std::size_t max_data_size = max_frame_size - frame_overhead;
-constexpr uint32_t frame_timeout_ms = 1000;
+// Microseconds, not milliseconds: `now_us` below is always a raw
+// us_ticker_read() reading, never one divided down to a coarser unit. A
+// value divided down that way wraps at a smaller number than the full
+// 32-bit range, which breaks the wrap-safe comparison this timeout relies
+// on. 1,000,000 us = the same 1 s gap this timeout always meant.
+constexpr uint32_t frame_timeout_us = 1000000;
 
 constexpr uint16_t read_be16(const uint8_t* data) {
   return (static_cast<uint16_t>(data[0]) << 8) | data[1];
@@ -56,7 +61,7 @@ class FrameDecoder {
  public:
   explicit FrameDecoder(Packet& packet) : packet_(packet) {}
 
-  DecodeResult decode_byte(uint8_t byte, uint32_t now_ms);
+  DecodeResult decode_byte(uint8_t byte, uint32_t now_us);
   void reset();
 
   bool in_progress() const { return received_ != 0 || header_prefix_; }
@@ -65,9 +70,9 @@ class FrameDecoder {
   const Packet& packet() const { return packet_; }
 
  private:
-  void restart_with(uint8_t byte, uint32_t now_ms);
-  void keep_consumed_header(uint32_t now_ms);
-  void restart_from_trailer(uint32_t now_ms);
+  void restart_with(uint8_t byte, uint32_t now_us);
+  void keep_consumed_header(uint32_t now_us);
+  void restart_from_trailer(uint32_t now_us);
 
   std::size_t received_ = 0;
   std::size_t expected_ = 0;
@@ -75,7 +80,7 @@ class FrameDecoder {
   uint8_t footer_high_ = 0;
   uint32_t trailer_ = 0;
   uint16_t calculated_crc_ = 0;
-  uint32_t last_byte_ms_ = 0;
+  uint32_t last_byte_us_ = 0;
   bool header_prefix_ = false;
   bool have_last_byte_ = false;
   Packet& packet_;
