@@ -737,8 +737,8 @@ void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, u
 // message, not a publish.
 void WifiProvider::handle_wifi_client_list_request(int client_index) {
 	uint8_t payload[multiclient::max_client_list_reply_length];
-	const std::size_t length =
-		multiclient::build_client_list_reply(multiclient::shared_client_table(), payload, sizeof(payload));
+	const std::size_t length = multiclient::build_client_list_reply(
+		multiclient::shared_client_table(), multiclient::shared_control_token(), payload, sizeof(payload));
 	send_wifi_packet(client_index, PTYPE_CLIENT_LIST_REPLY, payload, length);
 }
 

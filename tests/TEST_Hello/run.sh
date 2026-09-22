@@ -13,6 +13,7 @@ trap 'rm -rf "$OUT"' EXIT
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O1 -g \
     -I"$ROOT/src" -I"$ROOT/src/libs" \
     "$ROOT/src/libs/ClientTable.cpp" \
+    "$ROOT/src/libs/ControlToken.cpp" \
     "$ROOT/src/libs/Hello.cpp" \
     "$HERE/test_hello.cpp" \
     -o "$OUT/test_hello"

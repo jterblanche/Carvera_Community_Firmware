@@ -12,7 +12,8 @@ constexpr uint8_t hello_protocol_version = 1;
 // Appends one client-list entry (id + name_len + name + link + has_control)
 // to `out` at `offset`, if it fits within `out_capacity`. Returns the new
 // offset, unchanged if the entry did not fit.
-std::size_t append_client_entry(const Client& client, uint8_t* out, std::size_t offset, std::size_t out_capacity) {
+std::size_t append_client_entry(const Client& client, bool has_control, uint8_t* out, std::size_t offset,
+                                 std::size_t out_capacity) {
   const std::size_t entry_length = 8 + 1 + client.name_len + 1 + 1;
   if (offset + entry_length > out_capacity) return offset;
 
@@ -24,7 +25,7 @@ std::size_t append_client_entry(const Client& client, uint8_t* out, std::size_t 
     offset += client.name_len;
   }
   out[offset++] = client.link == Link::usb ? 1 : 0;
-  out[offset++] = 0;  // has_control: no control-token mechanism yet
+  out[offset++] = has_control ? 1 : 0;
   return offset;
 }
 
@@ -59,14 +60,18 @@ std::size_t build_hello_ack(uint8_t* out, uint8_t result, uint8_t mode) {
   return hello_ack_length;
 }
 
-std::size_t build_client_list_reply(const ClientTable& table, uint8_t* out, std::size_t out_capacity) {
+std::size_t build_client_list_reply(const ClientTable& table, const ControlToken& control, uint8_t* out,
+                                     std::size_t out_capacity) {
   std::size_t offset = 1;  // reserve the count byte
   uint8_t count = 0;
+  const bool has_holder = control.has_holder();
+  const uint64_t holder_id = control.holder().id;
 
   for (std::size_t i = 0; i < max_wifi_clients; ++i) {
     const Client* client = table.wifi_at(static_cast<int>(i));
     if (client == nullptr || !client->identified) continue;
-    const std::size_t next = append_client_entry(*client, out, offset, out_capacity);
+    const bool has_control = has_holder && client->id == holder_id;
+    const std::size_t next = append_client_entry(*client, has_control, out, offset, out_capacity);
     if (next == offset) break;  // out of room
     offset = next;
     ++count;
@@ -74,7 +79,8 @@ std::size_t build_client_list_reply(const ClientTable& table, uint8_t* out, std:
 
   const Client* usb = table.usb();
   if (usb != nullptr && usb->identified) {
-    const std::size_t next = append_client_entry(*usb, out, offset, out_capacity);
+    const bool has_control = has_holder && usb->id == holder_id;
+    const std::size_t next = append_client_entry(*usb, has_control, out, offset, out_capacity);
     if (next != offset) {
       offset = next;
       ++count;

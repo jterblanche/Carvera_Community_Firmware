@@ -657,8 +657,8 @@ void SerialConsole::handle_hello(const uint8_t* payload, uint16_t payload_length
 // -- this is a request-and-reply message, not a publish.
 void SerialConsole::handle_client_list_request() {
     uint8_t payload[multiclient::max_client_list_reply_length];
-    const std::size_t length =
-        multiclient::build_client_list_reply(multiclient::shared_client_table(), payload, sizeof(payload));
+    const std::size_t length = multiclient::build_client_list_reply(
+        multiclient::shared_client_table(), multiclient::shared_control_token(), payload, sizeof(payload));
     PacketMessage(PTYPE_CLIENT_LIST_REPLY, reinterpret_cast<const char*>(payload), static_cast<int>(length));
 }
 
