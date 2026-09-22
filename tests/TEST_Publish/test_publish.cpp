@@ -332,6 +332,56 @@ int main() {
   }
 
   {
+    TEST("build_client_joined_event writes kind, id and name");
+    uint8_t out[1 + 8 + 1 + 9];
+    const std::size_t len =
+        multiclient::build_client_joined_event(0x0102030405060708ull, "Office PC", 9, out, sizeof(out));
+    CHECK(len == sizeof(out));
+    CHECK(out[0] == multiclient::event_kind_client_joined);
+    uint64_t id = 0;
+    for (int i = 0; i < 8; ++i) id = (id << 8) | out[1 + i];
+    CHECK(id == 0x0102030405060708ull);
+    CHECK(out[9] == 9);
+    CHECK(std::memcmp(out + 10, "Office PC", 9) == 0);
+  }
+
+  {
+    TEST("build_client_left_event writes kind, id and name");
+    uint8_t out[1 + 8 + 1 + 9];
+    const std::size_t len =
+        multiclient::build_client_left_event(0x0102030405060708ull, "Office PC", 9, out, sizeof(out));
+    CHECK(len == sizeof(out));
+    CHECK(out[0] == multiclient::event_kind_client_left);
+    uint64_t id = 0;
+    for (int i = 0; i < 8; ++i) id = (id << 8) | out[1 + i];
+    CHECK(id == 0x0102030405060708ull);
+    CHECK(out[9] == 9);
+    CHECK(std::memcmp(out + 10, "Office PC", 9) == 0);
+  }
+
+  {
+    TEST("build_client_joined_event writes a name at max_name_length");
+    const std::string name(multiclient::max_name_length, 'x');
+    uint8_t out[1 + 8 + 1 + multiclient::max_name_length];
+    const std::size_t len = multiclient::build_client_joined_event(
+        42, name.data(), static_cast<uint8_t>(name.size()), out, sizeof(out));
+    CHECK(len == sizeof(out));
+    CHECK(out[9] == multiclient::max_name_length);
+    CHECK(std::memcmp(out + 10, name.data(), multiclient::max_name_length) == 0);
+  }
+
+  {
+    TEST("build_client_left_event writes a name at max_name_length");
+    const std::string name(multiclient::max_name_length, 'x');
+    uint8_t out[1 + 8 + 1 + multiclient::max_name_length];
+    const std::size_t len = multiclient::build_client_left_event(
+        42, name.data(), static_cast<uint8_t>(name.size()), out, sizeof(out));
+    CHECK(len == sizeof(out));
+    CHECK(out[9] == multiclient::max_name_length);
+    CHECK(std::memcmp(out + 10, name.data(), multiclient::max_name_length) == 0);
+  }
+
+  {
     TEST("every event builder refuses to write past out_capacity");
     uint8_t out[3];
     CHECK(multiclient::build_upload_finished_event("abc", 3, 1, out, sizeof(out)) == 0);
@@ -340,6 +390,8 @@ int main() {
     uint8_t tiny[1];
     CHECK(multiclient::build_alarm_halt_event(1, tiny, sizeof(tiny)) == 0);
     CHECK(multiclient::build_control_changed_event(1, "Office PC", 9, tiny, sizeof(tiny)) == 0);
+    CHECK(multiclient::build_client_joined_event(1, "Office PC", 9, tiny, sizeof(tiny)) == 0);
+    CHECK(multiclient::build_client_left_event(1, "Office PC", 9, tiny, sizeof(tiny)) == 0);
   }
 
   std::printf("\n%d checks, %d failures\n", checks, failures);
