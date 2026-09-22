@@ -124,4 +124,37 @@ std::size_t build_control_changed_event(uint64_t holder_id, const char* holder_n
   return offset;
 }
 
+namespace {
+// Appends kind(1) + id(8, BE) + name_len(1) + name to `out` at offset 0.
+// Shared by build_client_joined_event() and build_client_left_event() below,
+// which differ only in which kind byte they write -- the same relationship
+// append_kind_and_path() above has to the path-based events.
+std::size_t build_client_event(uint8_t kind, uint64_t client_id, const char* name, uint8_t name_len, uint8_t* out,
+                                std::size_t out_capacity) {
+  const std::size_t needed = 1 + 8 + 1 + name_len;
+  if (needed > out_capacity) return 0;
+
+  std::size_t offset = 0;
+  out[offset++] = kind;
+  for (int i = 0; i < 8; ++i) out[offset + i] = static_cast<uint8_t>(client_id >> (8 * (7 - i)));
+  offset += 8;
+  out[offset++] = name_len;
+  if (name_len != 0) {
+    std::memcpy(out + offset, name, name_len);
+    offset += name_len;
+  }
+  return offset;
+}
+}  // namespace
+
+std::size_t build_client_joined_event(uint64_t client_id, const char* name, uint8_t name_len, uint8_t* out,
+                                       std::size_t out_capacity) {
+  return build_client_event(event_kind_client_joined, client_id, name, name_len, out, out_capacity);
+}
+
+std::size_t build_client_left_event(uint64_t client_id, const char* name, uint8_t name_len, uint8_t* out,
+                                     std::size_t out_capacity) {
+  return build_client_event(event_kind_client_left, client_id, name, name_len, out, out_capacity);
+}
+
 }  // namespace multiclient

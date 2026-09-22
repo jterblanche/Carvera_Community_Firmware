@@ -97,6 +97,8 @@ constexpr uint8_t event_kind_play_started = 2;
 constexpr uint8_t event_kind_job_ended = 3;
 constexpr uint8_t event_kind_alarm_halt = 4;
 constexpr uint8_t event_kind_control_changed = 5;
+constexpr uint8_t event_kind_client_joined = 6;
+constexpr uint8_t event_kind_client_left = 7;
 
 // event_kind_upload_finished's checksum_type. This build always writes
 // event_checksum_none: the upload path already computes and verifies an MD5
@@ -149,5 +151,28 @@ std::size_t build_alarm_halt_event(uint8_t halt_reason, uint8_t* out, std::size_
 // nobody.
 std::size_t build_control_changed_event(uint64_t holder_id, const char* holder_name, uint8_t holder_name_len,
                                          uint8_t* out, std::size_t out_capacity);
+
+// "client joined": kind(1) + client_id(8, BE) + name_len(1) + name -- same
+// layout as build_control_changed_event() above, so a controller decodes it
+// with the code it already has. Published once, in the hello path, for a
+// client whose identity was just set (WifiProvider and SerialConsole both
+// call it there and nowhere else): never for a client that was already
+// identified re-sending hello, and never for a reconnect under an id
+// already in the table -- the hello path drops that stale entry first, so
+// from a peer's point of view the same controller is still there, on a new
+// socket, and publishing "joined" for it would be noise.
+std::size_t build_client_joined_event(uint64_t client_id, const char* name, uint8_t name_len, uint8_t* out,
+                                       std::size_t out_capacity);
+
+// "client left": same layout as build_client_joined_event() above. Published
+// when an identified client is removed from the table or loses its
+// identity for real -- the WiFi reaping pass and the USB session-expiry
+// check -- but not for the stale-duplicate removal in either hello path
+// (the same controller reconnecting on a new socket, not someone leaving)
+// and not for the wholesale clear_wifi()/clear_usb_identity() a protocol
+// switch does, which has no audience left to publish to by the time it
+// runs.
+std::size_t build_client_left_event(uint64_t client_id, const char* name, uint8_t name_len, uint8_t* out,
+                                     std::size_t out_capacity);
 
 }  // namespace multiclient
