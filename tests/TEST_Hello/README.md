@@ -29,5 +29,8 @@ the link field (a future version's appended fields); the link byte mapping
 to WiFi or USB; building a hello ack and reading back its three fields;
 building a client-list reply from a table with a mix of identified and
 unidentified WiFi and USB clients, checking only the identified ones are
-listed, in WiFi-then-USB order, with `has_control` always false; and an
-empty table producing a reply with a zero count and no entries.
+listed, in WiFi-then-USB order; an empty table producing a reply with a
+zero count and no entries; and `has_control`: false for every entry when
+nobody holds control, true only for the entry matching the current holder
+among several clients, true for the USB entry when the USB client holds
+control, and following control as it moves from one client to another.
