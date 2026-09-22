@@ -108,8 +108,8 @@ private:
     // addressed to that one client (see receive_wifi_data()).
     void handle_wifi_hello(int client_index, const uint8_t* payload, uint16_t payload_length, uint32_t now_us);
     void handle_wifi_client_list_request(int client_index);
-    // Hands a decoded relay frame (protocol contract section 6.7) from
-    // `client_index` to publish_relay(), if that client is identified --
+    // Hands a decoded relay frame (0x67) from `client_index` to
+    // publish_relay(), if that client is identified --
     // an unidentified sender's relay is silently dropped, the same as any
     // other broadcast-shaped message from a client that hasn't said hello.
     void handle_wifi_relay(int client_index, const uint8_t* payload, uint16_t payload_length);
@@ -117,8 +117,8 @@ private:
     // whatever active_reply_client currently holds (saves and restores it).
     void send_wifi_packet(int client_index, char cmd, const uint8_t* payload, size_t length);
 
-    // Proactive status publish (contract section 6.9, "reuses 0x81"), at
-    // the configured rate, to every identified WiFi client -- independent
+    // Proactive status publish (reuses 0x81), at the configured rate, to
+    // every identified WiFi client -- independent
     // of any client's own query_flag poll, which is still answered
     // separately (on_idle). Already inherits the existing "no status while
     // uploading" pause, since this runs from on_idle which bails out on

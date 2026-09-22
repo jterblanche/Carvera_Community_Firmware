@@ -39,8 +39,8 @@ using std::string;
 #define uart_checksum CHECKSUM("uart")
 #define XBUFF_LENGTH 8208
 
-// Governs both WiFi and USB -- see the protocol contract, "Limits and
-// settings" -- so it lives in its own namespace rather than under "uart.".
+// Governs both WiFi and USB, so it lives in its own namespace rather than
+// under "uart.".
 // Same checksum values as WifiProvider.cpp's own copy of these two defines
 // (CHECKSUM() hashes the string, not the symbol).
 #define multi_client_checksum      CHECKSUM("multi_client")
@@ -450,8 +450,7 @@ void SerialConsole::on_main_loop(void * argument){
             // Publish the command's own text before dispatching it, tagged
             // with this USB link's identity -- only for an ordinary command
             // (PTYPE_CTRL_MULTI): a file-transfer start (PTYPE_FILE_START)
-            // is not text and stays point to point (protocol contract
-            // section 6.10).
+            // is not text and stays point to point.
             if (packet.type == PTYPE_CTRL_MULTI) {
                 publish_console_line(message.message.c_str(), message.message.size());
             }

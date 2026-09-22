@@ -42,11 +42,11 @@ bool publish_due(uint32_t now, uint32_t last_publish, uint32_t interval);
 
 // --- Published console line (0x69) fragmentation ---
 
-// Conservative per-fragment text budget: the 535 B new-message cap (see the
-// protocol contract, section 1) minus the worst-case header -- 8 B source
-// id + 1 B name_len + max_name_length B name + 1 B more -- so a fragment's
-// size never depends on how long the *particular* sender's name happens to
-// be. A frame built with a shorter name simply has a little room to spare.
+// Conservative per-fragment text budget: the 535 B new-message cap minus
+// the worst-case header -- 8 B source id + 1 B name_len + max_name_length
+// B name + 1 B more -- so a fragment's size never depends on how long the
+// *particular* sender's name happens to be. A frame built with a shorter
+// name simply has a little room to spare.
 constexpr std::size_t max_console_line_text_bytes = 535 - (8 + 1 + max_name_length + 1);
 
 // How many bytes of a line, `remaining` bytes long, the next fragment
@@ -82,16 +82,16 @@ std::size_t build_console_line_frame(uint64_t source_id, const char* source_name
 constexpr std::size_t max_relay_payload_bytes = 535 - 8;
 
 // Builds source_id(8, BE) + payload verbatim, for the machine to send to
-// every *other* identified client (protocol contract section 6.7). The
-// payload itself is never inspected -- copied byte for byte. Returns 0,
-// meaning "do not send this", if payload_length exceeds
-// max_relay_payload_bytes or the result would not fit in out_capacity.
+// every *other* identified client. The payload itself is never inspected --
+// copied byte for byte. Returns 0, meaning "do not send this", if
+// payload_length exceeds max_relay_payload_bytes or the result would not
+// fit in out_capacity.
 std::size_t build_relay_frame(uint64_t source_id, const uint8_t* payload, std::size_t payload_length, uint8_t* out,
                                std::size_t out_capacity);
 
 // --- Events (0x68) ---
 
-// kind values, see the protocol contract's message catalogue (0x68 event).
+// kind values for the 0x68 event.
 constexpr uint8_t event_kind_upload_finished = 1;
 constexpr uint8_t event_kind_play_started = 2;
 constexpr uint8_t event_kind_job_ended = 3;

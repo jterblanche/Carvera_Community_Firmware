@@ -61,8 +61,7 @@
 // Publishing to every identified client, without a request: a system event
 // (upload finished, play started, job ended, alarm/halt) and a command's
 // text or reply, tagged with which client sent it. Status reuses the
-// existing PTYPE_STATUS_RES above instead of a new type -- see the
-// protocol contract's message catalogue.
+// existing PTYPE_STATUS_RES above instead of a new type.
 #define PTYPE_EVENT             0x68
 #define PTYPE_PUBLISHED_LINE    0x69
 #include <stdint.h>
