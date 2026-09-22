@@ -410,6 +410,11 @@ void WifiProvider::receive_wifi_data() {
 				continue;
 			}
 
+			if (packet.type == PTYPE_RELAY) {
+				handle_wifi_relay(client_index, packet.data, packet.data_length);
+				continue;
+			}
+
 			if (packet.type != PTYPE_CTRL_MULTI && packet.type != PTYPE_FILE_START) continue;
 
 			if (packet.data_length == 0) {
@@ -542,6 +547,15 @@ void WifiProvider::broadcast_to_identified_wifi_clients(const u8* data, size_t l
 	}
 }
 
+void WifiProvider::broadcast_to_identified_wifi_clients_except(uint64_t exclude_id, const u8* data, size_t length) {
+	for (size_t i = 0; i < multiclient::max_wifi_clients; ++i) {
+		const multiclient::Client *client = multiclient::shared_client_table().wifi_at(static_cast<int>(i));
+		if (client != nullptr && client->identified && client->id != exclude_id) {
+			send_to_wifi_client(static_cast<int>(i), data, length);
+		}
+	}
+}
+
 // Builds one frame from cmd+payload (the same layout as PacketMessage(),
 // duplicated rather than shared with it: PacketMessage() always sends
 // through puts(), which for Makera mode means "the current reply target, or
@@ -566,6 +580,30 @@ void WifiProvider::send_framed_to_identified_wifi_clients(char cmd, const uint8_
 	fbuff[length + 7] = (FOOTER >> 8) & 0xFF;
 	fbuff[length + 8] = FOOTER & 0xFF;
 	broadcast_to_identified_wifi_clients(fbuff, len + 6);
+}
+
+// Same frame build as send_framed_to_identified_wifi_clients() just above
+// (duplicated rather than shared -- see that function's own comment on why
+// this file already keeps a couple of near-identical frame builders side by
+// side rather than factoring the fbuff/CRC steps out), sent to every
+// identified WiFi client except whichever one holds `exclude_id`. The only
+// caller is publish_relay(), so a relay's sender -- when the sender is a
+// WiFi client -- never gets its own message echoed back.
+void WifiProvider::send_framed_to_identified_wifi_clients_except(uint64_t exclude_id, char cmd,
+                                                                    const uint8_t* payload, size_t length) {
+	fbuff[0] = (HEADER >> 8) & 0xFF;
+	fbuff[1] = HEADER & 0xFF;
+	fbuff[4] = cmd;
+	if (length != 0) memcpy(&fbuff[5], payload, length);
+	const unsigned int len = static_cast<unsigned int>(length) + 3;
+	fbuff[2] = (len >> 8) & 0xFF;
+	fbuff[3] = len & 0xFF;
+	const int crc = crc16::ccitt(&fbuff[2], len);
+	fbuff[length + 5] = (crc >> 8) & 0xFF;
+	fbuff[length + 6] = crc & 0xFF;
+	fbuff[length + 7] = (FOOTER >> 8) & 0xFF;
+	fbuff[length + 8] = FOOTER & 0xFF;
+	broadcast_to_identified_wifi_clients_except(exclude_id, fbuff, len + 6);
 }
 
 // Proactive status publish (contract section 6.9), at the configured rate,
@@ -616,6 +654,21 @@ void WifiProvider::publish_console_line(int client_index, const char* text, size
 void WifiProvider::publish_multiclient(char cmd, const uint8_t* payload, size_t length) {
 	if (communication_protocol != PROTOCOL_MAKERA) return;
 	send_framed_to_identified_wifi_clients(cmd, payload, length);
+}
+
+// Reached through THEKERNEL->streams->publish_relay() (libs/StreamOutputPool.h),
+// once per relay regardless of which transport received it. Builds
+// source_id(8) + payload (libs/Publish.h's build_relay_frame(), which also
+// enforces the payload's own size cap) and sends it to every identified WiFi
+// client except the sender -- a no-op if the sender was this transport's
+// only identified client, and a no-op with nothing sent at all if the
+// payload was too big to relay.
+void WifiProvider::publish_relay(uint64_t source_id, const uint8_t* payload, size_t length) {
+	if (communication_protocol != PROTOCOL_MAKERA) return;
+	uint8_t frame[8 + multiclient::max_relay_payload_bytes];
+	const size_t frame_length = multiclient::build_relay_frame(source_id, payload, length, frame, sizeof(frame));
+	if (frame_length == 0) return;
+	send_framed_to_identified_wifi_clients_except(source_id, PTYPE_RELAY, frame, frame_length);
 }
 
 // Sends a framed reply addressed to `client_index` regardless of whatever
@@ -687,6 +740,20 @@ void WifiProvider::handle_wifi_client_list_request(int client_index) {
 	const std::size_t length =
 		multiclient::build_client_list_reply(multiclient::shared_client_table(), payload, sizeof(payload));
 	send_wifi_packet(client_index, PTYPE_CLIENT_LIST_REPLY, payload, length);
+}
+
+// Hands a relay frame's opaque payload to publish_relay() (via
+// THEKERNEL->streams, so it also reaches USB), tagged with the sender's own
+// id. An unidentified sender's relay is dropped here, before
+// THEKERNEL->streams ever sees it -- relay is a publish, like the status and
+// event messages, not a request-and-reply message an unidentified client is
+// still served (protocol contract section 4.3). Never touches the control
+// token: like hello, heartbeat and a client-list request, this is handled
+// inline in the receive loop, never reaching gate_dispatch().
+void WifiProvider::handle_wifi_relay(int client_index, const uint8_t* payload, uint16_t payload_length) {
+	const multiclient::Client *self = multiclient::shared_client_table().wifi_at(client_index);
+	if (self == nullptr || !self->identified) return;
+	THEKERNEL->streams->publish_relay(self->id, payload, payload_length);
 }
 
 // Called once a second (see on_second_tick), after reconcile_wifi_clients()
