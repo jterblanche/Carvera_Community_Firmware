@@ -27,6 +27,10 @@ multiclient::Traffic classify(const char* line) {
   return multiclient::classify_command_line(line, std::strlen(line));
 }
 
+multiclient::PassiveAction classify_passive(const char* line) {
+  return multiclient::classify_passive_action(line, std::strlen(line));
+}
+
 multiclient::Identity make_identity(uint64_t id, const char* name, multiclient::Link link = multiclient::Link::wifi) {
   multiclient::Identity identity;
   identity.identified = true;
@@ -375,6 +379,268 @@ int main() {
     multiclient::ClientTable table;
     multiclient::ControlToken token;
     CHECK(!multiclient::reconcile_holder(token, table));
+  }
+
+  {
+    TEST("classify_passive_action: suspend/abort/upload are pause/stop/upload");
+    CHECK(classify_passive("suspend") == multiclient::PassiveAction::pause);
+    CHECK(classify_passive("abort") == multiclient::PassiveAction::stop);
+    CHECK(classify_passive("upload test.nc") == multiclient::PassiveAction::upload);
+    CHECK(classify_passive("  upload test.nc") == multiclient::PassiveAction::upload);
+  }
+
+  {
+    TEST("classify_passive_action: a same-prefix word or anything else is none");
+    CHECK(classify_passive("suspended") == multiclient::PassiveAction::none);
+    CHECK(classify_passive("aborting") == multiclient::PassiveAction::none);
+    CHECK(classify_passive("uploads") == multiclient::PassiveAction::none);
+    CHECK(classify_passive("download test.nc") == multiclient::PassiveAction::none);
+    CHECK(classify_passive("resume") == multiclient::PassiveAction::none);
+    CHECK(classify_passive("play test.nc") == multiclient::PassiveAction::none);
+    CHECK(classify_passive("") == multiclient::PassiveAction::none);
+    CHECK(classify_passive("   ") == multiclient::PassiveAction::none);
+  }
+
+  {
+    TEST("gate: passing no mode reproduces single-user behaviour exactly (default arguments)");
+    // Every call above this point already proves the 3-argument call sites
+    // (identical to before this file existed) are unaffected. This checks
+    // the same holds when the new mode/action/rights parameters are passed
+    // explicitly as their default values.
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::single_user,
+               multiclient::PassiveAction::none, multiclient::PassiveRights::watch_only);
+    const multiclient::GateResult result =
+        token.gate(workshop, multiclient::Traffic::user_caused, multiclient::MotionState{},
+                   multiclient::Mode::single_user, multiclient::PassiveAction::none,
+                   multiclient::PassiveRights::watch_only);
+    CHECK(!result.refused);
+    CHECK(result.holder_changed);
+    CHECK(token.holder().id == 2);
+  }
+
+  {
+    TEST("gate: single-user mode ignores action/rights entirely -- a pause still takes control");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{});
+    const multiclient::GateResult result =
+        token.gate(workshop, multiclient::Traffic::user_caused, multiclient::MotionState{},
+                   multiclient::Mode::single_user, multiclient::PassiveAction::pause,
+                   multiclient::PassiveRights::watch_only);
+    CHECK(!result.refused);
+    CHECK(result.holder_changed);
+    CHECK(token.holder().id == 2);
+  }
+
+  {
+    TEST("gate: multi-user, watch_only -- a non-holder write is refused, naming the holder");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    const multiclient::GateResult result =
+        token.gate(workshop, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user,
+                   multiclient::PassiveAction::none, multiclient::PassiveRights::watch_only);
+    CHECK(result.refused);
+    CHECK(result.reason == multiclient::RefusalReason::not_holder);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);
+  }
+
+  {
+    TEST("gate: multi-user, watch_only -- pause and stop are refused too (level too low)");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    const multiclient::GateResult pause_result =
+        token.gate(workshop, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user,
+                   multiclient::PassiveAction::pause, multiclient::PassiveRights::watch_only);
+    CHECK(pause_result.refused);
+    CHECK(pause_result.reason == multiclient::RefusalReason::not_holder);
+
+    const multiclient::GateResult stop_result =
+        token.gate(workshop, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user,
+                   multiclient::PassiveAction::stop, multiclient::PassiveRights::watch_only);
+    CHECK(stop_result.refused);
+  }
+
+  {
+    TEST("gate: multi-user, watch_pause_stop -- pause/stop execute without moving control");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    const multiclient::GateResult pause_result =
+        token.gate(workshop, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user,
+                   multiclient::PassiveAction::pause, multiclient::PassiveRights::watch_pause_stop);
+    CHECK(!pause_result.refused);
+    CHECK(!pause_result.holder_changed);
+    CHECK(token.holder().id == 1);  // still Office
+
+    const multiclient::GateResult stop_result =
+        token.gate(workshop, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user,
+                   multiclient::PassiveAction::stop, multiclient::PassiveRights::watch_pause_stop);
+    CHECK(!stop_result.refused);
+    CHECK(!stop_result.holder_changed);
+    CHECK(token.holder().id == 1);
+  }
+
+  {
+    TEST("gate: multi-user, watch_pause_stop -- upload is still refused (needs the top level)");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    multiclient::MotionState idle;
+    idle.idle = true;
+    const multiclient::GateResult result =
+        token.gate(workshop, multiclient::Traffic::user_caused, idle, multiclient::Mode::multi_user,
+                   multiclient::PassiveAction::upload, multiclient::PassiveRights::watch_pause_stop);
+    CHECK(result.refused);
+    CHECK(result.reason == multiclient::RefusalReason::not_holder);
+  }
+
+  {
+    TEST("gate: multi-user, watch_pause_stop_upload -- upload while idle executes without moving control");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    multiclient::MotionState idle;
+    idle.idle = true;
+    const multiclient::GateResult result =
+        token.gate(workshop, multiclient::Traffic::user_caused, idle, multiclient::Mode::multi_user,
+                   multiclient::PassiveAction::upload, multiclient::PassiveRights::watch_pause_stop_upload);
+    CHECK(!result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);
+  }
+
+  {
+    TEST("gate: multi-user, watch_pause_stop_upload -- upload while NOT idle is refused");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    multiclient::MotionState playing;
+    playing.run = true;
+    playing.job_playing = true;  // a job is running: not idle
+    const multiclient::GateResult result =
+        token.gate(workshop, multiclient::Traffic::user_caused, playing, multiclient::Mode::multi_user,
+                   multiclient::PassiveAction::upload, multiclient::PassiveRights::watch_pause_stop_upload);
+    CHECK(result.refused);
+    CHECK(result.reason == multiclient::RefusalReason::not_holder);
+  }
+
+  {
+    TEST("gate: multi-user, held by another -- a privileged action never moves control even during motion");
+    // A stop must be able to interrupt a jog. Unlike the single-user/free-
+    // control path, motion in progress plays no part in this decision at
+    // all: only who holds control and what the rights level allows do.
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    multiclient::MotionState jogging;
+    jogging.run = true;
+    const multiclient::GateResult result =
+        token.gate(workshop, multiclient::Traffic::user_caused, jogging, multiclient::Mode::multi_user,
+                   multiclient::PassiveAction::stop, multiclient::PassiveRights::watch_pause_stop);
+    CHECK(!result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);
+  }
+
+  {
+    TEST("gate: multi-user, already the holder -- its own pause/stop is a plain no-op, not a privileged path");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    const multiclient::GateResult result =
+        token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user,
+                   multiclient::PassiveAction::stop, multiclient::PassiveRights::watch_only);
+    CHECK(!result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);
+  }
+
+  {
+    TEST("gate: multi-user, control free -- a write takes control exactly like single-user mode");
+    multiclient::ControlToken token;
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    const multiclient::GateResult result =
+        token.gate(workshop, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user,
+                   multiclient::PassiveAction::none, multiclient::PassiveRights::watch_only);
+    CHECK(!result.refused);
+    CHECK(result.holder_changed);
+    CHECK(token.holder().id == 2);
+  }
+
+  {
+    TEST("gate: multi-user, control free -- refused (motion_in_progress) while an interactive move is on");
+    multiclient::ControlToken token;
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    multiclient::MotionState jogging;
+    jogging.run = true;
+    const multiclient::GateResult result =
+        token.gate(workshop, multiclient::Traffic::user_caused, jogging, multiclient::Mode::multi_user);
+    CHECK(result.refused);
+    CHECK(result.reason == multiclient::RefusalReason::motion_in_progress);
+    CHECK(!token.has_holder());
+  }
+
+  {
+    TEST("gate: multi-user, automatic traffic never moves control even while someone else holds it");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    const multiclient::GateResult result =
+        token.gate(workshop, multiclient::Traffic::automatic, multiclient::MotionState{}, multiclient::Mode::multi_user);
+    CHECK(!result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);
+  }
+
+  {
+    TEST("gate: release then any user-caused message takes control -- 'the next one takes it, from anywhere'");
+    // The passive-rights exemption from taking control (tested above) only
+    // applies while someone else already holds control -- once it is free,
+    // gate() falls through to the same "control free" branch single-user
+    // mode always uses, and ANY user-caused message takes control there,
+    // whatever it is classified as. That is the literal rule: "the next
+    // user-caused message from anywhere takes it".
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    CHECK(token.release_if_holder(1));  // office releases
+    CHECK(!token.has_holder());
+
+    // Even a "stop" takes control now that nobody holds it -- the privilege
+    // that let it execute without moving control (tested above) only
+    // matters while someone else is the holder.
+    const multiclient::GateResult result =
+        token.gate(workshop, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user,
+                   multiclient::PassiveAction::stop, multiclient::PassiveRights::watch_pause_stop);
+    CHECK(!result.refused);
+    CHECK(result.holder_changed);
+    CHECK(token.holder().id == 2);
   }
 
   std::printf("%d checks, %d failures\n", checks, failures);
