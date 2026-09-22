@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "ClientTable.h"
+#include "ControlToken.h"
 
 // Wire encode/decode for the identify-handshake messages: hello, hello ack
 // and client-list reply. Plain C++, no Kernel or mbed dependency, so it
@@ -51,8 +52,10 @@ constexpr std::size_t max_client_list_reply_length = 1 + (max_wifi_clients + 1) 
 // `table` (WiFi then USB) into `out` (capacity `out_capacity`, which should
 // be at least max_client_list_reply_length to never truncate). An
 // unidentified client is not listed -- it has no id or name to report.
-// `has_control` is always written false: nothing tracks who holds control
-// yet. Returns the payload length.
-std::size_t build_client_list_reply(const ClientTable& table, uint8_t* out, std::size_t out_capacity);
+// `has_control` is true for the one entry whose id matches `control`'s
+// current holder, and false for every other entry -- including every entry
+// when `control` has no holder at all. Returns the payload length.
+std::size_t build_client_list_reply(const ClientTable& table, const ControlToken& control, uint8_t* out,
+                                     std::size_t out_capacity);
 
 }  // namespace multiclient
