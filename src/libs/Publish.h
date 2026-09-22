@@ -81,8 +81,10 @@ constexpr uint8_t event_kind_job_ended = 3;
 constexpr uint8_t event_kind_alarm_halt = 4;
 
 // event_kind_upload_finished's checksum_type. This build always writes
-// event_checksum_none -- see the change explanation for why no digest is
-// attached.
+// event_checksum_none: the upload path already computes and verifies an MD5
+// against the uploader's own checksum, then discards it, and recomputing it
+// here would re-read the whole file off the card just to fill a field the
+// protocol defines as an explicitly valid "none", not "not implemented yet".
 constexpr uint8_t event_checksum_none = 0;
 constexpr uint8_t event_checksum_md5 = 1;
 
