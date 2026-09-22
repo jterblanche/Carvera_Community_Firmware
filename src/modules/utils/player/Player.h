@@ -153,8 +153,8 @@ class Player : public Module {
         // Set from playing_file at the end of every on_second_tick(), so the
         // next tick can tell a false transition (playback just stopped, for
         // any reason -- finished, aborted, halted) from "still not
-        // playing". Drives the job-ended event (protocol contract section
-        // 6.8); see on_second_tick().
+        // playing". Drives the job-ended event (the 0x68 event, kind 3);
+        // see on_second_tick().
         bool last_published_playing = false;
         // Set from THEKERNEL->is_halted() at the end of every
         // on_second_tick(), the same way, so the next tick can publish the

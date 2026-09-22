@@ -130,10 +130,11 @@ void set_identity(Client& client, uint64_t id, const char* name, uint8_t name_le
 
 // Records that `client` sent a heartbeat at `now_us`. Accepted from any
 // connected client, identified or not -- the WiFi module's own idle timeout
-// already treats traffic in either direction as keeping a link alive (see
-// the protocol contract's heartbeat section for why the heartbeat message
-// is kept anyway); this firmware only needs to remember when it last heard
-// one, not act on it itself.
+// already treats traffic in either direction as keeping a link alive, but
+// this is recorded anyway to give the firmware its own per-client liveness
+// signal, independent of a timer inside the closed WiFi module firmware;
+// this firmware only needs to remember when it last heard one, not act on
+// it itself.
 void record_heartbeat(Client& client, uint32_t now_us);
 
 // True once `client`'s hello window has run out without it identifying.

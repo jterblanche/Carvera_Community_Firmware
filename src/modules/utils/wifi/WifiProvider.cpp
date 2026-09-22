@@ -59,8 +59,8 @@
 #define max_clients_checksum			  CHECKSUM("max_clients")
 #define ap_auto_disable_checksum          CHECKSUM("ap_auto_disable")
 
-// Governs both WiFi and USB -- see the protocol contract, "Limits and
-// settings" -- so it lives in its own namespace rather than under "wifi.".
+// Governs both WiFi and USB, so it lives in its own namespace rather than
+// under "wifi.".
 #define multi_client_checksum             CHECKSUM("multi_client")
 #define status_publish_hz_checksum        CHECKSUM("status_publish_hz")
 
@@ -606,12 +606,12 @@ void WifiProvider::send_framed_to_identified_wifi_clients_except(uint64_t exclud
 	broadcast_to_identified_wifi_clients_except(exclude_id, fbuff, len + 6);
 }
 
-// Proactive status publish (contract section 6.9), at the configured rate,
-// to every identified WiFi client -- on top of, not instead of, the
-// existing per-client query_flag reply above. Naturally pauses during an
-// upload: this whole function is only reached from on_idle()'s Makera-mode
-// branch, and on_idle() already returns immediately if
-// THEKERNEL->is_uploading() (see the top of on_idle()).
+// Proactive status publish (reuses the 0x81 status reply), at the
+// configured rate, to every identified WiFi client -- on top of, not
+// instead of, the existing per-client query_flag reply above. Naturally
+// pauses during an upload: this whole function is only reached from
+// on_idle()'s Makera-mode branch, and on_idle() already returns
+// immediately if THEKERNEL->is_uploading() (see the top of on_idle()).
 void WifiProvider::publish_status_if_due(uint32_t now_us) {
 	if (!multiclient::publish_due(now_us, last_status_publish_us, status_publish_interval_us)) return;
 	last_status_publish_us = now_us;
@@ -621,8 +621,8 @@ void WifiProvider::publish_status_if_due(uint32_t now_us) {
 }
 
 // Publishes `text` (a command's own text, or its reply) as one or more
-// published-console-line fragments (protocol contract section 6.10),
-// tagged with client_index's id/name, to every identified client across
+// published-console-line (0x69) fragments, tagged with client_index's
+// id/name, to every identified client across
 // every transport -- see StreamOutput::publish_multiclient() and
 // StreamOutputPool::publish_multiclient().
 void WifiProvider::publish_console_line(int client_index, const char* text, size_t length) {
@@ -745,11 +745,11 @@ void WifiProvider::handle_wifi_client_list_request(int client_index) {
 // Hands a relay frame's opaque payload to publish_relay() (via
 // THEKERNEL->streams, so it also reaches USB), tagged with the sender's own
 // id. An unidentified sender's relay is dropped here, before
-// THEKERNEL->streams ever sees it -- relay is a publish, like the status and
-// event messages, not a request-and-reply message an unidentified client is
-// still served (protocol contract section 4.3). Never touches the control
-// token: like hello, heartbeat and a client-list request, this is handled
-// inline in the receive loop, never reaching gate_dispatch().
+// THEKERNEL->streams ever sees it -- relay is a publish, like the status
+// and event messages, not a request-and-reply message an unidentified
+// client is still served. Never touches the control token: like hello,
+// heartbeat and a client-list request, this is handled inline in the
+// receive loop, never reaching gate_dispatch().
 void WifiProvider::handle_wifi_relay(int client_index, const uint8_t* payload, uint16_t payload_length) {
 	const multiclient::Client *self = multiclient::shared_client_table().wifi_at(client_index);
 	if (self == nullptr || !self->identified) return;
@@ -1297,7 +1297,7 @@ void WifiProvider::on_main_loop(void *argument)
 			// Publish the command's own text before dispatching it, tagged
 			// with its source -- only for an ordinary command (PTYPE_CTRL_MULTI):
 			// a file-transfer start (PTYPE_FILE_START) is not text and stays
-			// point to point (protocol contract section 6.10).
+			// point to point.
 			if (packet.type == PTYPE_CTRL_MULTI) {
 				publish_console_line(client_index, message.message.c_str(), message.message.size());
 			}

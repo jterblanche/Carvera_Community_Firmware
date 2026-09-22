@@ -2521,12 +2521,12 @@ upload_success:
     }
 	stream->printf("Info: upload success: %s.\r\n", desfilename.c_str());
 
-	// Publishes the upload-finished event (protocol contract section 6.8)
-	// to every identified client. checksum_type is always "none" here: the
+	// Publishes the upload-finished event (the 0x68 event, kind 1) to
+	// every identified client. checksum_type is always "none" here: the
 	// MD5 this upload was verified against (above) is only ever compared,
 	// not kept anywhere after the fact, and recomputing it again just for
-	// this event would redo real work for a field the contract marks
-	// optional (checksum_type 0 is a defined, valid value).
+	// this event would redo real work for a field where checksum_type 0 is
+	// already a defined, valid value ("none").
 	{
 		const uint8_t path_len = multiclient::clamp_event_path_length(desfilename.size());
 		uint8_t payload[2 + multiclient::max_event_path_length + 4 + 1];

@@ -1,4 +1,5 @@
 [unreleased]
+- Changed: Reworded several comments (frame types, field layout, and size limits in the identify/publish messages) that pointed readers at a document outside this repository, to instead state each fact directly. No behaviour change.
 - Fixed: The client list a controller requests on connecting always reported that nobody had control, even when another controller already held it. It now names the actual holder, so a controller that has just connected or reconnected learns who has control immediately, instead of waiting for control to change again.
 - Enhancement: A controller can send the machine an opaque message, up to 527 bytes, that is repeated verbatim to every other identified controller on both WiFi and USB, without the machine reading it -- for example to share a loaded job's tool names with other connected controllers.
 - Changed: Reworded a comment in Publish.h that pointed readers at a document outside this repository, to instead state directly why the upload-finished event's checksum_type is always "none". No behaviour change.
