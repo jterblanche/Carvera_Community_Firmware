@@ -88,10 +88,19 @@ class SerialConsole : public Module, public StreamOutput {
         int check_file_packet(char **buf);
         void handle_hello(const uint8_t* payload, uint16_t payload_length, uint32_t now_us);
         void handle_client_list_request();
+        // The multi_client.mode byte a hello ack reports. See
+        // WifiProvider::hello_ack_mode() for the same on the WiFi side.
+        uint8_t hello_ack_mode() const;
         // Hands a decoded relay frame to publish_relay(), if this USB link
         // is identified. See WifiProvider::handle_wifi_relay() for the same
         // decision on the WiFi side.
         void handle_relay(const uint8_t* payload, uint16_t payload_length);
+        // Frees control if this USB link currently holds it, and publishes
+        // a control-changed event naming nobody if it did. See
+        // WifiProvider::handle_wifi_control_release() for the same on the
+        // WiFi side. Multi-user mode only -- the caller does not even call
+        // this in single-user mode (see process_makera_byte()).
+        void handle_control_release();
 
         // Publishes `text` (a command's own text, or its reply) as one or
         // more published-console-line fragments, tagged with this USB
@@ -111,6 +120,12 @@ class SerialConsole : public Module, public StreamOutput {
         // multi_client.status_publish_hz, converted once at load time.
         uint32_t status_publish_interval_us;
         uint32_t last_status_publish_us = 0;
+
+        // multi_client.mode and multi_client.passive_rights, read once at
+        // load time. gate_dispatch() reads these every call rather than
+        // caching a decision, since they never change at runtime.
+        multiclient::Mode multi_client_mode;
+        multiclient::PassiveRights multi_client_passive_rights;
         struct {
           volatile bool query_flag:1;
           volatile bool halt_flag:1;
