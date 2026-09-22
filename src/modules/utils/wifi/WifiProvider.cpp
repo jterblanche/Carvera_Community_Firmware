@@ -746,6 +746,13 @@ void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, u
 	if (!multiclient::parse_hello(payload, payload_length, hello)) return; // malformed, or an unrecognised version: ignored
 
 	if (!self->identified) {
+		// Whether this id already belonged to another, already-identified
+		// client -- WiFi or USB -- found and dropped below. That is a
+		// reconnect, the same controller still there on a new socket, not a
+		// new arrival, so it must not publish "joined" once self picks the
+		// id up: see the matching skip below.
+		bool reconnect = false;
+
 		const int stale = table.find_wifi_by_id(hello.id, client_index);
 		if (stale >= 0) {
 			// Close the stale connection at the driver too, not just our own
@@ -758,8 +765,10 @@ void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, u
 			forget_wifi_client(stale);
 			table.remove_wifi(stale);
 			disconnect_wifi_client(stale_address, "reconnected under the same id");
+			reconnect = true;
 		} else if (table.usb_has_id(hello.id)) {
 			table.clear_usb_identity();
+			reconnect = true;
 		}
 
 		if (table.has_old_client(now_us, client_index)) {
@@ -771,6 +780,13 @@ void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, u
 		}
 
 		multiclient::set_identity(*self, hello.id, hello.name, hello.name_len);
+
+		if (!reconnect) {
+			uint8_t joined_payload[1 + 8 + 1 + multiclient::max_name_length];
+			const std::size_t joined_length = multiclient::build_client_joined_event(
+				self->id, self->name, self->name_len, joined_payload, sizeof(joined_payload));
+			if (joined_length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, joined_payload, joined_length);
+		}
 	}
 
 	uint8_t ack[multiclient::hello_ack_length];
@@ -897,6 +913,14 @@ void WifiProvider::forget_wifi_client(int client_index) {
 	}
 }
 
+void WifiProvider::publish_client_left_if_identified(const multiclient::Client& client) {
+	if (!client.identified) return;
+	uint8_t payload[1 + 8 + 1 + multiclient::max_name_length];
+	const std::size_t length =
+		multiclient::build_client_left_event(client.id, client.name, client.name_len, payload, sizeof(payload));
+	if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+}
+
 // Called once a second (see on_second_tick) with the driver's current client
 // list. Reaps table entries for clients that disappeared since the last
 // call. This covers every kind of departure, including a controller closing
@@ -924,6 +948,7 @@ void WifiProvider::reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_
 		multiclient::Client *client = table.wifi_at(i);
 		if (client == nullptr || !client->send_failed) continue;
 		disconnect_wifi_client(client->address, "the machine could no longer send to it", false);
+		publish_client_left_if_identified(*client);
 		table.remove_wifi(i);
 		forget_wifi_client(i);
 	}
@@ -949,7 +974,11 @@ void WifiProvider::reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_
 		// just as much as an abnormal one, so this is not logged; the
 		// driver's disconnect-cause query was a bring-up diagnostic for
 		// telling those two apart while this code was new, not something a
-		// user needs on every departure.
+		// user needs on every departure. It still gets a "left" event below,
+		// same as any other departure of an identified client -- that is
+		// for every other identified client's benefit, not a log line for
+		// this one.
+		publish_client_left_if_identified(*client);
 		table.remove_wifi(i);
 		forget_wifi_client(i);
 	}

@@ -102,6 +102,12 @@ private:
     void broadcast_to_identified_wifi_clients_except(uint64_t exclude_id, const u8* data, size_t length);
     void reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_clients[]);
     void forget_wifi_client(int client_index);
+    // Publishes a "client left" event naming `client`, if and only if it was
+    // identified -- an unidentified client has no id or name to announce.
+    // Called from reconcile_wifi_clients() at every point it removes a
+    // client, before the removal itself: build_client_left_event() reads
+    // the client's id and name, both of which remove_wifi() clears.
+    void publish_client_left_if_identified(const multiclient::Client& client);
     void enforce_old_client_rule(uint32_t now_us);
 
     // Handles a decoded hello/client-list-request frame. Both reply inline,
