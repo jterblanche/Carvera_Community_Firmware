@@ -316,4 +316,14 @@ class ClientTable {
 // USB entry has no cap of its own to enforce -- there is only one USB link.
 ClientTable& shared_client_table();
 
+// True if `sender` is the WiFi client at `client_index` in `table` -- the
+// question a file transfer's byte stream needs answered for every chunk it
+// receives, since the underlying read has no per-client demultiplexing of
+// its own (see WifiProvider::gets()). False whenever `client_index` names no
+// current client (out of range, or that slot is empty -- including the
+// transferring client having disconnected mid-transfer), which is the safe
+// default: bytes are dropped rather than credited to a transfer that no
+// longer has a known owner.
+bool is_transfer_owner(const ClientTable& table, int client_index, const Address& sender);
+
 }  // namespace multiclient

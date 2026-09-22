@@ -182,6 +182,32 @@ int main() {
   }
 
   {
+    TEST("is_transfer_owner: true only for the sender at client_index's own address");
+    multiclient::ClientTable table;
+    const int owner_index = table.add_wifi(address(10, 0, 0, 1, 51000), 0);
+    table.add_wifi(address(10, 0, 0, 2, 51001), 0);
+    CHECK(multiclient::is_transfer_owner(table, owner_index, address(10, 0, 0, 1, 51000)));
+    CHECK(!multiclient::is_transfer_owner(table, owner_index, address(10, 0, 0, 2, 51001)));
+  }
+
+  {
+    TEST("is_transfer_owner: false for an out-of-range or negative client_index");
+    multiclient::ClientTable table;
+    table.add_wifi(address(10, 0, 0, 1, 51000), 0);
+    CHECK(!multiclient::is_transfer_owner(table, -1, address(10, 0, 0, 1, 51000)));
+    CHECK(!multiclient::is_transfer_owner(table, static_cast<int>(multiclient::max_wifi_clients), address(10, 0, 0, 1, 51000)));
+  }
+
+  {
+    TEST("is_transfer_owner: false once the owning client's slot is freed -- "
+         "the safe default when the transferring client has vanished");
+    multiclient::ClientTable table;
+    const int owner_index = table.add_wifi(address(10, 0, 0, 1, 51000), 0);
+    table.remove_wifi(owner_index);
+    CHECK(!multiclient::is_transfer_owner(table, owner_index, address(10, 0, 0, 1, 51000)));
+  }
+
+  {
     TEST("shared_client_table returns the same instance every call");
     multiclient::ClientTable& first = multiclient::shared_client_table();
     multiclient::ClientTable& second = multiclient::shared_client_table();
