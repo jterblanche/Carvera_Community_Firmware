@@ -53,6 +53,11 @@
 #define PTYPE_CLIENT_LIST_REQ   0x63
 #define PTYPE_CLIENT_LIST_REPLY 0x64
 
+// Control release: the current holder gives up control voluntarily. Empty
+// payload. Multi-user mode only; ignored from anyone else and ignored
+// outright in single-user mode.
+#define PTYPE_CONTROL_RELEASE    0x66
+
 // A controller-to-controller relay: sent by one identified client, repeated
 // verbatim (with an 8-byte source id prefixed) to every *other* identified
 // client. The machine never reads the payload.

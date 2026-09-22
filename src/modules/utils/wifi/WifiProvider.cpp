@@ -63,6 +63,8 @@
 // under "wifi.".
 #define multi_client_checksum             CHECKSUM("multi_client")
 #define status_publish_hz_checksum        CHECKSUM("status_publish_hz")
+#define multi_client_mode_checksum        CHECKSUM("mode")
+#define passive_rights_checksum           CHECKSUM("passive_rights")
 
 // the module accepts 1 to 15 simultaneous TCP clients on a server link
 #define WIFI_MAX_CLIENTS_MIN         1
@@ -95,6 +97,8 @@ WifiProvider::WifiProvider()
 	sta_flap_count = 0;
 	ap_hold_remaining_s = 0;
 	status_publish_interval_us = multiclient::status_publish_interval_us(multiclient::default_status_publish_hz);
+	multi_client_mode = multiclient::Mode::single_user;
+	multi_client_passive_rights = multiclient::PassiveRights::watch_pause_stop_upload;
 	ap_auto_disable = true;
 	ap_currently_on = true;
 	ap_manually_disabled = false;
@@ -139,6 +143,37 @@ void WifiProvider::on_module_loaded()
 		THEKERNEL->config->value(multi_client_checksum, status_publish_hz_checksum)->as_int(multiclient::default_status_publish_hz);
 	if (configured_publish_hz < 0) configured_publish_hz = multiclient::default_status_publish_hz;
 	this->status_publish_interval_us = multiclient::status_publish_interval_us(static_cast<uint16_t>(configured_publish_hz));
+
+	// multi_client.mode: single-user unless the config explicitly says
+	// "multi_user" -- an unrecognised value is treated the same as absent,
+	// so a typo cannot silently turn multi-user mode on.
+	std::string configured_mode = THEKERNEL->config->value(multi_client_checksum, multi_client_mode_checksum)->as_string("single_user");
+	if (configured_mode == "multi_user") {
+		this->multi_client_mode = multiclient::Mode::multi_user;
+	} else {
+		if (configured_mode != "single_user") {
+			THEKERNEL->streams->printf("WIFI: multi_client.mode '%s' not recognised, using single_user\n", configured_mode.c_str());
+		}
+		this->multi_client_mode = multiclient::Mode::single_user;
+	}
+
+	// multi_client.passive_rights: how much a non-holder may do in
+	// multi-user mode. watch_pause_stop_upload (the highest level) is the
+	// default when the setting is absent; an unrecognised value falls back
+	// to the lowest level instead, so a typo narrows rights rather than
+	// widening them.
+	std::string configured_rights =
+		THEKERNEL->config->value(multi_client_checksum, passive_rights_checksum)->as_string("watch_pause_stop_upload");
+	if (configured_rights == "watch_pause_stop_upload") {
+		this->multi_client_passive_rights = multiclient::PassiveRights::watch_pause_stop_upload;
+	} else if (configured_rights == "watch_pause_stop") {
+		this->multi_client_passive_rights = multiclient::PassiveRights::watch_pause_stop;
+	} else if (configured_rights == "watch_only") {
+		this->multi_client_passive_rights = multiclient::PassiveRights::watch_only;
+	} else {
+		THEKERNEL->streams->printf("WIFI: multi_client.passive_rights '%s' not recognised, using watch_only\n", configured_rights.c_str());
+		this->multi_client_passive_rights = multiclient::PassiveRights::watch_only;
+	}
 	std::string config_name = THEKERNEL->config->value(wifi_checksum, machine_name_checksum)->as_string("CARVERA");
 	this->ap_auto_disable = THEKERNEL->config->value(wifi_checksum, ap_auto_disable_checksum)->as_bool(true);
     strncpy(this->machine_name, config_name.c_str(), sizeof(this->machine_name) - 1);
@@ -415,6 +450,14 @@ void WifiProvider::receive_wifi_data() {
 				continue;
 			}
 
+			// Single-user mode never reaches here for this type: dropped by
+			// the catch-all below, exactly as it is today (0x66 does not
+			// exist yet in that mode's behaviour).
+			if (packet.type == PTYPE_CONTROL_RELEASE && multi_client_mode == multiclient::Mode::multi_user) {
+				handle_wifi_control_release(client_index);
+				continue;
+			}
+
 			if (packet.type != PTYPE_CTRL_MULTI && packet.type != PTYPE_FILE_START) continue;
 
 			if (packet.data_length == 0) {
@@ -682,6 +725,11 @@ void WifiProvider::send_wifi_packet(int client_index, char cmd, const uint8_t* p
 	active_reply_client = saved_reply_client;
 }
 
+uint8_t WifiProvider::hello_ack_mode() const {
+	if (multi_client_mode == multiclient::Mode::multi_user) return multiclient::hello_mode_multi_user;
+	return multiclient::hello_mode_single_user;
+}
+
 // Parses a hello frame and answers it, addressed to the sender only. An
 // already-identified client re-sending hello is re-acked with no state
 // change. A first-time hello whose id already belongs to another,
@@ -717,7 +765,7 @@ void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, u
 		if (table.has_old_client(now_us, client_index)) {
 			uint8_t ack[multiclient::hello_ack_length];
 			const std::size_t ack_len = multiclient::build_hello_ack(
-				ack, multiclient::hello_result_old_controller_present, multiclient::hello_mode_single_user);
+				ack, multiclient::hello_result_old_controller_present, hello_ack_mode());
 			send_wifi_packet(client_index, PTYPE_HELLO_ACK, ack, ack_len);
 			return;
 		}
@@ -727,7 +775,7 @@ void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, u
 
 	uint8_t ack[multiclient::hello_ack_length];
 	const std::size_t ack_len =
-		multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, multiclient::hello_mode_single_user);
+		multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, hello_ack_mode());
 	send_wifi_packet(client_index, PTYPE_HELLO_ACK, ack, ack_len);
 }
 
@@ -754,6 +802,23 @@ void WifiProvider::handle_wifi_relay(int client_index, const uint8_t* payload, u
 	const multiclient::Client *self = multiclient::shared_client_table().wifi_at(client_index);
 	if (self == nullptr || !self->identified) return;
 	THEKERNEL->streams->publish_relay(self->id, payload, payload_length);
+}
+
+// Frees control if `client_index` currently holds it, and publishes a
+// control-changed event naming nobody if it did -- the same event
+// reconcile_holder()'s caller (on_second_tick) publishes for a disconnect.
+// An unidentified sender cannot hold control, so release_if_holder() is
+// simply a no-op for it; same for a sender that holds control but isn't
+// the current holder. Never touches the control token in single-user mode
+// -- the caller does not even call this then (see receive_wifi_data()).
+void WifiProvider::handle_wifi_control_release(int client_index) {
+	const multiclient::Client *self = multiclient::shared_client_table().wifi_at(client_index);
+	if (self == nullptr || !self->identified) return;
+	if (!multiclient::shared_control_token().release_if_holder(self->id)) return;
+
+	uint8_t payload[1 + 8 + 1];  // holder_id 0 + holder_name_len 0: nobody has control
+	const std::size_t length = multiclient::build_control_changed_event(0, nullptr, 0, payload, sizeof(payload));
+	if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
 }
 
 // Called once a second (see on_second_tick), after reconcile_wifi_clients()
@@ -1221,6 +1286,11 @@ bool WifiProvider::gate_dispatch(int client_index, const makera::Packet &packet)
 	const multiclient::Traffic traffic = packet.type == PTYPE_FILE_START
 		? multiclient::classify_file_transfer_start()
 		: multiclient::classify_command_line(reinterpret_cast<const char*>(packet.data), packet.data_length);
+	// Only meaningful in multi-user mode (see ControlToken::gate()), but
+	// classified unconditionally -- it is cheap, and gate() ignores it
+	// outside multi-user mode.
+	const multiclient::PassiveAction action =
+		multiclient::classify_passive_action(reinterpret_cast<const char*>(packet.data), packet.data_length);
 
 	const multiclient::Identity sender =
 		multiclient::identity_of(multiclient::shared_client_table().wifi_at(client_index));
@@ -1233,10 +1303,12 @@ bool WifiProvider::gate_dispatch(int client_index, const makera::Packet &packet)
 	multiclient::MotionState motion;
 	motion.run = (machine_state == RUN);
 	motion.homing = (machine_state == HOME);
+	motion.idle = (machine_state == IDLE);
 	bool playing = false;
 	if (PublicData::get_value(player_checksum, is_playing_checksum, &playing)) motion.job_playing = playing;
 
-	const multiclient::GateResult result = multiclient::shared_control_token().gate(sender, traffic, motion);
+	const multiclient::GateResult result = multiclient::shared_control_token().gate(
+		sender, traffic, motion, multi_client_mode, action, multi_client_passive_rights);
 
 	if (result.refused) {
 		// printf(), not puts(): a Makera-mode reply must go out through
@@ -1249,7 +1321,9 @@ bool WifiProvider::gate_dispatch(int client_index, const makera::Packet &packet)
 		const int saved_reply_client = active_reply_client;
 		active_reply_client = client_index;
 		const multiclient::Identity &holder = multiclient::shared_control_token().holder();
-		if (holder.identified) {
+		if (result.reason == multiclient::RefusalReason::not_holder) {
+			printf("error:Refused -- %.*s has control\r\n", static_cast<int>(holder.name_len), holder.name);
+		} else if (holder.identified) {
 			printf("error:Transfer refused -- %.*s has control and an interactive move is in progress\r\n",
 			       static_cast<int>(holder.name_len), holder.name);
 		} else {

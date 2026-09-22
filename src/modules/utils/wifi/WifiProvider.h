@@ -108,6 +108,16 @@ private:
     // addressed to that one client (see receive_wifi_data()).
     void handle_wifi_hello(int client_index, const uint8_t* payload, uint16_t payload_length, uint32_t now_us);
     void handle_wifi_client_list_request(int client_index);
+    // The multi_client.mode byte a hello ack reports (Hello.h's
+    // hello_mode_single_user/hello_mode_multi_user), from the configured
+    // multi_client_mode.
+    uint8_t hello_ack_mode() const;
+    // Handles a decoded control-release frame (PTYPE_CONTROL_RELEASE) from
+    // `client_index`: frees control if that client currently holds it, and
+    // publishes a control-changed event naming nobody if it did. Multi-user
+    // mode only -- the caller does not even call this in single-user mode
+    // (see receive_wifi_data()).
+    void handle_wifi_control_release(int client_index);
     // Hands a decoded relay frame (0x67) from `client_index` to
     // publish_relay(), if that client is identified --
     // an unidentified sender's relay is silently dropped, the same as any
@@ -157,6 +167,12 @@ private:
     // (on_module_loaded) from the configured rate.
     uint32_t status_publish_interval_us;
     uint32_t last_status_publish_us = 0;
+
+    // multi_client.mode and multi_client.passive_rights, read once at load
+    // time (on_module_loaded). gate_dispatch() reads these every call
+    // rather than caching a decision, since they never change at runtime.
+    multiclient::Mode multi_client_mode;
+    multiclient::PassiveRights multi_client_passive_rights;
 
     mbed::InterruptIn *wifi_interrupt_pin; // Interrupt pin for measuring speed
 

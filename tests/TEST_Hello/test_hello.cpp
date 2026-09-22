@@ -120,6 +120,16 @@ int main() {
   }
 
   {
+    TEST("build_hello_ack reports multi-user mode when asked to");
+    uint8_t ack[multiclient::hello_ack_length];
+    const std::size_t len =
+        multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, multiclient::hello_mode_multi_user);
+    CHECK(len == 3);
+    CHECK(ack[2] == multiclient::hello_mode_multi_user);
+    CHECK(multiclient::hello_mode_multi_user != multiclient::hello_mode_single_user);
+  }
+
+  {
     TEST("an empty table's client-list reply has a zero count and no entries");
     multiclient::ClientTable table;
     multiclient::ControlToken control;
