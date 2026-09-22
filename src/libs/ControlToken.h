@@ -14,11 +14,37 @@
 // mbed dependency, so it builds and runs on the host (see
 // tests/TEST_ControlToken) the same way ClientTable and Publish do.
 //
-// Multi-user mode (control moves only when the holder releases it, a later
-// stage) does not exist yet -- every hello ack this firmware sends already
-// reports hello_mode_single_user (see Hello.h), and this file assumes that
-// mode unconditionally.
+// Multi-user mode: control moves only when the holder releases it or
+// disconnects. A non-holder's command is refused, naming the holder, unless
+// it is one the configured passive-rights level allows -- and an allowed
+// one never takes control, whoever sends it. See Mode, PassiveRights and
+// PassiveAction below, and ControlToken::gate().
 namespace multiclient {
+
+// Whether the machine is configured for single-user or multi-user control.
+// A machine config setting (multi_client.mode); single-user is the default
+// and reproduces every byte of today's behaviour -- see gate() below.
+enum class Mode : uint8_t { single_user, multi_user };
+
+// How much a non-holder may do in multi-user mode while someone else holds
+// control, from a machine config setting (multi_client.passive_rights).
+// Ordered so a higher level always includes what a lower one allows --
+// gate() compares these numerically. watch_pause_stop_upload is the
+// default.
+enum class PassiveRights : uint8_t {
+  watch_only = 0,
+  watch_pause_stop = 1,
+  watch_pause_stop_upload = 2,
+};
+
+// A command classified against the passive-rights levels above: `pause`
+// (`suspend`), `stop` (`abort`) or `upload` (`upload`), or `none` for
+// everything else. Only meaningful in multi-user mode, and only for
+// deciding whether a non-holder's command executes without taking control
+// -- see classify_passive_action() and ControlToken::gate(). The realtime
+// pause/resume/stop bytes (^X/^Y/!/~) never reach this: they are matched
+// and acted on inline before dispatch, never through this text path.
+enum class PassiveAction : uint8_t { none, pause, stop, upload };
 
 // Whether one inbound message is automatic (never moves the token) or
 // user-caused (does). See classify_command_line() and
@@ -47,6 +73,17 @@ Traffic classify_command_line(const char* line, std::size_t length);
 // settles it.
 constexpr Traffic classify_file_transfer_start() { return Traffic::user_caused; }
 
+// Classifies one command line, already stripped of wire framing, the same
+// way classify_command_line() does, but against the passive-rights actions
+// instead: `suspend` (pause), `abort` (stop) and `upload`, matched as
+// exactly the first word, the same as classify_command_line()'s allow-list.
+// Everything else, including a blank line, is `PassiveAction::none`. Called
+// on the same text classify_command_line() sees, for a PTYPE_FILE_START
+// packet too (its payload is the same "upload <path>"/"download <path>"
+// text an ordinary command carries) -- only used in multi-user mode, and
+// only once the sender is already known not to be the current holder.
+PassiveAction classify_passive_action(const char* line, std::size_t length);
+
 // The caller's own snapshot of whether interactive motion is in progress
 // right now, reduced from Kernel::get_state() and Player::is_playing() to
 // exactly the three facts blocks_transfer() needs. See the change
@@ -68,6 +105,12 @@ struct MotionState {
   // whatever `run` says; neither does a paused job (SUSPEND is not `run`
   // at all, so it already can't block on its own).
   bool job_playing = false;
+  // Kernel::get_state() == IDLE, exactly -- not merely "not running and not
+  // homing", which is also true of ALARM, HOLD, SUSPEND, WAIT and TOOL.
+  // Only used for the passive-rights "upload while idle" level
+  // (PassiveRights::watch_pause_stop_upload): a passive upload is allowed
+  // only while nothing else -- including a paused job -- is going on.
+  bool idle = false;
 };
 
 // True while a jog, probe, homing or tool-change *move* is in progress --
@@ -94,6 +137,15 @@ struct Identity {
 // that simply hasn't said hello yet.
 Identity identity_of(const Client* client);
 
+// Why gate() refused a message, so the caller can choose the right visible
+// reply without re-deriving the reason itself.
+enum class RefusalReason : uint8_t {
+  none,               // not refused
+  not_holder,         // multi-user mode, someone else holds control: name them
+  motion_in_progress, // single-user mode, or control free: a jog/probe/homing/
+                      // tool-change move is in progress
+};
+
 // What handling one inbound message actually did, for the caller to act
 // on: whether to refuse it outright (and not dispatch it at all -- the
 // caller sends its own visible reply and skips THEKERNEL->dispatch_console_
@@ -102,6 +154,7 @@ Identity identity_of(const Client* client);
 struct GateResult {
   bool refused = false;
   bool holder_changed = false;
+  RefusalReason reason = RefusalReason::none;
 };
 
 // The control token itself. One instance for the whole machine (see
@@ -126,15 +179,30 @@ class ControlToken {
   // caller; `motion` is the caller's own snapshot of the machine right
   // now.
   //
+  // `mode`, `action` and `rights` all default to their single-user-mode
+  // values, so a caller that never passes them -- every existing call, and
+  // every existing test -- gets exactly today's single-user behaviour,
+  // unchanged. `action` is the caller's own classify_passive_action() of
+  // the same text `traffic` was classified from; `rights` is the
+  // configured PassiveRights level.
+  //
   // - Automatic traffic, or traffic from whoever already holds control:
   //   passed through unchanged (`refused = false`, `holder_changed =
-  //   false`).
-  // - User-caused traffic from someone else, while blocks_transfer(motion)
-  //   is true: refused (`refused = true`) -- the caller must not dispatch
-  //   it. The holder does not change.
-  // - User-caused traffic from someone else, otherwise: seizes control
-  //   silently (`holder_changed = true`) and is then let through.
-  GateResult gate(const Identity& sender, Traffic traffic, const MotionState& motion);
+  //   false`), in either mode.
+  // - Multi-user mode, someone else already holds control: a privileged
+  //   action (passive_action_allowed() in the .cpp says exactly which
+  //   action/rights combinations qualify) is let through without moving
+  //   control; anything else is refused (`reason = not_holder`), whatever
+  //   the machine is doing.
+  // - Single-user mode, or multi-user mode with control free, user-caused
+  //   traffic from someone else: refused (`reason = motion_in_progress`)
+  //   while blocks_transfer(motion) is true; otherwise seizes control
+  //   silently (`holder_changed = true`) and is let through. This is
+  //   today's single-user rule, applied here to free control too -- "the
+  //   next user-caused message from anywhere takes it" once the holder has
+  //   released or disconnected.
+  GateResult gate(const Identity& sender, Traffic traffic, const MotionState& motion, Mode mode = Mode::single_user,
+                   PassiveAction action = PassiveAction::none, PassiveRights rights = PassiveRights::watch_only);
 
   // Clears the holder unconditionally, with no report of whether anything
   // changed -- for a fresh boot or a protocol switch, where every client's

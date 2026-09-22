@@ -16,9 +16,10 @@ constexpr uint8_t hello_result_accepted = 0;
 constexpr uint8_t hello_result_cap_reached = 1;
 constexpr uint8_t hello_result_old_controller_present = 2;
 
-// hello ack `mode` values. Only single-user exists before a mode setting is
-// added, so every ack built here reports it.
+// hello ack `mode` values, reporting the machine's configured
+// multi_client.mode (ControlToken.h's Mode).
 constexpr uint8_t hello_mode_single_user = 0;
+constexpr uint8_t hello_mode_multi_user = 1;
 
 constexpr std::size_t hello_ack_length = 3;
 

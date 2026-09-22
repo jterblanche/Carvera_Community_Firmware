@@ -35,6 +35,24 @@ std::size_t end_of_word(const char* line, std::size_t length, std::size_t start)
   return i;
 }
 
+// True if `action`, from a non-holder in multi-user mode, is allowed to
+// execute without taking control at the configured `rights` level. `pause`
+// and `stop` are allowed from watch_pause_stop up; `upload` needs the top
+// level and the machine to be idle -- see MotionState::idle.
+bool passive_action_allowed(PassiveAction action, PassiveRights rights, const MotionState& motion) {
+  switch (action) {
+    case PassiveAction::pause:
+    case PassiveAction::stop:
+      return static_cast<uint8_t>(rights) >= static_cast<uint8_t>(PassiveRights::watch_pause_stop);
+    case PassiveAction::upload:
+      return static_cast<uint8_t>(rights) >= static_cast<uint8_t>(PassiveRights::watch_pause_stop_upload) &&
+             motion.idle;
+    case PassiveAction::none:
+    default:
+      return false;
+  }
+}
+
 }  // namespace
 
 Traffic classify_command_line(const char* line, std::size_t length) {
@@ -62,6 +80,19 @@ Traffic classify_command_line(const char* line, std::size_t length) {
   return Traffic::user_caused;
 }
 
+PassiveAction classify_passive_action(const char* line, std::size_t length) {
+  if (line == nullptr || length == 0) return PassiveAction::none;
+
+  const std::size_t start = skip_spaces(line, length, 0);
+  if (start >= length) return PassiveAction::none;
+
+  if (word_is(line, length, start, "suspend")) return PassiveAction::pause;
+  if (word_is(line, length, start, "abort")) return PassiveAction::stop;
+  if (word_is(line, length, start, "upload")) return PassiveAction::upload;
+
+  return PassiveAction::none;
+}
+
 bool blocks_transfer(const MotionState& state) { return state.homing || (state.run && !state.job_playing); }
 
 Identity identity_of(const Client* client) {
@@ -75,7 +106,8 @@ Identity identity_of(const Client* client) {
   return identity;
 }
 
-GateResult ControlToken::gate(const Identity& sender, Traffic traffic, const MotionState& motion) {
+GateResult ControlToken::gate(const Identity& sender, Traffic traffic, const MotionState& motion, Mode mode,
+                               PassiveAction action, PassiveRights rights) {
   GateResult result;
 
   // An unidentified sender cannot hold control and never moves it --
@@ -84,11 +116,24 @@ GateResult ControlToken::gate(const Identity& sender, Traffic traffic, const Mot
 
   if (traffic == Traffic::automatic) return result;
 
-  // Already the holder: nothing changes.
+  // Already the holder: nothing changes, in either mode.
   if (holder_.identified && holder_.id == sender.id) return result;
 
+  if (mode == Mode::multi_user && holder_.identified) {
+    // Someone else holds control. Whatever the machine is doing, only a
+    // privileged passive action executes -- and it never takes control,
+    // whoever sends it (that is the whole point of it being passive).
+    // Everything else is refused, naming the holder.
+    if (passive_action_allowed(action, rights, motion)) return result;
+    result.refused = true;
+    result.reason = RefusalReason::not_holder;
+    return result;
+  }
+
+  // Single-user mode, or multi-user mode with control free: today's rule.
   if (blocks_transfer(motion)) {
     result.refused = true;
+    result.reason = RefusalReason::motion_in_progress;
     return result;
   }
 
