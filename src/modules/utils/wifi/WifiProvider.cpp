@@ -1613,6 +1613,22 @@ int WifiProvider::puts(const char* s, int size)
 
 int WifiProvider::_putc(int c)
 {
+	// Makera mode, with a specific client waiting on a reply: send the byte
+	// to that client alone, the same as puts() already does above for
+	// anything longer than one byte. This is what a file transfer's control
+	// bytes (ACK/NAK/CAN/EOT, the sync char) go through -- active_reply_client
+	// stays set to the client whose command is dispatching for as long as
+	// that dispatch runs, file transfers included, since a transfer runs to
+	// completion inside one dispatch rather than returning between bytes.
+	// Without this, the byte below goes out through the module's untargeted
+	// single-client send, which delivers to whichever client the module most
+	// recently accepted a connection from -- not necessarily the one the
+	// byte is actually for.
+	if (communication_protocol == PROTOCOL_MAKERA && active_reply_client >= 0) {
+		const u8 byte = static_cast<u8>(c);
+		return send_to_wifi_client(active_reply_client, &byte, 1) == SendOutcome::sent_all ? 1 : 0;
+	}
+
 	u16 status = 0;
 	u8 to_send = c;
 	if (M8266WIFI_SPI_Send_Data(&to_send, 1, tcp_link_no, &status) == 0) {
@@ -1658,8 +1674,10 @@ int WifiProvider::gets(char** buf, int size)
 		
 		if(this->ptrData == 0)
 		{
-			received = M8266WIFI_SPI_RecvData(WifiData,
-					(size == 0 || size > WIFI_DATA_MAX_SIZE) ? WIFI_DATA_MAX_SIZE : size, WIFI_DATA_TIMEOUT_MS, &link_no, &status);
+			u8 remote_ip[4];
+			u16 remote_port = 0;
+			received = M8266WIFI_SPI_RecvData_ex(WifiData,
+					(size == 0 || size > WIFI_DATA_MAX_SIZE) ? WIFI_DATA_MAX_SIZE : size, WIFI_DATA_TIMEOUT_MS, &link_no, remote_ip, &remote_port, &status);
 			if (link_no == udp_link_no) {
 				// THEKERNEL->streams->printf("gets, data from udp");
 				return 0;
@@ -1668,8 +1686,29 @@ int WifiProvider::gets(char** buf, int size)
 				THEKERNEL->streams->printf("gets, received: %d, status:%d, high: %d, low: %d!\n", received, status, int(status >> 8), int(status & 0xff));
 				return 0;
 			}
+
+			// This is the file-transfer byte stream (this whole branch is
+			// only ever read from during a transfer -- see Player::upload_command).
+			// active_reply_client is the client whose command is dispatching,
+			// which for a transfer means the client that sent the FILE_START
+			// -- it stays set for the whole transfer, the same fact _putc()
+			// above relies on. Bytes from any other client -- an ordinary
+			// status poll, most often -- must never reach the parser below:
+			// there is only one copy of this parser's state (ptrData,
+			// currentState, xbuff), shared by every WiFi client, so a byte
+			// that does not belong to this transfer would otherwise corrupt
+			// it. They are dropped here, before touching any of that state,
+			// which reads to the caller as no data having arrived yet.
+			if (received > 0) {
+				multiclient::Address sender;
+				memcpy(sender.ip, remote_ip, sizeof(sender.ip));
+				sender.port = remote_port;
+				if (!multiclient::is_transfer_owner(multiclient::shared_client_table(), active_reply_client, sender)) {
+					return 0;
+				}
+			}
 		}
-		
+
 		for (int i = this->ptrData; i < received; i ++) {
 			uint8_t byte;
 			byte = WifiData[i];

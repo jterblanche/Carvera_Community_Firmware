@@ -2163,6 +2163,13 @@ void Player::upload_command( string parameters, StreamOutput *stream )
         stream->reset();
     }
 
+    // Makera mode: if the WiFi client uploading disconnects partway through,
+    // no special handling is needed here. gets() only accepts bytes from
+    // that client, so once it is gone nothing arrives for it, and the
+    // ordinary retry counters below (retry/tatalretry against RETRYTIME and
+    // MAXRETRANS) already treat that the same as any other silent link --
+    // giving up and falling into upload_error below, which closes and
+    // removes the partial file.
     for (;;) {
         if (communication_protocol == PROTOCOL_SMOOTHIE) {
             for (retry = 0; retry < MAXRETRANS; ++retry) {  // approx 3 seconds allowed to make connection

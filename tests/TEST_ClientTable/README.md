@@ -38,3 +38,9 @@ a talking one does); a lone old client versus a second one making it
 not-alone; excluding a given client (and, for USB, optionally itself) when
 checking whether an old client is already in the mix; and looking a client
 up by id, scoped to identified clients only.
+
+Also: `is_transfer_owner`, which a file transfer's byte stream uses to tell
+its own client's bytes apart from every other connected client's -- true only
+for the sender at the given client index's own address, false for an
+out-of-range index, and false once that index's slot has been freed (the
+transferring client disconnecting mid-transfer).

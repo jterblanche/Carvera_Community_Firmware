@@ -210,4 +210,9 @@ ClientTable& shared_client_table() {
   return table;
 }
 
+bool is_transfer_owner(const ClientTable& table, int client_index, const Address& sender) {
+  const Client* owner = table.wifi_at(client_index);
+  return owner != nullptr && same_address(owner->address, sender);
+}
+
 }  // namespace multiclient
