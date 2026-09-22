@@ -211,6 +211,51 @@ int main() {
   }
 
   {
+    TEST("build_relay_frame prepends the source id, payload untouched");
+    const uint8_t payload[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01};
+    uint8_t out[8 + sizeof(payload)];
+    const std::size_t len =
+        multiclient::build_relay_frame(0x0102030405060708ull, payload, sizeof(payload), out, sizeof(out));
+    CHECK(len == sizeof(out));
+    CHECK(read_be32(out) == 0x01020304u);
+    CHECK(read_be32(out + 4) == 0x05060708u);
+    CHECK(std::memcmp(out + 8, payload, sizeof(payload)) == 0);
+  }
+
+  {
+    TEST("build_relay_frame passes an empty payload through");
+    uint8_t out[8];
+    const std::size_t len = multiclient::build_relay_frame(42, nullptr, 0, out, sizeof(out));
+    CHECK(len == 8);
+  }
+
+  {
+    TEST("build_relay_frame refuses a payload past max_relay_payload_bytes, "
+         "even with room to spare in out_capacity");
+    CHECK(multiclient::max_relay_payload_bytes == 527);
+    std::vector<uint8_t> payload(multiclient::max_relay_payload_bytes + 1, 0x7A);
+    std::vector<uint8_t> out(8 + payload.size());
+    const std::size_t len = multiclient::build_relay_frame(1, payload.data(), payload.size(), out.data(), out.size());
+    CHECK(len == 0);
+  }
+
+  {
+    TEST("build_relay_frame accepts exactly max_relay_payload_bytes");
+    std::vector<uint8_t> payload(multiclient::max_relay_payload_bytes, 0x7A);
+    std::vector<uint8_t> out(8 + payload.size());
+    const std::size_t len = multiclient::build_relay_frame(1, payload.data(), payload.size(), out.data(), out.size());
+    CHECK(len == out.size());
+  }
+
+  {
+    TEST("build_relay_frame refuses to write past out_capacity");
+    const uint8_t payload[4] = {1, 2, 3, 4};
+    uint8_t out[8 + 3];  // 8-byte source id alone already exceeds this
+    const std::size_t len = multiclient::build_relay_frame(1, payload, sizeof(payload), out, sizeof(out));
+    CHECK(len == 0);
+  }
+
+  {
     TEST("clamp_event_path_length passes short paths through and caps long ones");
     CHECK(multiclient::clamp_event_path_length(10) == 10);
     CHECK(multiclient::clamp_event_path_length(multiclient::max_event_path_length) == multiclient::max_event_path_length);

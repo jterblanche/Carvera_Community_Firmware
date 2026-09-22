@@ -53,6 +53,11 @@
 #define PTYPE_CLIENT_LIST_REQ   0x63
 #define PTYPE_CLIENT_LIST_REPLY 0x64
 
+// A controller-to-controller relay: sent by one identified client, repeated
+// verbatim (with an 8-byte source id prefixed) to every *other* identified
+// client. The machine never reads the payload.
+#define PTYPE_RELAY             0x67
+
 // Publishing to every identified client, without a request: a system event
 // (upload finished, play started, job ended, alarm/halt) and a command's
 // text or reply, tagged with which client sent it. Status reuses the
