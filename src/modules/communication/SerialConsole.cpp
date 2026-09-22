@@ -313,6 +313,15 @@ void SerialConsole::on_idle(void * argument)
         auto &table = multiclient::shared_client_table();
         const multiclient::Client *usb = table.usb();
         if (usb != nullptr && multiclient::usb_session_expired(usb->hello_window_started, now_us, last_activity_us)) {
+            // Read id/name before clearing: clear_usb_identity() wipes them.
+            // Only an identified session is announced -- one that never got
+            // past its hello window had no id or name to announce either.
+            if (usb->identified) {
+                uint8_t left_payload[1 + 8 + 1 + multiclient::max_name_length];
+                const std::size_t left_length = multiclient::build_client_left_event(
+                    usb->id, usb->name, usb->name_len, left_payload, sizeof(left_payload));
+                if (left_length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, left_payload, left_length);
+            }
             table.clear_usb_identity();
         }
     }
@@ -689,8 +698,13 @@ void SerialConsole::handle_hello(const uint8_t* payload, uint16_t payload_length
     if (!multiclient::parse_hello(payload, payload_length, hello)) return; // malformed, or an unrecognised version: ignored
 
     if (!self->identified) {
+        // A reconnect under an id already in the table (dropped below) is
+        // the same controller still there, just on USB now instead of
+        // WiFi -- not a new arrival, so it must not publish "joined" once
+        // self picks the id up: see the matching skip below.
         const int stale = table.find_wifi_by_id(hello.id);
-        if (stale >= 0) table.remove_wifi(stale);
+        const bool reconnect = stale >= 0;
+        if (reconnect) table.remove_wifi(stale);
 
         if (table.has_old_client(now_us, -1, /*exclude_usb=*/true)) {
             uint8_t ack[multiclient::hello_ack_length];
@@ -701,6 +715,13 @@ void SerialConsole::handle_hello(const uint8_t* payload, uint16_t payload_length
         }
 
         multiclient::set_identity(*self, hello.id, hello.name, hello.name_len);
+
+        if (!reconnect) {
+            uint8_t joined_payload[1 + 8 + 1 + multiclient::max_name_length];
+            const std::size_t joined_length = multiclient::build_client_joined_event(
+                self->id, self->name, self->name_len, joined_payload, sizeof(joined_payload));
+            if (joined_length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, joined_payload, joined_length);
+        }
     }
 
     uint8_t ack[multiclient::hello_ack_length];
