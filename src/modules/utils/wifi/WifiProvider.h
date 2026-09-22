@@ -21,6 +21,7 @@ using namespace std;
 #include "libs/MakeraFrame.h"
 #include "libs/FrameResync.h"
 #include "libs/ClientTable.h"
+#include "libs/ControlToken.h"
 #include "libs/Hello.h"
 #include "libs/Publish.h"
 
@@ -125,6 +126,17 @@ private:
     // (via THEKERNEL->streams->publish_multiclient(), which calls back into
     // this override) and publish_status_if_due() ultimately go through.
     void send_framed_to_identified_wifi_clients(char cmd, const uint8_t* payload, size_t length);
+
+    // The control-token gate (libs/ControlToken.h), for the one command
+    // about to be dispatched from `client_index`. Classifies `packet`,
+    // reads the machine's own motion state, and asks the shared
+    // ControlToken to decide. Returns true if the caller should go on to
+    // dispatch the command; false means this function has already sent a
+    // visible refusal reply to `client_index` and the caller must not
+    // dispatch it. Publishes a control-changed event when the holder
+    // actually changes -- the same gate SerialConsole::gate_dispatch()
+    // implements for the USB link, against the same shared token.
+    bool gate_dispatch(int client_index, const makera::Packet& packet);
 
     // multi_client.status_publish_hz, converted once at load time
     // (on_module_loaded) from the configured rate.

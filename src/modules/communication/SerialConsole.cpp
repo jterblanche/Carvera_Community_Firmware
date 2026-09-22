@@ -124,6 +124,11 @@ void SerialConsole::on_module_loaded() {
     this->register_for_event(ON_MAIN_LOOP);
     this->register_for_event(ON_IDLE);
     this->register_for_event(ON_SET_PUBLIC_DATA);
+    // Reconciles the control token once a second (see on_second_tick()) --
+    // registered here, not on WifiProvider, because SerialConsole is the
+    // one module guaranteed to exist on every build (WifiProvider is
+    // compiled out entirely under NO_WIFI_PROVIDER, the z1 target).
+    this->register_for_event(ON_SECOND_TICK);
 
     // Add to the pack of streams kernel can call to, for example for broadcasting
     THEKERNEL->streams->append_stream(this);
@@ -357,11 +362,86 @@ void SerialConsole::on_idle(void * argument)
 #endif
 }
 
+// Frees the control token if its holder has disconnected or silently
+// dropped (libs/ControlToken.h, reconcile_holder()) -- registered here,
+// once a second, rather than hooked into every place either link removes a
+// client from the shared table, so the "was that the holder?" decision
+// stays in exactly one place regardless of which link, or which of several
+// removal paths, actually caused it.
+void SerialConsole::on_second_tick(void *argument) {
+    if (multiclient::reconcile_holder(multiclient::shared_control_token(), multiclient::shared_client_table())) {
+        uint8_t payload[1 + 8 + 1];  // holder_id 0 + holder_name_len 0: nobody has control
+        const std::size_t length = multiclient::build_control_changed_event(0, nullptr, 0, payload, sizeof(payload));
+        if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+    }
+}
+
+// The control-token gate (libs/ControlToken.h): the one place the USB
+// link's own command is decided against the shared control token, right
+// before it would otherwise be dispatched. See WifiProvider::gate_dispatch()
+// for the same gate on WiFi, against the same
+// multiclient::shared_control_token().
+bool SerialConsole::gate_dispatch(const makera::Packet &packet) {
+    const multiclient::Traffic traffic = packet.type == PTYPE_FILE_START
+        ? multiclient::classify_file_transfer_start()
+        : multiclient::classify_command_line(reinterpret_cast<const char*>(packet.data), packet.data_length);
+
+    const multiclient::Identity sender = multiclient::identity_of(multiclient::shared_client_table().usb());
+
+    // See WifiProvider::gate_dispatch()'s own comment: RUN alone is
+    // ambiguous between a running job, a jog, an MDI move and an automatic
+    // tool-change move; is_playing() disambiguates it.
+    const uint8_t machine_state = THEKERNEL->get_state();
+    multiclient::MotionState motion;
+    motion.run = (machine_state == RUN);
+    motion.homing = (machine_state == HOME);
+    bool playing = false;
+    if (PublicData::get_value(player_checksum, is_playing_checksum, &playing)) motion.job_playing = playing;
+
+    const multiclient::GateResult result = multiclient::shared_control_token().gate(sender, traffic, motion);
+
+    if (result.refused) {
+        // printf(), which frames through PacketMessage(), not puts() --
+        // same reasoning as WifiProvider::gate_dispatch().
+        const multiclient::Identity &holder = multiclient::shared_control_token().holder();
+        if (holder.identified) {
+            printf("error:Transfer refused -- %.*s has control and an interactive move is in progress\r\n",
+                   static_cast<int>(holder.name_len), holder.name);
+        } else {
+            printf("error:Transfer refused -- an interactive move is in progress\r\n");
+        }
+        return false;
+    }
+
+    if (result.holder_changed) {
+        const multiclient::Identity &holder = multiclient::shared_control_token().holder();
+        uint8_t payload[1 + 8 + 1 + multiclient::max_name_length];
+        const std::size_t length =
+            multiclient::build_control_changed_event(holder.id, holder.name, holder.name_len, payload, sizeof(payload));
+        if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+    }
+
+    return true;
+}
+
 // Actual event calling must happen in the main loop because if it happens in the interrupt we will loose data
 void SerialConsole::on_main_loop(void * argument){
     if (communication_protocol == PROTOCOL_MAKERA) {
         if (command_waiting && !THEKERNEL->is_dispatching_console_line()) {
             const makera::Packet &packet = makera_frame_decoder.packet();
+
+            // Cleared before the gate, not after: a refused command must
+            // not be retried on the next tick, and gate_dispatch() has
+            // already sent its own reply by the time it returns.
+            command_waiting = false;
+
+            // The control-token gate (libs/ControlToken.h): classifies
+            // this command, moves the token in single-user mode, or
+            // refuses it with a visible reason while interactive motion is
+            // in progress. A refused command is never published or
+            // dispatched.
+            if (!gate_dispatch(packet)) return;
+
             struct SerialMessage message;
             message.message.assign(reinterpret_cast<const char *>(packet.data), packet.data_length);
             message.stream = this;
@@ -376,7 +456,6 @@ void SerialConsole::on_main_loop(void * argument){
                 publish_console_line(message.message.c_str(), message.message.size());
             }
 
-            command_waiting = false;
             THEKERNEL->dispatch_console_line(message);
         }
         return;
