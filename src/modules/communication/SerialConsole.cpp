@@ -596,6 +596,11 @@ void SerialConsole::process_makera_byte(uint8_t received)
         return;
     }
 
+    if (packet.type == PTYPE_RELAY) {
+        handle_relay(packet.data, packet.data_length);
+        return;
+    }
+
     if (packet.type == PTYPE_CTRL_MULTI || packet.type == PTYPE_FILE_START) {
         if (packet.data_length == 0) {
             if (packet.type == PTYPE_FILE_START) makera_file_cancel = true;
@@ -657,6 +662,17 @@ void SerialConsole::handle_client_list_request() {
     PacketMessage(PTYPE_CLIENT_LIST_REPLY, reinterpret_cast<const char*>(payload), static_cast<int>(length));
 }
 
+// Hands a relay frame's opaque payload to publish_relay() (via
+// THEKERNEL->streams, so it also reaches WiFi), tagged with this USB link's
+// own id. Dropped here if this link hasn't identified -- see
+// WifiProvider::handle_wifi_relay()'s own comment for why. Never touches
+// the control token: handled inline here, never reaching gate_dispatch().
+void SerialConsole::handle_relay(const uint8_t* payload, uint16_t payload_length) {
+    const multiclient::Client *self = multiclient::shared_client_table().usb();
+    if (self == nullptr || !self->identified) return;
+    THEKERNEL->streams->publish_relay(self->id, payload, payload_length);
+}
+
 // Reuses the base StreamOutput::PacketMessage() to build and send the frame
 // (this link has only one client, so "targeted" and "broadcast" are the
 // same send), then, for an ordinary command reply, also publishes it --
@@ -702,6 +718,22 @@ void SerialConsole::publish_multiclient(char cmd, const uint8_t* payload, size_t
     const multiclient::Client *usb = multiclient::shared_client_table().usb();
     if (usb == nullptr || !usb->identified) return;
     StreamOutput::PacketMessage(cmd, reinterpret_cast<const char*>(payload), static_cast<int>(length));
+}
+
+// Reached through THEKERNEL->streams->publish_relay() (libs/StreamOutputPool.h).
+// Sends to this USB link's own client, if it is identified and is not
+// `source_id` itself -- this link has only one client, so "the sender was
+// on USB" and "there is nobody left on USB to relay to" are the same case,
+// and this returns without sending, same as WifiProvider::publish_relay()
+// does for its own sender.
+void SerialConsole::publish_relay(uint64_t source_id, const uint8_t* payload, size_t length) {
+    if (communication_protocol != PROTOCOL_MAKERA) return;
+    const multiclient::Client *usb = multiclient::shared_client_table().usb();
+    if (usb == nullptr || !usb->identified || usb->id == source_id) return;
+    uint8_t frame[8 + multiclient::max_relay_payload_bytes];
+    const size_t frame_length = multiclient::build_relay_frame(source_id, payload, length, frame, sizeof(frame));
+    if (frame_length == 0) return;
+    StreamOutput::PacketMessage(PTYPE_RELAY, reinterpret_cast<const char*>(frame), static_cast<int>(frame_length));
 }
 
 int SerialConsole::receive_packet(makera::Packet& packet, uint32_t timeout_ms)

@@ -47,6 +47,7 @@ class SerialConsole : public Module, public StreamOutput {
         void on_protocol_changed();
         void PacketMessage(char cmd, const char* s, int size) override;
         void publish_multiclient(char cmd, const uint8_t* payload, size_t length);
+        void publish_relay(uint64_t source_id, const uint8_t* payload, size_t length);
         void reset();
         char getc_result;
 
@@ -87,6 +88,10 @@ class SerialConsole : public Module, public StreamOutput {
         int check_file_packet(char **buf);
         void handle_hello(const uint8_t* payload, uint16_t payload_length, uint32_t now_us);
         void handle_client_list_request();
+        // Hands a decoded relay frame to publish_relay(), if this USB link
+        // is identified. See WifiProvider::handle_wifi_relay() for the same
+        // decision on the WiFi side.
+        void handle_relay(const uint8_t* payload, uint16_t payload_length);
 
         // Publishes `text` (a command's own text, or its reply) as one or
         // more published-console-line fragments, tagged with this USB

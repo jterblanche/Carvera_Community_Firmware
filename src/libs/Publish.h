@@ -72,6 +72,23 @@ std::size_t build_console_line_frame(uint64_t source_id, const char* source_name
                                       const char* text_chunk, std::size_t chunk_length, bool more, uint8_t* out,
                                       std::size_t out_capacity);
 
+// --- Relay (0x67) ---
+
+// Cap on a relay message's own payload, leaving room for the 8-byte source
+// id this file prepends before the machine re-sends it, so the relayed-out
+// frame still fits the 535 B new-message cap: 527 + 8 = 535. A sender that
+// ignores this and sends more is not truncated -- build_relay_frame()
+// below just refuses to build anything for it.
+constexpr std::size_t max_relay_payload_bytes = 535 - 8;
+
+// Builds source_id(8, BE) + payload verbatim, for the machine to send to
+// every *other* identified client (protocol contract section 6.7). The
+// payload itself is never inspected -- copied byte for byte. Returns 0,
+// meaning "do not send this", if payload_length exceeds
+// max_relay_payload_bytes or the result would not fit in out_capacity.
+std::size_t build_relay_frame(uint64_t source_id, const uint8_t* payload, std::size_t payload_length, uint8_t* out,
+                               std::size_t out_capacity);
+
 // --- Events (0x68) ---
 
 // kind values, see the protocol contract's message catalogue (0x68 event).

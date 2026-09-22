@@ -52,6 +52,18 @@ class StreamOutput {
         // leaves the default no-op.
         virtual void publish_multiclient(char cmd, const uint8_t *payload, std::size_t length) { (void)cmd; (void)payload; (void)length; }
 
+        // Repeats `payload`, opaque and untouched, to this stream's own
+        // identified clients other than `source_id` (libs/Publish.h's
+        // build_relay_frame() adds the source id prefix and does the size
+        // check; this only decides who receives it). Reached through
+        // THEKERNEL->streams so every transport's own clients see it (see
+        // StreamOutputPool::publish_relay()), the same shape as
+        // publish_multiclient() above; a stream with no notion of
+        // "identified clients" leaves the default no-op.
+        virtual void publish_relay(uint64_t source_id, const uint8_t *payload, std::size_t length) {
+            (void)source_id; (void)payload; (void)length;
+        }
+
         static NullStreamOutput NullStream;
 
         // Virtual because printf()/printfcmd() above call it to frame their

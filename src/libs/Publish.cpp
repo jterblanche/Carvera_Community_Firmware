@@ -41,6 +41,17 @@ std::size_t build_console_line_frame(uint64_t source_id, const char* source_name
   return offset;
 }
 
+std::size_t build_relay_frame(uint64_t source_id, const uint8_t* payload, std::size_t payload_length, uint8_t* out,
+                               std::size_t out_capacity) {
+  if (payload_length > max_relay_payload_bytes) return 0;
+  const std::size_t length = 8 + payload_length;
+  if (length > out_capacity) return 0;
+
+  for (int i = 0; i < 8; ++i) out[i] = static_cast<uint8_t>(source_id >> (8 * (7 - i)));
+  if (payload_length != 0) std::memcpy(out + 8, payload, payload_length);
+  return length;
+}
+
 uint8_t clamp_event_path_length(std::size_t length) {
   return length > max_event_path_length ? static_cast<uint8_t>(max_event_path_length) : static_cast<uint8_t>(length);
 }

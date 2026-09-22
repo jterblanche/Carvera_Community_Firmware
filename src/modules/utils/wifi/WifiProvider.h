@@ -45,6 +45,7 @@ public:
     void on_set_public_data(void* argument);
     void on_protocol_changed();
     void publish_multiclient(char cmd, const uint8_t* payload, size_t length);
+    void publish_relay(uint64_t source_id, const uint8_t* payload, size_t length);
 
     int gets(char** buf, int size = 0);
     int puts(const char*, int size = 0);
@@ -95,6 +96,10 @@ private:
     SendOutcome send_to_wifi_client(int client_index, const u8* data, size_t length);
     void broadcast_to_wifi_clients(const u8* data, size_t length);
     void broadcast_to_identified_wifi_clients(const u8* data, size_t length);
+    // Same as broadcast_to_identified_wifi_clients(), skipping whichever
+    // identified WiFi client (if any) holds `exclude_id` -- the relay's own
+    // sender, when that sender is on this transport.
+    void broadcast_to_identified_wifi_clients_except(uint64_t exclude_id, const u8* data, size_t length);
     void reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_clients[]);
     void forget_wifi_client(int client_index);
     void enforce_old_client_rule(uint32_t now_us);
@@ -103,6 +108,11 @@ private:
     // addressed to that one client (see receive_wifi_data()).
     void handle_wifi_hello(int client_index, const uint8_t* payload, uint16_t payload_length, uint32_t now_us);
     void handle_wifi_client_list_request(int client_index);
+    // Hands a decoded relay frame (protocol contract section 6.7) from
+    // `client_index` to publish_relay(), if that client is identified --
+    // an unidentified sender's relay is silently dropped, the same as any
+    // other broadcast-shaped message from a client that hasn't said hello.
+    void handle_wifi_relay(int client_index, const uint8_t* payload, uint16_t payload_length);
     // Sends a framed reply addressed to one specific client, regardless of
     // whatever active_reply_client currently holds (saves and restores it).
     void send_wifi_packet(int client_index, char cmd, const uint8_t* payload, size_t length);
@@ -126,6 +136,11 @@ private:
     // (via THEKERNEL->streams->publish_multiclient(), which calls back into
     // this override) and publish_status_if_due() ultimately go through.
     void send_framed_to_identified_wifi_clients(char cmd, const uint8_t* payload, size_t length);
+    // Same as send_framed_to_identified_wifi_clients(), skipping whichever
+    // identified WiFi client holds `exclude_id`. Used by publish_relay() so
+    // a relay's own sender never receives its own message back.
+    void send_framed_to_identified_wifi_clients_except(uint64_t exclude_id, char cmd, const uint8_t* payload,
+                                                         size_t length);
 
     // The control-token gate (libs/ControlToken.h), for the one command
     // about to be dispatched from `client_index`. Classifies `packet`,
