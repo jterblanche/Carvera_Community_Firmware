@@ -67,6 +67,17 @@ public:
         }
     }
 
+    // Reaches every registered stream's own publish_relay() override, the
+    // same fan-out publish_multiclient() above does. See
+    // StreamOutput::publish_relay().
+    void publish_relay(uint64_t source_id, const uint8_t* payload, size_t length)
+    {
+        for(set<StreamOutput*>::iterator i = this->streams.begin(); i != this->streams.end(); i++)
+        {
+            (*i)->publish_relay(source_id, payload, length);
+        }
+    }
+
     void append_stream(StreamOutput* stream)
     {
         this->streams.insert(stream);
