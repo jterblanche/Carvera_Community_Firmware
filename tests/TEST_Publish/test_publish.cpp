@@ -264,6 +264,29 @@ int main() {
   }
 
   {
+    TEST("build_control_changed_event writes kind, id and name for a real holder");
+    uint8_t out[1 + 8 + 1 + 9];
+    const std::size_t len = multiclient::build_control_changed_event(0x0102030405060708ull, "Office PC", 9, out, sizeof(out));
+    CHECK(len == sizeof(out));
+    CHECK(out[0] == multiclient::event_kind_control_changed);
+    uint64_t id = 0;
+    for (int i = 0; i < 8; ++i) id = (id << 8) | out[1 + i];
+    CHECK(id == 0x0102030405060708ull);
+    CHECK(out[9] == 9);
+    CHECK(std::memcmp(out + 10, "Office PC", 9) == 0);
+  }
+
+  {
+    TEST("build_control_changed_event writes id 0 / name_len 0 for \"nobody\"");
+    uint8_t out[10];
+    const std::size_t len = multiclient::build_control_changed_event(0, nullptr, 0, out, sizeof(out));
+    CHECK(len == 10);
+    CHECK(out[0] == multiclient::event_kind_control_changed);
+    for (int i = 1; i <= 8; ++i) CHECK(out[i] == 0);
+    CHECK(out[9] == 0);
+  }
+
+  {
     TEST("every event builder refuses to write past out_capacity");
     uint8_t out[3];
     CHECK(multiclient::build_upload_finished_event("abc", 3, 1, out, sizeof(out)) == 0);
@@ -271,6 +294,7 @@ int main() {
     CHECK(multiclient::build_job_ended_event("abc", 3, 0, 0, 0, out, sizeof(out)) == 0);
     uint8_t tiny[1];
     CHECK(multiclient::build_alarm_halt_event(1, tiny, sizeof(tiny)) == 0);
+    CHECK(multiclient::build_control_changed_event(1, "Office PC", 9, tiny, sizeof(tiny)) == 0);
   }
 
   std::printf("\n%d checks, %d failures\n", checks, failures);

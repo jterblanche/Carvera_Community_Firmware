@@ -17,6 +17,7 @@ using std::string;
 #include "libs/RingBuffer.h"
 #include "libs/StreamOutput.h"
 #include "libs/MakeraFrame.h"
+#include "libs/ControlToken.h"
 #include "libs/Hello.h"
 #include "libs/Publish.h"
 
@@ -32,6 +33,7 @@ class SerialConsole : public Module, public StreamOutput {
         void on_serial_char_received();
         void on_main_loop(void * argument);
         void on_idle(void * argument);
+        void on_second_tick(void * argument);
         void on_set_public_data(void *argument);
         bool has_char(char letter);
         void set_rx_enabled(bool enabled);
@@ -92,6 +94,14 @@ class SerialConsole : public Module, public StreamOutput {
         // transport. See publish_multiclient() and WifiProvider's own
         // equivalent.
         void publish_console_line(const char* text, size_t length);
+
+        // The control-token gate (libs/ControlToken.h), for the one USB
+        // command about to be dispatched. See
+        // WifiProvider::gate_dispatch() for the same gate on the WiFi
+        // link, against the same shared ControlToken -- one rule, two thin
+        // per-transport call sites, since each transport addresses its own
+        // refusal reply differently.
+        bool gate_dispatch(const makera::Packet& packet);
 
         // multi_client.status_publish_hz, converted once at load time.
         uint32_t status_publish_interval_us;
