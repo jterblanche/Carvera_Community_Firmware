@@ -76,6 +76,11 @@ int main() {
     CHECK(classify("get temp") == multiclient::Traffic::user_caused);
     CHECK(classify("") == multiclient::Traffic::user_caused);
     CHECK(classify("   ") == multiclient::Traffic::user_caused);
+    // The manual tool-change confirm (ATCHandler.cpp's M490 dispatch, "exit
+    // tool change waiting status") is not on the automatic allow-list, so
+    // it always classifies as user-caused, from any client.
+    CHECK(classify("M490.2") == multiclient::Traffic::user_caused);
+    CHECK(classify("M490.4") == multiclient::Traffic::user_caused);
   }
 
   {
@@ -237,6 +242,29 @@ int main() {
 
     const multiclient::GateResult result =
         token.gate(workshop, multiclient::Traffic::user_caused, multiclient::MotionState{});  // TOOL/WAIT: run=false
+    CHECK(!result.refused);
+    CHECK(result.holder_changed);
+    CHECK(token.holder().id == 2);
+  }
+
+  {
+    // Ties classify_command_line() and gate() together with the actual
+    // manual tool-change confirm text, end to end: a tool-change wait
+    // (TOOL/WAIT, run=false) never blocks a transfer (see the test above),
+    // and this specific command is never on the automatic allow-list (see
+    // "classify_command_line: everything else is user-caused"), so any
+    // identified client sending it takes control -- the mechanism the
+    // design calls "a confirm from any identified client is accepted and
+    // moves control through the gate", without a second, parallel notion of
+    // control for tool-change waits.
+    TEST("gate: a tool-change confirm from a non-holder during a tool-change wait takes control");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{});
+
+    const multiclient::GateResult result =
+        token.gate(workshop, classify("M490.2"), multiclient::MotionState{});
     CHECK(!result.refused);
     CHECK(result.holder_changed);
     CHECK(token.holder().id == 2);
