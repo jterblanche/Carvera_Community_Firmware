@@ -472,7 +472,7 @@ int main() {
   }
 
   {
-    TEST("gate: multi-user, watch_pause_stop -- pause/stop execute without moving control");
+    TEST("gate: multi-user, watch_stop -- pause/stop execute without moving control");
     multiclient::ControlToken token;
     const multiclient::Identity office = make_identity(1, "Office");
     const multiclient::Identity workshop = make_identity(2, "Workshop");
@@ -480,21 +480,21 @@ int main() {
 
     const multiclient::GateResult pause_result =
         token.gate(workshop, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user,
-                   multiclient::PassiveAction::pause, multiclient::PassiveRights::watch_pause_stop);
+                   multiclient::PassiveAction::pause, multiclient::PassiveRights::watch_stop);
     CHECK(!pause_result.refused);
     CHECK(!pause_result.holder_changed);
     CHECK(token.holder().id == 1);  // still Office
 
     const multiclient::GateResult stop_result =
         token.gate(workshop, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user,
-                   multiclient::PassiveAction::stop, multiclient::PassiveRights::watch_pause_stop);
+                   multiclient::PassiveAction::stop, multiclient::PassiveRights::watch_stop);
     CHECK(!stop_result.refused);
     CHECK(!stop_result.holder_changed);
     CHECK(token.holder().id == 1);
   }
 
   {
-    TEST("gate: multi-user, watch_pause_stop -- upload is still refused (needs the top level)");
+    TEST("gate: multi-user, watch_stop -- upload is still refused (needs the top level)");
     multiclient::ControlToken token;
     const multiclient::Identity office = make_identity(1, "Office");
     const multiclient::Identity workshop = make_identity(2, "Workshop");
@@ -504,13 +504,13 @@ int main() {
     idle.idle = true;
     const multiclient::GateResult result =
         token.gate(workshop, multiclient::Traffic::user_caused, idle, multiclient::Mode::multi_user,
-                   multiclient::PassiveAction::upload, multiclient::PassiveRights::watch_pause_stop);
+                   multiclient::PassiveAction::upload, multiclient::PassiveRights::watch_stop);
     CHECK(result.refused);
     CHECK(result.reason == multiclient::RefusalReason::not_holder);
   }
 
   {
-    TEST("gate: multi-user, watch_pause_stop_upload -- upload while idle executes without moving control");
+    TEST("gate: multi-user, watch_stop_upload -- upload while idle executes without moving control");
     multiclient::ControlToken token;
     const multiclient::Identity office = make_identity(1, "Office");
     const multiclient::Identity workshop = make_identity(2, "Workshop");
@@ -520,14 +520,14 @@ int main() {
     idle.idle = true;
     const multiclient::GateResult result =
         token.gate(workshop, multiclient::Traffic::user_caused, idle, multiclient::Mode::multi_user,
-                   multiclient::PassiveAction::upload, multiclient::PassiveRights::watch_pause_stop_upload);
+                   multiclient::PassiveAction::upload, multiclient::PassiveRights::watch_stop_upload);
     CHECK(!result.refused);
     CHECK(!result.holder_changed);
     CHECK(token.holder().id == 1);
   }
 
   {
-    TEST("gate: multi-user, watch_pause_stop_upload -- upload while NOT idle is refused");
+    TEST("gate: multi-user, watch_stop_upload -- upload while NOT idle is refused");
     multiclient::ControlToken token;
     const multiclient::Identity office = make_identity(1, "Office");
     const multiclient::Identity workshop = make_identity(2, "Workshop");
@@ -538,7 +538,7 @@ int main() {
     playing.job_playing = true;  // a job is running: not idle
     const multiclient::GateResult result =
         token.gate(workshop, multiclient::Traffic::user_caused, playing, multiclient::Mode::multi_user,
-                   multiclient::PassiveAction::upload, multiclient::PassiveRights::watch_pause_stop_upload);
+                   multiclient::PassiveAction::upload, multiclient::PassiveRights::watch_stop_upload);
     CHECK(result.refused);
     CHECK(result.reason == multiclient::RefusalReason::not_holder);
   }
@@ -557,7 +557,7 @@ int main() {
     jogging.run = true;
     const multiclient::GateResult result =
         token.gate(workshop, multiclient::Traffic::user_caused, jogging, multiclient::Mode::multi_user,
-                   multiclient::PassiveAction::stop, multiclient::PassiveRights::watch_pause_stop);
+                   multiclient::PassiveAction::stop, multiclient::PassiveRights::watch_stop);
     CHECK(!result.refused);
     CHECK(!result.holder_changed);
     CHECK(token.holder().id == 1);
@@ -637,7 +637,7 @@ int main() {
     // matters while someone else is the holder.
     const multiclient::GateResult result =
         token.gate(workshop, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user,
-                   multiclient::PassiveAction::stop, multiclient::PassiveRights::watch_pause_stop);
+                   multiclient::PassiveAction::stop, multiclient::PassiveRights::watch_stop);
     CHECK(!result.refused);
     CHECK(result.holder_changed);
     CHECK(token.holder().id == 2);

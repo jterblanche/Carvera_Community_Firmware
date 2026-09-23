@@ -29,13 +29,46 @@ enum class Mode : uint8_t { single_user, multi_user };
 // How much a non-holder may do in multi-user mode while someone else holds
 // control, from a machine config setting (multi_client.passive_rights).
 // Ordered so a higher level always includes what a lower one allows --
-// gate() compares these numerically. watch_pause_stop_upload is the
+// gate() compares these numerically. watch_stop_upload is the
 // default.
 enum class PassiveRights : uint8_t {
   watch_only = 0,
-  watch_pause_stop = 1,
-  watch_pause_stop_upload = 2,
+  watch_stop = 1,
+  watch_stop_upload = 2,
 };
+
+// The config.txt spellings of the three levels, and of the two modes,
+// defined once so the two parse sites (SerialConsole and WifiProvider) and
+// the tests cannot drift apart.
+//
+// The length limit is why these names are what they are. A config value is
+// stored in a fixed char[CONFIGVALUE_MAX_LEN] and anything longer is
+// truncated on read, so a name that does not fit does not fail -- it
+// silently becomes a different, unrecognised string and falls back to
+// watch_only, the most restrictive level. The earlier spelling
+// "watch_pause_stop_upload" was 23 characters and could not be configured
+// at all. The static_assert below turns a repeat of that mistake into a
+// compile error. Keep it in step with CONFIGVALUE_MAX_LEN in
+// libs/ConfigValue.h, which this header deliberately does not include: it
+// is built for the host tests too, with no firmware headers available.
+constexpr size_t config_value_max_chars = 19;  // CONFIGVALUE_MAX_LEN - 1
+
+constexpr const char *mode_single_user = "single_user";
+constexpr const char *mode_multi_user = "multi_user";
+constexpr const char *rights_watch_only = "watch_only";
+constexpr const char *rights_watch_stop = "watch_stop";
+constexpr const char *rights_watch_stop_upload = "watch_stop_upload";
+
+static_assert(sizeof("single_user") - 1 <= config_value_max_chars,
+              "multi_client.mode value too long to be stored in config");
+static_assert(sizeof("multi_user") - 1 <= config_value_max_chars,
+              "multi_client.mode value too long to be stored in config");
+static_assert(sizeof("watch_only") - 1 <= config_value_max_chars,
+              "multi_client.passive_rights value too long to be stored in config");
+static_assert(sizeof("watch_stop") - 1 <= config_value_max_chars,
+              "multi_client.passive_rights value too long to be stored in config");
+static_assert(sizeof("watch_stop_upload") - 1 <= config_value_max_chars,
+              "multi_client.passive_rights value too long to be stored in config");
 
 // A command classified against the passive-rights levels above: `pause`
 // (`suspend`), `stop` (`abort`) or `upload` (`upload`), or `none` for
@@ -108,7 +141,7 @@ struct MotionState {
   // Kernel::get_state() == IDLE, exactly -- not merely "not running and not
   // homing", which is also true of ALARM, HOLD, SUSPEND, WAIT and TOOL.
   // Only used for the passive-rights "upload while idle" level
-  // (PassiveRights::watch_pause_stop_upload): a passive upload is allowed
+  // (PassiveRights::watch_stop_upload): a passive upload is allowed
   // only while nothing else -- including a paused job -- is going on.
   bool idle = false;
 };

@@ -98,7 +98,7 @@ WifiProvider::WifiProvider()
 	ap_hold_remaining_s = 0;
 	status_publish_interval_us = multiclient::status_publish_interval_us(multiclient::default_status_publish_hz);
 	multi_client_mode = multiclient::Mode::single_user;
-	multi_client_passive_rights = multiclient::PassiveRights::watch_pause_stop_upload;
+	multi_client_passive_rights = multiclient::PassiveRights::watch_stop_upload;
 	ap_auto_disable = true;
 	ap_currently_on = true;
 	ap_manually_disabled = false;
@@ -147,31 +147,37 @@ void WifiProvider::on_module_loaded()
 	// multi_client.mode: single-user unless the config explicitly says
 	// "multi_user" -- an unrecognised value is treated the same as absent,
 	// so a typo cannot silently turn multi-user mode on.
-	std::string configured_mode = THEKERNEL->config->value(multi_client_checksum, multi_client_mode_checksum)->as_string("single_user");
-	if (configured_mode == "multi_user") {
+	std::string configured_mode = THEKERNEL->config->value(multi_client_checksum, multi_client_mode_checksum)->as_string(multiclient::mode_single_user);
+	if (configured_mode == multiclient::mode_multi_user) {
 		this->multi_client_mode = multiclient::Mode::multi_user;
 	} else {
-		if (configured_mode != "single_user") {
+		if (configured_mode != multiclient::mode_single_user) {
 			THEKERNEL->streams->printf("WIFI: multi_client.mode '%s' not recognised, using single_user\n", configured_mode.c_str());
+			THEKERNEL->set_config_load_error(true);
 		}
 		this->multi_client_mode = multiclient::Mode::single_user;
 	}
 
 	// multi_client.passive_rights: how much a non-holder may do in
-	// multi-user mode. watch_pause_stop_upload (the highest level) is the
+	// multi-user mode. watch_stop_upload (the highest level) is the
 	// default when the setting is absent; an unrecognised value falls back
 	// to the lowest level instead, so a typo narrows rights rather than
-	// widening them.
+	// widening them -- and is recorded as a config load error, so the
+	// machine says so rather than quietly running at a level nobody
+	// asked for. Every value here is short enough to survive
+	// CONFIGVALUE_MAX_LEN; a longer one would be truncated on read and
+	// would land in this branch.
 	std::string configured_rights =
-		THEKERNEL->config->value(multi_client_checksum, passive_rights_checksum)->as_string("watch_pause_stop_upload");
-	if (configured_rights == "watch_pause_stop_upload") {
-		this->multi_client_passive_rights = multiclient::PassiveRights::watch_pause_stop_upload;
-	} else if (configured_rights == "watch_pause_stop") {
-		this->multi_client_passive_rights = multiclient::PassiveRights::watch_pause_stop;
-	} else if (configured_rights == "watch_only") {
+		THEKERNEL->config->value(multi_client_checksum, passive_rights_checksum)->as_string(multiclient::rights_watch_stop_upload);
+	if (configured_rights == multiclient::rights_watch_stop_upload) {
+		this->multi_client_passive_rights = multiclient::PassiveRights::watch_stop_upload;
+	} else if (configured_rights == multiclient::rights_watch_stop) {
+		this->multi_client_passive_rights = multiclient::PassiveRights::watch_stop;
+	} else if (configured_rights == multiclient::rights_watch_only) {
 		this->multi_client_passive_rights = multiclient::PassiveRights::watch_only;
 	} else {
 		THEKERNEL->streams->printf("WIFI: multi_client.passive_rights '%s' not recognised, using watch_only\n", configured_rights.c_str());
+		THEKERNEL->set_config_load_error(true);
 		this->multi_client_passive_rights = multiclient::PassiveRights::watch_only;
 	}
 	std::string config_name = THEKERNEL->config->value(wifi_checksum, machine_name_checksum)->as_string("CARVERA");
