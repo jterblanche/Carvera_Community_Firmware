@@ -153,6 +153,7 @@ void WifiProvider::on_module_loaded()
 	} else {
 		if (configured_mode != multiclient::mode_single_user) {
 			THEKERNEL->streams->printf("WIFI: multi_client.mode '%s' not recognised, using single_user\n", configured_mode.c_str());
+			THEKERNEL->set_config_load_error(true);
 		}
 		this->multi_client_mode = multiclient::Mode::single_user;
 	}
@@ -161,7 +162,9 @@ void WifiProvider::on_module_loaded()
 	// multi-user mode. watch_stop_upload (the highest level) is the
 	// default when the setting is absent; an unrecognised value falls back
 	// to the lowest level instead, so a typo narrows rights rather than
-	// widening them. Every value here is short enough to survive
+	// widening them -- and is recorded as a config load error, so the
+	// machine says so rather than quietly running at a level nobody
+	// asked for. Every value here is short enough to survive
 	// CONFIGVALUE_MAX_LEN; a longer one would be truncated on read and
 	// would land in this branch.
 	std::string configured_rights =
@@ -174,6 +177,7 @@ void WifiProvider::on_module_loaded()
 		this->multi_client_passive_rights = multiclient::PassiveRights::watch_only;
 	} else {
 		THEKERNEL->streams->printf("WIFI: multi_client.passive_rights '%s' not recognised, using watch_only\n", configured_rights.c_str());
+		THEKERNEL->set_config_load_error(true);
 		this->multi_client_passive_rights = multiclient::PassiveRights::watch_only;
 	}
 	std::string config_name = THEKERNEL->config->value(wifi_checksum, machine_name_checksum)->as_string("CARVERA");
