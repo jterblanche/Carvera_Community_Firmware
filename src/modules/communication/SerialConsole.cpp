@@ -74,7 +74,7 @@ SerialConsole::SerialConsole( PinName tx_pin, PinName rx_pin, int baud_rate )
     this->last_activity_us = 0;
     this->status_publish_interval_us = multiclient::status_publish_interval_us(multiclient::default_status_publish_hz);
     this->multi_client_mode = multiclient::Mode::single_user;
-    this->multi_client_passive_rights = multiclient::PassiveRights::watch_pause_stop_upload;
+    this->multi_client_passive_rights = multiclient::PassiveRights::watch_stop_upload;
     this->makera_rx_overflow = false;
     this->command_waiting = false;
     this->makera_frame_decoder.reset();
@@ -111,28 +111,30 @@ void SerialConsole::on_module_loaded() {
     // "multi_user" -- an unrecognised value is treated the same as absent,
     // so a typo cannot silently turn multi-user mode on. Same config key
     // WifiProvider.cpp reads, so both links agree on the mode.
-    std::string configured_mode = THEKERNEL->config->value(multi_client_checksum, multi_client_mode_checksum)->as_string("single_user");
-    if (configured_mode == "multi_user") {
+    std::string configured_mode = THEKERNEL->config->value(multi_client_checksum, multi_client_mode_checksum)->as_string(multiclient::mode_single_user);
+    if (configured_mode == multiclient::mode_multi_user) {
         this->multi_client_mode = multiclient::Mode::multi_user;
     } else {
-        if (configured_mode != "single_user") {
+        if (configured_mode != multiclient::mode_single_user) {
             THEKERNEL->streams->printf("USB: multi_client.mode '%s' not recognised, using single_user\n", configured_mode.c_str());
         }
         this->multi_client_mode = multiclient::Mode::single_user;
     }
 
     // multi_client.passive_rights: how much a non-holder may do in
-    // multi-user mode. watch_pause_stop_upload (the highest level) is the
+    // multi-user mode. watch_stop_upload (the highest level) is the
     // default when the setting is absent; an unrecognised value falls back
     // to the lowest level instead, so a typo narrows rights rather than
-    // widening them.
+    // widening them. Every value here is short enough to survive
+    // CONFIGVALUE_MAX_LEN; a longer one would be truncated on read and
+    // would land in this branch.
     std::string configured_rights =
-        THEKERNEL->config->value(multi_client_checksum, passive_rights_checksum)->as_string("watch_pause_stop_upload");
-    if (configured_rights == "watch_pause_stop_upload") {
-        this->multi_client_passive_rights = multiclient::PassiveRights::watch_pause_stop_upload;
-    } else if (configured_rights == "watch_pause_stop") {
-        this->multi_client_passive_rights = multiclient::PassiveRights::watch_pause_stop;
-    } else if (configured_rights == "watch_only") {
+        THEKERNEL->config->value(multi_client_checksum, passive_rights_checksum)->as_string(multiclient::rights_watch_stop_upload);
+    if (configured_rights == multiclient::rights_watch_stop_upload) {
+        this->multi_client_passive_rights = multiclient::PassiveRights::watch_stop_upload;
+    } else if (configured_rights == multiclient::rights_watch_stop) {
+        this->multi_client_passive_rights = multiclient::PassiveRights::watch_stop;
+    } else if (configured_rights == multiclient::rights_watch_only) {
         this->multi_client_passive_rights = multiclient::PassiveRights::watch_only;
     } else {
         THEKERNEL->streams->printf("USB: multi_client.passive_rights '%s' not recognised, using watch_only\n", configured_rights.c_str());

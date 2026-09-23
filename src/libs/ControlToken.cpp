@@ -37,15 +37,15 @@ std::size_t end_of_word(const char* line, std::size_t length, std::size_t start)
 
 // True if `action`, from a non-holder in multi-user mode, is allowed to
 // execute without taking control at the configured `rights` level. `pause`
-// and `stop` are allowed from watch_pause_stop up; `upload` needs the top
+// and `stop` are allowed from watch_stop up; `upload` needs the top
 // level and the machine to be idle -- see MotionState::idle.
 bool passive_action_allowed(PassiveAction action, PassiveRights rights, const MotionState& motion) {
   switch (action) {
     case PassiveAction::pause:
     case PassiveAction::stop:
-      return static_cast<uint8_t>(rights) >= static_cast<uint8_t>(PassiveRights::watch_pause_stop);
+      return static_cast<uint8_t>(rights) >= static_cast<uint8_t>(PassiveRights::watch_stop);
     case PassiveAction::upload:
-      return static_cast<uint8_t>(rights) >= static_cast<uint8_t>(PassiveRights::watch_pause_stop_upload) &&
+      return static_cast<uint8_t>(rights) >= static_cast<uint8_t>(PassiveRights::watch_stop_upload) &&
              motion.idle;
     case PassiveAction::none:
     default:
