@@ -116,6 +116,12 @@ constexpr std::size_t max_event_path_length = 250;
 // format's one-byte length prefix allows).
 uint8_t clamp_event_path_length(std::size_t length);
 
+// The length to publish for `path` (`length` bytes) in an event: without any
+// line ending left at its end, then clamped as above. A path read from a
+// command line can keep that line's newline (shift_parameter() only splits
+// on a space), but the newline is not part of the file's name.
+uint8_t event_path_length(const char* path, std::size_t length);
+
 // "upload finished": kind(1) + path_len(1) + path + size(4, BE) +
 // checksum_type(1) + checksum(0 B, since checksum_type is always none
 // here). Returns the payload length, or 0 if it would not fit.

@@ -153,6 +153,12 @@ Traffic classify_command_line(const char* line, std::size_t length) {
 }
 
 void remember_announced_file(const char* path, std::size_t length) {
+  // A path read from a command line can still end in that line's newline;
+  // it is not part of the file's name, and is_announced_file_download()
+  // strips it from the request, so it must not be kept here either.
+  if (path != nullptr) {
+    while (length > 0 && (path[length - 1] == '\n' || path[length - 1] == '\r')) --length;
+  }
   if (path == nullptr || length == 0) {
     if (announced_file != nullptr) announced_file->clear();
     return;

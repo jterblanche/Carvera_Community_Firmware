@@ -226,7 +226,7 @@ void Player::on_second_tick(void *)
     // snapshot by the time this runs.
     if (!this->last_published_playing && this->playing_file) {
         uint8_t payload[2 + multiclient::max_event_path_length];
-        const uint8_t path_len = multiclient::clamp_event_path_length(this->filename.size());
+        const uint8_t path_len = multiclient::event_path_length(this->filename.c_str(), this->filename.size());
         const size_t length = multiclient::build_play_started_event(this->filename.c_str(), path_len, payload, sizeof(payload));
         if (length != 0) {
             THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
@@ -235,7 +235,7 @@ void Player::on_second_tick(void *)
     }
     if (this->last_published_playing && !this->playing_file) {
         uint8_t payload[2 + multiclient::max_event_path_length + 1 + 4 + 4];
-        const uint8_t path_len = multiclient::clamp_event_path_length(this->last_filename.size());
+        const uint8_t path_len = multiclient::event_path_length(this->last_filename.c_str(), this->last_filename.size());
         const size_t length = multiclient::build_job_ended_event(
             this->last_filename.c_str(), path_len, static_cast<uint8_t>(this->last_percent_complete),
             this->last_played_lines, this->last_elapsed_secs, payload, sizeof(payload));
@@ -2544,7 +2544,7 @@ upload_success:
 	// this event would redo real work for a field where checksum_type 0 is
 	// already a defined, valid value ("none").
 	{
-		const uint8_t path_len = multiclient::clamp_event_path_length(desfilename.size());
+		const uint8_t path_len = multiclient::event_path_length(desfilename.c_str(), desfilename.size());
 		uint8_t payload[2 + multiclient::max_event_path_length + 4 + 1];
 		const size_t length =
 			multiclient::build_upload_finished_event(desfilename.c_str(), path_len, u32filesize, payload, sizeof(payload));
