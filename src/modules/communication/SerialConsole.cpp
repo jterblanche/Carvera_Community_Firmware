@@ -77,6 +77,7 @@ SerialConsole::SerialConsole( PinName tx_pin, PinName rx_pin, int baud_rate )
     this->multi_client_passive_rights = multiclient::PassiveRights::watch_stop_upload;
     this->makera_rx_overflow = false;
     this->command_waiting = false;
+    this->answering_automatic = false;
     this->makera_frame_decoder.reset();
     makera_rx_bytes.tail = makera_rx_bytes.head;
     this->reset_file_parser();
@@ -484,6 +485,23 @@ bool SerialConsole::gate_dispatch(const makera::Packet &packet) {
     return true;
 }
 
+void SerialConsole::dispatch_automatic_command(const makera::Packet &packet) {
+    const multiclient::AutomaticCommand command =
+        multiclient::classify_automatic_command(packet.data, packet.data_length);
+
+    answering_automatic = true;
+    if (command == multiclient::AutomaticCommand::refuse) {
+        printf("error:Refused -- not allowed as an automatic command\r\n");
+    } else {
+        struct SerialMessage message;
+        message.message.assign(reinterpret_cast<const char *>(packet.data) + 1, packet.data_length - 1);
+        message.stream = this;
+        message.line = 0;
+        THEKERNEL->dispatch_console_line(message);
+    }
+    answering_automatic = false;
+}
+
 // Actual event calling must happen in the main loop because if it happens in the interrupt we will loose data
 void SerialConsole::on_main_loop(void * argument){
     if (communication_protocol == PROTOCOL_MAKERA) {
@@ -494,6 +512,11 @@ void SerialConsole::on_main_loop(void * argument){
             // not be retried on the next tick, and gate_dispatch() has
             // already sent its own reply by the time it returns.
             command_waiting = false;
+
+            if (packet.type == PTYPE_AUTO_COMMAND) {
+                dispatch_automatic_command(packet);
+                return;
+            }
 
             // The control-token gate (libs/ControlToken.h): classifies
             // this command, moves the token in single-user mode, or
@@ -668,7 +691,13 @@ void SerialConsole::process_makera_byte(uint8_t received)
         return;
     }
 
-    if (packet.type == PTYPE_CTRL_MULTI || packet.type == PTYPE_FILE_START) {
+    // An automatic command is only taken once this link has identified
+    // itself; before that it is ignored, like any other type this firmware
+    // does not handle.
+    if (packet.type == PTYPE_AUTO_COMMAND &&
+        !multiclient::identity_of(multiclient::shared_client_table().usb()).identified) return;
+
+    if (packet.type == PTYPE_CTRL_MULTI || packet.type == PTYPE_FILE_START || packet.type == PTYPE_AUTO_COMMAND) {
         if (packet.data_length == 0) {
             if (packet.type == PTYPE_FILE_START) makera_file_cancel = true;
             return;
@@ -780,7 +809,7 @@ void SerialConsole::handle_control_release() {
 void SerialConsole::PacketMessage(char cmd, const char* s, int size) {
     StreamOutput::PacketMessage(cmd, s, size);
 
-    if (cmd == PTYPE_NORMAL_INFO && communication_protocol == PROTOCOL_MAKERA) {
+    if (cmd == PTYPE_NORMAL_INFO && communication_protocol == PROTOCOL_MAKERA && !answering_automatic) {
         const size_t total_length = size == 0 ? (s == nullptr ? 0 : strlen(s)) : static_cast<size_t>(size);
         publish_console_line(s, total_length);
     }

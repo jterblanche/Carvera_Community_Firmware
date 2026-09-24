@@ -27,6 +27,15 @@ multiclient::Traffic classify(const char* line) {
   return multiclient::classify_command_line(line, std::strlen(line));
 }
 
+// Builds an automatic-command payload: the kind byte, then `text`.
+multiclient::AutomaticCommand classify_automatic(uint8_t kind, const char* text) {
+  uint8_t payload[64];
+  const std::size_t text_length = std::strlen(text);
+  payload[0] = kind;
+  std::memcpy(payload + 1, text, text_length);
+  return multiclient::classify_automatic_command(payload, text_length + 1);
+}
+
 multiclient::PassiveAction classify_passive(const char* line) {
   return multiclient::classify_passive_action(line, std::strlen(line));
 }
@@ -90,6 +99,87 @@ int main() {
   {
     TEST("classify_file_transfer_start is always user-caused");
     CHECK(multiclient::classify_file_transfer_start() == multiclient::Traffic::user_caused);
+  }
+
+  {
+    TEST("classify_automatic_command: a console command runs only if it is an automatic query");
+    const multiclient::AutomaticCommand run = multiclient::AutomaticCommand::console_command;
+    const multiclient::AutomaticCommand refuse = multiclient::AutomaticCommand::refuse;
+    CHECK(classify_automatic(0, "model") == run);
+    CHECK(classify_automatic(0, "version") == run);
+    CHECK(classify_automatic(0, "ftype") == run);
+    CHECK(classify_automatic(0, "time") == run);
+    CHECK(classify_automatic(0, "get wcs") == run);
+    CHECK(classify_automatic(0, "versionx") == refuse);
+    CHECK(classify_automatic(0, "get wcs extra") == refuse);
+    CHECK(classify_automatic(0, "G91 G1 X10 F500") == refuse);
+    CHECK(classify_automatic(0, "config-set sd a b") == refuse);
+    CHECK(classify_automatic(0, "download /sd/config.txt") == refuse);
+    CHECK(classify_automatic(0, "baud 460800") == refuse);
+    CHECK(classify_automatic(0, "rm /sd/config.txt") == refuse);
+    CHECK(classify_automatic(0, "") == refuse);
+  }
+
+  {
+    TEST("classify_automatic_command: a file-transfer start runs only for the config.txt download");
+    const multiclient::AutomaticCommand run = multiclient::AutomaticCommand::file_transfer_start;
+    const multiclient::AutomaticCommand refuse = multiclient::AutomaticCommand::refuse;
+    CHECK(classify_automatic(1, "download /sd/config.txt\n") == run);
+    CHECK(classify_automatic(1, "download /sd/config.txt\r\n") == run);
+    CHECK(classify_automatic(1, "download /sd/config.txt") == run);
+    CHECK(classify_automatic(1, "upload /sd/config.txt\n") == refuse);
+    CHECK(classify_automatic(1, "download /sd/gcodes/job.nc\n") == refuse);
+    CHECK(classify_automatic(1, "download /sd/config.txt.bak\n") == refuse);
+    CHECK(classify_automatic(1, "download /sd/config.txtx") == refuse);
+    CHECK(classify_automatic(1, "download /sd/gcodes/config.txt\n") == refuse);
+    CHECK(classify_automatic(1, "download /sd/../sd/config.txt\n") == refuse);
+    CHECK(classify_automatic(1, "download /sd//config.txt\n") == refuse);
+    CHECK(classify_automatic(1, "download /SD/CONFIG.TXT\n") == refuse);
+    CHECK(classify_automatic(1, "download config.txt\n") == refuse);
+    CHECK(classify_automatic(1, "download  /sd/config.txt\n") == refuse);
+    CHECK(classify_automatic(1, " download /sd/config.txt\n") == refuse);
+    CHECK(classify_automatic(1, "download /sd/config.txt \n") == refuse);
+    CHECK(classify_automatic(1, "download /sd/config.txt\n\n") == refuse);
+    CHECK(classify_automatic(1, "downloadx /sd/config.txt\n") == refuse);
+    CHECK(classify_automatic(1, "") == refuse);
+  }
+
+  {
+    TEST("classify_automatic_command: an unknown kind or a short payload is refused");
+    const multiclient::AutomaticCommand refuse = multiclient::AutomaticCommand::refuse;
+    CHECK(classify_automatic(2, "version") == refuse);
+    CHECK(classify_automatic(2, "download /sd/config.txt\n") == refuse);
+    CHECK(classify_automatic(0xFF, "version") == refuse);
+    const uint8_t kind_only[] = {0};
+    CHECK(multiclient::classify_automatic_command(kind_only, sizeof(kind_only)) == refuse);
+    CHECK(multiclient::classify_automatic_command(kind_only, 0) == refuse);
+    CHECK(multiclient::classify_automatic_command(nullptr, 5) == refuse);
+    // A NUL inside the path does not end the comparison early.
+    const uint8_t with_nul[] = {1, 'd', 'o', 'w', 'n', 'l', 'o', 'a', 'd', ' ', '/', 's', 'd', '/',
+                                'c', 'o', 'n', 'f', 'i', 'g', '.', 't', 'x', 't', '\0', 'x'};
+    CHECK(multiclient::classify_automatic_command(with_nul, sizeof(with_nul)) == refuse);
+  }
+
+  {
+    TEST("gate: an automatic command never moves control or is refused, in either mode");
+    // A command classify_automatic_command() lets run skips the gate
+    // altogether; this checks that is the same answer the gate itself
+    // gives automatic traffic, so skipping it changes nothing.
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+    multiclient::MotionState jogging;
+    jogging.run = true;
+    const multiclient::Mode modes[] = {multiclient::Mode::single_user, multiclient::Mode::multi_user};
+    for (const multiclient::Mode mode : modes) {
+      const multiclient::GateResult result = token.gate(workshop, multiclient::Traffic::automatic, jogging, mode,
+                                                        multiclient::PassiveAction::none,
+                                                        multiclient::PassiveRights::watch_only);
+      CHECK(!result.refused);
+      CHECK(!result.holder_changed);
+      CHECK(token.holder().id == 1);
+    }
   }
 
   {

@@ -117,6 +117,20 @@ constexpr Traffic classify_file_transfer_start() { return Traffic::user_caused; 
 // only once the sender is already known not to be the current holder.
 PassiveAction classify_passive_action(const char* line, std::size_t length);
 
+// What to do with one automatic-command frame (PTYPE_AUTO_COMMAND in
+// libs/PublicData.h). Its payload is a kind byte -- 0 for a console
+// command, 1 for a file-transfer start -- followed by the text the ordinary
+// frame type would carry. A console command runs only if
+// classify_command_line() calls it automatic; a file-transfer start runs
+// only if it is the download of /sd/config.txt, the controller's
+// connect-time fetch of the machine's settings. Everything else, including
+// an unknown kind or an empty command, is refused and not executed. A
+// command that runs skips the gate: it never moves control and is never
+// refused for lack of it, in either mode.
+enum class AutomaticCommand : uint8_t { refuse, console_command, file_transfer_start };
+
+AutomaticCommand classify_automatic_command(const uint8_t* payload, std::size_t length);
+
 // The caller's own snapshot of whether interactive motion is in progress
 // right now, reduced from Kernel::get_state() and Player::is_playing() to
 // exactly the three facts blocks_transfer() needs. See the change

@@ -35,6 +35,17 @@ std::size_t end_of_word(const char* line, std::size_t length, std::size_t start)
   return i;
 }
 
+// True if `text` is exactly the controller's download of config.txt, with
+// or without the line ending it sends. Any other spelling of the path is
+// refused, even one the card would resolve to the same file.
+bool is_config_download(const char* text, std::size_t length) {
+  static const char expected[] = "download /sd/config.txt";
+  const std::size_t expected_length = sizeof(expected) - 1;
+  if (length > 0 && text[length - 1] == '\n') --length;
+  if (length > 0 && text[length - 1] == '\r') --length;
+  return length == expected_length && std::memcmp(text, expected, expected_length) == 0;
+}
+
 // True if `action`, from a non-holder in multi-user mode, is allowed to
 // execute without taking control at the configured `rights` level. `pause`
 // and `stop` are allowed from watch_stop up; `upload` needs the top
@@ -78,6 +89,22 @@ Traffic classify_command_line(const char* line, std::size_t length) {
   }
 
   return Traffic::user_caused;
+}
+
+AutomaticCommand classify_automatic_command(const uint8_t* payload, std::size_t length) {
+  if (payload == nullptr || length < 2) return AutomaticCommand::refuse;
+
+  const char* text = reinterpret_cast<const char*>(payload + 1);
+  const std::size_t text_length = length - 1;
+  switch (payload[0]) {
+    case 0:
+      return classify_command_line(text, text_length) == Traffic::automatic ? AutomaticCommand::console_command
+                                                                            : AutomaticCommand::refuse;
+    case 1:
+      return is_config_download(text, text_length) ? AutomaticCommand::file_transfer_start : AutomaticCommand::refuse;
+    default:
+      return AutomaticCommand::refuse;
+  }
 }
 
 PassiveAction classify_passive_action(const char* line, std::size_t length) {
