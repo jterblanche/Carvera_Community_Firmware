@@ -254,6 +254,28 @@ int main() {
   }
 
   {
+    TEST("remember_announced_file: a path still ending in the upload line's newline matches the download");
+    // What the machine did on 24 Sep 2026: the upload command's path kept
+    // its newline, so the announced path was 31 bytes ending in 0x0a and a
+    // correct download of the 30-byte name was refused.
+    const multiclient::AutomaticCommand run = multiclient::AutomaticCommand::file_transfer_start;
+    const multiclient::AutomaticCommand refuse = multiclient::AutomaticCommand::refuse;
+    const char uploaded[] = "/sd/gcodes/cfm-upload-test.txt\n";
+    CHECK(std::strlen(uploaded) == 31);
+    multiclient::remember_announced_file(uploaded, std::strlen(uploaded));
+    CHECK(classify_automatic(1, "download /sd/gcodes/cfm-upload-test.txt\n") == run);
+    CHECK(classify_automatic(1, "download /sd/gcodes/cfm-upload-test.txt") == run);
+    CHECK(classify_automatic(1, "download /sd/gcodes/cfm-upload-test.txt\r\n") == run);
+    CHECK(classify_automatic(1, "download /sd/gcodes/cfm-upload-test.tx\n") == refuse);
+    const char crlf[] = "/sd/gcodes/job.nc\r\n";
+    multiclient::remember_announced_file(crlf, std::strlen(crlf));
+    CHECK(classify_automatic(1, "download /sd/gcodes/job.nc\n") == run);
+    // Nothing but a line ending forgets it, the same as an empty path.
+    multiclient::remember_announced_file("\n", 1);
+    CHECK(classify_automatic(1, "download /sd/gcodes/job.nc\n") == refuse);
+  }
+
+  {
     TEST("remember_announced_file: a newer announcement replaces the older one");
     const multiclient::AutomaticCommand run = multiclient::AutomaticCommand::file_transfer_start;
     const multiclient::AutomaticCommand refuse = multiclient::AutomaticCommand::refuse;

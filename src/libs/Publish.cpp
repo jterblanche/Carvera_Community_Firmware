@@ -56,6 +56,12 @@ uint8_t clamp_event_path_length(std::size_t length) {
   return length > max_event_path_length ? static_cast<uint8_t>(max_event_path_length) : static_cast<uint8_t>(length);
 }
 
+uint8_t event_path_length(const char* path, std::size_t length) {
+  if (path == nullptr) return 0;
+  while (length > 0 && (path[length - 1] == '\n' || path[length - 1] == '\r')) --length;
+  return clamp_event_path_length(length);
+}
+
 namespace {
 // Appends kind(1) + path_len(1) + path to `out` at offset 0. Returns the
 // offset just past the path, or 0 if it did not fit -- every event payload

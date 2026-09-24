@@ -140,7 +140,8 @@ AutomaticCommand classify_automatic_command(const uint8_t* payload, std::size_t 
 // Remembers `path` (`length` bytes) as the file the machine last named to
 // every controller in an upload-finished or play-started event, replacing
 // the one before. It is kept until the next such event or a reboot. A
-// null path or a length of 0 forgets it.
+// trailing line ending is not kept. A null path, or one that is empty once
+// that is removed, forgets it.
 void remember_announced_file(const char* path, std::size_t length);
 
 // The caller's own snapshot of whether interactive motion is in progress

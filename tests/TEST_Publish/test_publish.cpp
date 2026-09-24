@@ -264,6 +264,20 @@ int main() {
   }
 
   {
+    TEST("event_path_length drops a trailing line ending before clamping");
+    // The upload command's path as the machine held it on 24 Sep 2026: 31
+    // bytes, the last one the command line's newline.
+    CHECK(multiclient::event_path_length("/sd/gcodes/cfm-upload-test.txt\n", 31) == 30);
+    CHECK(multiclient::event_path_length("/sd/gcodes/job.nc\r\n", 19) == 17);
+    CHECK(multiclient::event_path_length("/sd/gcodes/job.nc", 17) == 17);
+    CHECK(multiclient::event_path_length("\n", 1) == 0);
+    CHECK(multiclient::event_path_length(nullptr, 5) == 0);
+    std::string long_path(multiclient::max_event_path_length + 10, 'a');
+    long_path += '\n';
+    CHECK(multiclient::event_path_length(long_path.c_str(), long_path.size()) == multiclient::max_event_path_length);
+  }
+
+  {
     TEST("build_upload_finished_event writes kind, path, size and checksum_type none");
     uint8_t out[300];
     const std::size_t len =
