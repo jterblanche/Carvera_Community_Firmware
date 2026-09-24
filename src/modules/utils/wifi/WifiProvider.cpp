@@ -1025,6 +1025,26 @@ bool WifiProvider::ready() {
 	return M8266WIFI_SPI_Has_DataReceived();
 }
 
+// Asked by Player's upload loop while it waits for the next packet. The
+// transfer's owner is active_reply_client, set for the dispatch that started
+// it. on_second_tick() does not run during an upload, so the module's client
+// list is queried here directly.
+bool WifiProvider::transfer_client_connected() {
+	u16 status = 0;
+	u8 client_num = 0;
+	ClientInfo remote_clients[15];
+	// A failed query says nothing about the owner; keep the transfer going.
+	if (!M8266WIFI_SPI_List_Clients_On_A_TCP_Server(tcp_link_no, &client_num, remote_clients, &status)) return true;
+	if (client_num > 15) client_num = 15;
+
+	multiclient::Address connected[15];
+	for (uint8_t i = 0; i < client_num; ++i) {
+		memcpy(connected[i].ip, remote_clients[i].remote_ip, sizeof(connected[i].ip));
+		connected[i].port = remote_clients[i].remote_port;
+	}
+	return multiclient::transfer_owner_connected(multiclient::shared_client_table(), active_reply_client, connected, client_num);
+}
+
 void WifiProvider::get_broadcast_from_ip_and_netmask(char *broadcast_addr, char *ip_addr, char *netmask)
 {
 	uint32_t i_ip = ip_to_int(ip_addr);

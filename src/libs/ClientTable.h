@@ -326,4 +326,14 @@ ClientTable& shared_client_table();
 // longer has a known owner.
 bool is_transfer_owner(const ClientTable& table, int client_index, const Address& sender);
 
+// True while the WiFi client at `owner_index` can still finish the file
+// transfer it started: its slot is occupied, no send to it has failed, and
+// its address is among the `count` connections in `connected` (the WiFi
+// module's own list of who is connected right now). An upload stops the
+// once-a-second pass that would otherwise reap a departed client, so this is
+// how the upload loop notices its owner has gone and gives up at once
+// instead of waiting out its retries while every other client goes unserved.
+bool transfer_owner_connected(const ClientTable& table, int owner_index,
+                              const Address* connected, std::size_t count);
+
 }  // namespace multiclient
