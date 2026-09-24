@@ -92,9 +92,12 @@ enum class Traffic : uint8_t { automatic, user_caused };
 // section 9.3): `model`, `version`, `ftype`, `time` (with or without an
 // argument -- setting the clock is part of the same connect-time
 // handshake as reading it, so both forms are automatic), and `get wcs`.
+// Reading config values is automatic too: `config-get`, and `config-get-all`
+// with no file name (`-e` only).
 // Every other command word -- every G-code line, MDI, jog, probe, homing,
 // spindle, override, play/abort/suspend/resume, upload/download, ls/cat,
-// rm/mv, config-set and anything not on this short list -- is user-caused.
+// rm/mv, config-set and every other config command that writes or reloads,
+// and anything not on this short list -- is user-caused.
 // A blank line (length 0) is user-caused: nothing legitimate sends one, and
 // treating it as automatic would be a silent way to probe without ever
 // taking control.
