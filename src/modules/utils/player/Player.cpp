@@ -2164,12 +2164,12 @@ void Player::upload_command( string parameters, StreamOutput *stream )
     }
 
     // Makera mode: if the WiFi client uploading disconnects partway through,
-    // no special handling is needed here. gets() only accepts bytes from
-    // that client, so once it is gone nothing arrives for it, and the
-    // ordinary retry counters below (retry/tatalretry against RETRYTIME and
-    // MAXRETRANS) already treat that the same as any other silent link --
-    // giving up and falling into upload_error below, which closes and
-    // removes the partial file.
+    // gets() only accepts bytes from that client, so nothing more arrives.
+    // The retry counters below would take about four minutes to give up,
+    // and no other client is served while an upload runs, so the silent
+    // branch also asks the stream whether the uploading client is still
+    // connected, about every half second, and abandons the upload through
+    // upload_error (which closes and removes the partial file) once it is not.
     for (;;) {
         if (communication_protocol == PROTOCOL_SMOOTHIE) {
             for (retry = 0; retry < MAXRETRANS; ++retry) {  // approx 3 seconds allowed to make connection
@@ -2446,6 +2446,11 @@ void Player::upload_command( string parameters, StreamOutput *stream )
             else
             {
                 retry ++;
+                if(retry % RETRYTIME == 0 && !stream->transfer_client_connected())
+                {
+                    sprintf(error_msg, "Info: Upload abandoned, controller disconnected!\r\n");
+                    goto upload_error;
+                }
                 if(retry > RETRYTIME*10)
                 {
                     SendMessage(PTYPE_FILE_RETRY, buf, 0, stream);	//resend the last package
