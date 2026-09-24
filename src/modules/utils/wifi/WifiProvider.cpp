@@ -464,7 +464,13 @@ void WifiProvider::receive_wifi_data() {
 				continue;
 			}
 
-			if (packet.type != PTYPE_CTRL_MULTI && packet.type != PTYPE_FILE_START) continue;
+			// An automatic command is only taken from a client that has
+			// identified itself; from anyone else it is dropped, like any
+			// other type this firmware does not handle.
+			if (packet.type == PTYPE_AUTO_COMMAND &&
+			    !multiclient::identity_of(multiclient::shared_client_table().wifi_at(client_index)).identified) continue;
+
+			if (packet.type != PTYPE_CTRL_MULTI && packet.type != PTYPE_FILE_START && packet.type != PTYPE_AUTO_COMMAND) continue;
 
 			if (packet.data_length == 0) {
 				if (packet.type == PTYPE_FILE_START) {
@@ -476,7 +482,9 @@ void WifiProvider::receive_wifi_data() {
 
 			command_waiting = true;
 			command_waiting_client = client_index;
-			if (packet.type == PTYPE_FILE_START) return; // the rest of this read is file data for Player::gets(), not a frame
+			const bool file_transfer_start = packet.type == PTYPE_FILE_START ||
+				(packet.type == PTYPE_AUTO_COMMAND && packet.data[0] == 1);
+			if (file_transfer_start) return; // the rest of this read is file data for Player::gets(), not a frame
 			if (static_cast<uint16_t>(i + 1) < count) {
 				// More bytes already sat in WifiData past this frame's end --
 				// the next call to this function replays them before asking
@@ -1418,6 +1426,27 @@ bool WifiProvider::gate_dispatch(int client_index, const makera::Packet &packet)
 	return true;
 }
 
+void WifiProvider::dispatch_automatic_command(int client_index, const makera::Packet &packet) {
+	const multiclient::AutomaticCommand command =
+		multiclient::classify_automatic_command(packet.data, packet.data_length);
+
+	// Called from on_main_loop() only, never nested in another dispatch,
+	// so both are -1 before this and are reset to -1 after it.
+	active_reply_client = client_index;
+	automatic_reply_client = client_index;
+	if (command == multiclient::AutomaticCommand::refuse) {
+		printf("error:Refused -- not allowed as an automatic command\r\n");
+	} else {
+		struct SerialMessage message;
+		message.message.assign(reinterpret_cast<const char *>(packet.data) + 1, packet.data_length - 1);
+		message.stream = this;
+		message.line = 0;
+		THEKERNEL->dispatch_console_line(message);
+	}
+	automatic_reply_client = -1;
+	active_reply_client = -1;
+}
+
 void WifiProvider::on_main_loop(void *argument)
 {
 	if (communication_protocol == PROTOCOL_MAKERA) {
@@ -1430,6 +1459,11 @@ void WifiProvider::on_main_loop(void *argument)
 			// sent its own reply by the time it returns.
 			command_waiting = false;
 			command_waiting_client = -1;
+
+			if (packet.type == PTYPE_AUTO_COMMAND) {
+				dispatch_automatic_command(client_index, packet);
+				return;
+			}
 
 			// The control-token gate (libs/ControlToken.h): classifies this
 			// command, moves the token in single-user mode, or refuses it
@@ -1551,7 +1585,8 @@ void WifiProvider::PacketMessage(char cmd, const char* s, int size)
 	// file-transfer cancel "ok" -- none of those are the command/reply text
 	// section 6.10 means.
 	if (cmd == PTYPE_NORMAL_INFO && communication_protocol == PROTOCOL_MAKERA &&
-	    active_reply_client >= 0 && !StreamOutputPool::is_broadcasting()) {
+	    active_reply_client >= 0 && active_reply_client != automatic_reply_client &&
+	    !StreamOutputPool::is_broadcasting()) {
 		publish_console_line(active_reply_client, s, total_length);
 	}
 }

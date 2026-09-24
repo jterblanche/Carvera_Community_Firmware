@@ -125,6 +125,11 @@ int main() {
     CHECK(needs_reply(make_frame(PTYPE_CLIENT_LIST_REQ, {})));
     CHECK(needs_reply(make_frame(PTYPE_CONTROL_RELEASE, {})));
     CHECK(needs_reply(make_frame(PTYPE_RELAY, text("x"))));
+    // An automatic command is discarded during a transfer like any other
+    // frame, and its sender told, whether it wraps a query or a download.
+    CHECK(needs_reply(make_frame(PTYPE_AUTO_COMMAND, join({{0}, text("version")}))));
+    CHECK(needs_reply(make_frame(PTYPE_AUTO_COMMAND, join({{1}, text("download /sd/config.txt\n")}))));
+    CHECK(needs_reply(join({query, make_frame(PTYPE_AUTO_COMMAND, join({{0}, text("model")}))})));
   }
 
   {

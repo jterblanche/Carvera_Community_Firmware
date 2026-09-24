@@ -117,6 +117,12 @@ class SerialConsole : public Module, public StreamOutput {
         // refusal reply differently.
         bool gate_dispatch(const makera::Packet& packet);
 
+        // Runs or refuses one automatic command (PTYPE_AUTO_COMMAND)
+        // without the control gate -- see
+        // multiclient::classify_automatic_command(). Its reply is not
+        // published to the other clients.
+        void dispatch_automatic_command(const makera::Packet& packet);
+
         // multi_client.status_publish_hz, converted once at load time.
         uint32_t status_publish_interval_us;
         uint32_t last_status_publish_us = 0;
@@ -131,6 +137,9 @@ class SerialConsole : public Module, public StreamOutput {
           volatile bool halt_flag:1;
           volatile bool diagnose_flag:1;
           bool command_waiting:1;
+          // True while an automatic command is being answered, so its
+          // reply is not published.
+          bool answering_automatic:1;
         };
         volatile bool makera_file_cancel;
         volatile bool makera_rx_overflow;

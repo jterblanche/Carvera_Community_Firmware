@@ -172,6 +172,12 @@ private:
     // implements for the USB link, against the same shared token.
     bool gate_dispatch(int client_index, const makera::Packet& packet);
 
+    // Runs or refuses one automatic command (PTYPE_AUTO_COMMAND) from
+    // `client_index`, without the control gate -- see
+    // multiclient::classify_automatic_command(). Its reply goes to that
+    // client only and is not published.
+    void dispatch_automatic_command(int client_index, const makera::Packet& packet);
+
     // multi_client.status_publish_hz, converted once at load time
     // (on_module_loaded) from the configured rate.
     uint32_t status_publish_interval_us;
@@ -259,6 +265,9 @@ private:
     // broadcasts, which is what a halt notice or an unprompted kernel
     // message wants.
     int active_reply_client = -1;
+    // The client whose automatic command is being answered right now, or
+    // -1. A reply to it is not published to the other clients.
+    int automatic_reply_client = -1;
     int command_waiting_client = -1;
     // Who has been told the machine is busy during the current file
     // transfer. Cleared by on_idle(), which runs only between transfers.
