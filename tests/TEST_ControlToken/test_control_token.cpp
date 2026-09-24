@@ -27,13 +27,15 @@ multiclient::Traffic classify(const char* line) {
   return multiclient::classify_command_line(line, std::strlen(line));
 }
 
-// Builds an automatic-command payload: the kind byte, then `text`.
-multiclient::AutomaticCommand classify_automatic(uint8_t kind, const char* text, bool machine_idle = true) {
+// Builds an automatic-command payload: the kind byte, then `text`. It
+// arrives over WiFi unless `from_usb` says otherwise.
+multiclient::AutomaticCommand classify_automatic(uint8_t kind, const char* text, bool machine_idle = true,
+                                                 bool from_usb = false) {
   uint8_t payload[300];
   const std::size_t text_length = std::strlen(text);
   payload[0] = kind;
   std::memcpy(payload + 1, text, text_length);
-  return multiclient::classify_automatic_command(payload, text_length + 1, machine_idle);
+  return multiclient::classify_automatic_command(payload, text_length + 1, machine_idle, from_usb);
 }
 
 void announce(const char* path) { multiclient::remember_announced_file(path, std::strlen(path)); }
@@ -159,6 +161,28 @@ int main() {
     CHECK(classify_automatic(0, "baud 460800") == refuse);
     CHECK(classify_automatic(0, "rm /sd/config.txt") == refuse);
     CHECK(classify_automatic(0, "") == refuse);
+  }
+
+  {
+    TEST("classify_automatic_command: baud runs only when it arrives over USB");
+    const multiclient::AutomaticCommand run = multiclient::AutomaticCommand::console_command;
+    const multiclient::AutomaticCommand refuse = multiclient::AutomaticCommand::refuse;
+    CHECK(classify_automatic(0, "baud 460800", true, true) == run);
+    CHECK(classify_automatic(0, "baud 115200", true, true) == run);
+    CHECK(classify_automatic(0, "baud", true, true) == run);
+    CHECK(classify_automatic(0, "baud 460800", false, true) == run);
+    CHECK(classify_automatic(0, "baud 460800", true, false) == refuse);
+    CHECK(classify_automatic(0, "baud", true, false) == refuse);
+    CHECK(classify_automatic(0, "baudx 460800", true, true) == refuse);
+    CHECK(classify_automatic(0, "bau 460800", true, true) == refuse);
+    CHECK(classify_automatic(0, "xbaud 460800", true, true) == refuse);
+    CHECK(classify_automatic(1, "baud 460800", true, true) == refuse);
+    // Over USB the rest of the automatic list is unchanged.
+    CHECK(classify_automatic(0, "version", true, true) == run);
+    CHECK(classify_automatic(0, "config-set sd a b", true, true) == refuse);
+    CHECK(classify_automatic(0, "G91 G1 X10 F500", true, true) == refuse);
+    // Sent the ordinary way, baud is still a user action on either link.
+    CHECK(classify("baud 460800") == multiclient::Traffic::user_caused);
   }
 
   {
@@ -290,13 +314,13 @@ int main() {
     CHECK(classify_automatic(2, "download /sd/config.txt\n") == refuse);
     CHECK(classify_automatic(0xFF, "version") == refuse);
     const uint8_t kind_only[] = {0};
-    CHECK(multiclient::classify_automatic_command(kind_only, sizeof(kind_only), true) == refuse);
-    CHECK(multiclient::classify_automatic_command(kind_only, 0, true) == refuse);
-    CHECK(multiclient::classify_automatic_command(nullptr, 5, true) == refuse);
+    CHECK(multiclient::classify_automatic_command(kind_only, sizeof(kind_only), true, false) == refuse);
+    CHECK(multiclient::classify_automatic_command(kind_only, 0, true, false) == refuse);
+    CHECK(multiclient::classify_automatic_command(nullptr, 5, true, false) == refuse);
     // A NUL inside the path does not end the comparison early.
     const uint8_t with_nul[] = {1, 'd', 'o', 'w', 'n', 'l', 'o', 'a', 'd', ' ', '/', 's', 'd', '/',
                                 'c', 'o', 'n', 'f', 'i', 'g', '.', 't', 'x', 't', '\0', 'x'};
-    CHECK(multiclient::classify_automatic_command(with_nul, sizeof(with_nul), true) == refuse);
+    CHECK(multiclient::classify_automatic_command(with_nul, sizeof(with_nul), true, false) == refuse);
   }
 
   {
