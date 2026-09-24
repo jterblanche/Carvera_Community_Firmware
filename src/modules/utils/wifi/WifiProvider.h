@@ -24,6 +24,7 @@ using namespace std;
 #include "libs/ControlToken.h"
 #include "libs/Hello.h"
 #include "libs/Publish.h"
+#include "libs/TransferBusy.h"
 
 #define WIFI_DATA_MAX_SIZE 1460
 #define WIFI_DATA_TIMEOUT_MS 10
@@ -95,6 +96,7 @@ private:
         truncated,  // part of the frame went; the receiver will have to resync
     };
     SendOutcome send_to_wifi_client(int client_index, const u8* data, size_t length);
+    void refuse_as_busy(const multiclient::Address& sender, const u8* data, u16 length);
     void broadcast_to_wifi_clients(const u8* data, size_t length);
     void broadcast_to_identified_wifi_clients(const u8* data, size_t length);
     // Same as broadcast_to_identified_wifi_clients(), skipping whichever
@@ -258,6 +260,9 @@ private:
     // message wants.
     int active_reply_client = -1;
     int command_waiting_client = -1;
+    // Who has been told the machine is busy during the current file
+    // transfer. Cleared by on_idle(), which runs only between transfers.
+    multiclient::BusyReplyLimiter busy_replies;
     int makera_file_cancel_client = -1;
 
     // A read in receive_wifi_data() can hold more than one frame from the
