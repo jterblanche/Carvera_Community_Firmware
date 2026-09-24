@@ -1,6 +1,7 @@
 #include "ControlToken.h"
 
 #include <cstring>
+#include <string>
 
 namespace multiclient {
 
@@ -35,15 +36,65 @@ std::size_t end_of_word(const char* line, std::size_t length, std::size_t start)
   return i;
 }
 
+// `length` without the one line ending ("\n" or "\r\n") the controller
+// sends after a command, if there is one.
+std::size_t without_line_ending(const char* text, std::size_t length) {
+  if (length > 0 && text[length - 1] == '\n') --length;
+  if (length > 0 && text[length - 1] == '\r') --length;
+  return length;
+}
+
 // True if `text` is exactly the controller's download of config.txt, with
 // or without the line ending it sends. Any other spelling of the path is
 // refused, even one the card would resolve to the same file.
 bool is_config_download(const char* text, std::size_t length) {
   static const char expected[] = "download /sd/config.txt";
   const std::size_t expected_length = sizeof(expected) - 1;
-  if (length > 0 && text[length - 1] == '\n') --length;
-  if (length > 0 && text[length - 1] == '\r') --length;
+  length = without_line_ending(text, length);
   return length == expected_length && std::memcmp(text, expected, expected_length) == 0;
+}
+
+// The file the machine last named in an upload-finished or play-started
+// event, or null before the first one. Allocated on the first
+// announcement, so until then it costs only this pointer.
+std::string* announced_file = nullptr;
+
+// The character shift_parameter() (libs/utils.cpp) turns `c` into when
+// the download command reads its path. The controller sends a space as
+// 0x01 and ?, &, ! and ~ as 0x02 to 0x05; the firmware reads 0x03 back as
+// '*', not '&'.
+char decoded_path_char(char c) {
+  switch (c) {
+    case 0x01: return ' ';
+    case 0x02: return '?';
+    case 0x03: return '*';
+    case 0x04: return '!';
+    case 0x05: return '~';
+    default: return c;
+  }
+}
+
+// True if `text` is "download " followed by the announced file's path,
+// encoded the way the controller encodes it, with or without the line
+// ending. It matches only if the download command would open exactly that
+// file: no other spelling of the path is accepted.
+bool is_announced_file_download(const char* text, std::size_t length) {
+  if (announced_file == nullptr || announced_file->empty()) return false;
+  static const char prefix[] = "download ";
+  const std::size_t prefix_length = sizeof(prefix) - 1;
+  length = without_line_ending(text, length);
+  if (length != prefix_length + announced_file->size()) return false;
+  if (std::memcmp(text, prefix, prefix_length) != 0) return false;
+
+  const char* path = text + prefix_length;
+  // A leading quote would make shift_parameter() read a quoted path.
+  if (path[0] == '"' || path[0] == '\'') return false;
+  for (std::size_t i = 0; i < announced_file->size(); ++i) {
+    // A space or tab sent as itself would end the path early.
+    if (path[i] == ' ' || path[i] == '\t') return false;
+    if (decoded_path_char(path[i]) != (*announced_file)[i]) return false;
+  }
+  return true;
 }
 
 // True if `action`, from a non-holder in multi-user mode, is allowed to
@@ -101,7 +152,16 @@ Traffic classify_command_line(const char* line, std::size_t length) {
   return Traffic::user_caused;
 }
 
-AutomaticCommand classify_automatic_command(const uint8_t* payload, std::size_t length) {
+void remember_announced_file(const char* path, std::size_t length) {
+  if (path == nullptr || length == 0) {
+    if (announced_file != nullptr) announced_file->clear();
+    return;
+  }
+  if (announced_file == nullptr) announced_file = new std::string();
+  announced_file->assign(path, length);
+}
+
+AutomaticCommand classify_automatic_command(const uint8_t* payload, std::size_t length, bool machine_idle) {
   if (payload == nullptr || length < 2) return AutomaticCommand::refuse;
 
   const char* text = reinterpret_cast<const char*>(payload + 1);
@@ -111,7 +171,9 @@ AutomaticCommand classify_automatic_command(const uint8_t* payload, std::size_t 
       return classify_command_line(text, text_length) == Traffic::automatic ? AutomaticCommand::console_command
                                                                             : AutomaticCommand::refuse;
     case 1:
-      return is_config_download(text, text_length) ? AutomaticCommand::file_transfer_start : AutomaticCommand::refuse;
+      if (is_config_download(text, text_length)) return AutomaticCommand::file_transfer_start;
+      if (machine_idle && is_announced_file_download(text, text_length)) return AutomaticCommand::file_transfer_start;
+      return AutomaticCommand::refuse;
     default:
       return AutomaticCommand::refuse;
   }

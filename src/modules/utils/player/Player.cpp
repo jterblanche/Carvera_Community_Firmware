@@ -33,6 +33,7 @@
 #include "PublicDataRequest.h"
 #include "PublicData.h"
 #include "libs/Publish.h"
+#include "libs/ControlToken.h"
 #include "PlayerPublicAccess.h"
 #include "TemperatureControlPublicAccess.h"
 #include "TemperatureControlPool.h"
@@ -227,7 +228,10 @@ void Player::on_second_tick(void *)
         uint8_t payload[2 + multiclient::max_event_path_length];
         const uint8_t path_len = multiclient::clamp_event_path_length(this->filename.size());
         const size_t length = multiclient::build_play_started_event(this->filename.c_str(), path_len, payload, sizeof(payload));
-        if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+        if (length != 0) {
+            THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+            multiclient::remember_announced_file(this->filename.c_str(), path_len);
+        }
     }
     if (this->last_published_playing && !this->playing_file) {
         uint8_t payload[2 + multiclient::max_event_path_length + 1 + 4 + 4];
@@ -2544,7 +2548,10 @@ upload_success:
 		uint8_t payload[2 + multiclient::max_event_path_length + 4 + 1];
 		const size_t length =
 			multiclient::build_upload_finished_event(desfilename.c_str(), path_len, u32filesize, payload, sizeof(payload));
-		if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+		if (length != 0) {
+			THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+			multiclient::remember_announced_file(desfilename.c_str(), path_len);
+		}
 	}
 }
 

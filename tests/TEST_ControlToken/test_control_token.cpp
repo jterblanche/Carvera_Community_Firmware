@@ -28,13 +28,15 @@ multiclient::Traffic classify(const char* line) {
 }
 
 // Builds an automatic-command payload: the kind byte, then `text`.
-multiclient::AutomaticCommand classify_automatic(uint8_t kind, const char* text) {
-  uint8_t payload[64];
+multiclient::AutomaticCommand classify_automatic(uint8_t kind, const char* text, bool machine_idle = true) {
+  uint8_t payload[300];
   const std::size_t text_length = std::strlen(text);
   payload[0] = kind;
   std::memcpy(payload + 1, text, text_length);
-  return multiclient::classify_automatic_command(payload, text_length + 1);
+  return multiclient::classify_automatic_command(payload, text_length + 1, machine_idle);
 }
+
+void announce(const char* path) { multiclient::remember_announced_file(path, std::strlen(path)); }
 
 multiclient::PassiveAction classify_passive(const char* line) {
   return multiclient::classify_passive_action(line, std::strlen(line));
@@ -184,19 +186,117 @@ int main() {
   }
 
   {
+    TEST("classify_automatic_command: config.txt is downloadable whether or not the machine is idle");
+    const multiclient::AutomaticCommand run = multiclient::AutomaticCommand::file_transfer_start;
+    CHECK(classify_automatic(1, "download /sd/config.txt\n", false) == run);
+  }
+
+  {
+    TEST("classify_automatic_command: nothing announced since boot allows only config.txt");
+    const multiclient::AutomaticCommand refuse = multiclient::AutomaticCommand::refuse;
+    CHECK(classify_automatic(1, "download /sd/gcodes/job.nc\n") == refuse);
+    CHECK(classify_automatic(1, "download \n") == refuse);
+    CHECK(classify_automatic(1, "download ") == refuse);
+  }
+
+  {
+    TEST("classify_automatic_command: the announced file is downloadable while idle");
+    const multiclient::AutomaticCommand run = multiclient::AutomaticCommand::file_transfer_start;
+    const multiclient::AutomaticCommand refuse = multiclient::AutomaticCommand::refuse;
+    announce("/sd/gcodes/job.nc");
+    CHECK(classify_automatic(1, "download /sd/gcodes/job.nc\n") == run);
+    CHECK(classify_automatic(1, "download /sd/gcodes/job.nc\r\n") == run);
+    CHECK(classify_automatic(1, "download /sd/gcodes/job.nc") == run);
+    // Not while anything else is going on -- a job, a pause, a hold, a jog.
+    CHECK(classify_automatic(1, "download /sd/gcodes/job.nc\n", false) == refuse);
+    // Only as a file-transfer start, and only as a download.
+    CHECK(classify_automatic(0, "download /sd/gcodes/job.nc") == refuse);
+    CHECK(classify_automatic(1, "upload /sd/gcodes/job.nc\n") == refuse);
+    // config.txt stays allowed alongside it.
+    CHECK(classify_automatic(1, "download /sd/config.txt\n") == run);
+  }
+
+  {
+    TEST("classify_automatic_command: other files and other spellings of the announced path are refused");
+    const multiclient::AutomaticCommand refuse = multiclient::AutomaticCommand::refuse;
+    announce("/sd/gcodes/job.nc");
+    CHECK(classify_automatic(1, "download /sd/gcodes/other.nc\n") == refuse);
+    CHECK(classify_automatic(1, "download /sd/gcodes/job.nc.bak\n") == refuse);
+    CHECK(classify_automatic(1, "download /sd/gcodes/job.n\n") == refuse);
+    CHECK(classify_automatic(1, "download /sd/gcodes/JOB.NC\n") == refuse);
+    CHECK(classify_automatic(1, "download /sd/gcodes/../gcodes/job.nc\n") == refuse);
+    CHECK(classify_automatic(1, "download /sd//gcodes/job.nc\n") == refuse);
+    CHECK(classify_automatic(1, "download gcodes/job.nc\n") == refuse);
+    CHECK(classify_automatic(1, "download job.nc\n") == refuse);
+    CHECK(classify_automatic(1, "download \"/sd/gcodes/job.nc\"\n") == refuse);
+    CHECK(classify_automatic(1, "download  /sd/gcodes/job.nc\n") == refuse);
+    CHECK(classify_automatic(1, " download /sd/gcodes/job.nc\n") == refuse);
+    CHECK(classify_automatic(1, "download /sd/gcodes/job.nc \n") == refuse);
+    CHECK(classify_automatic(1, "download /sd/gcodes/job.nc\n\n") == refuse);
+    CHECK(classify_automatic(1, "downloadx /sd/gcodes/job.nc\n") == refuse);
+  }
+
+  {
+    TEST("classify_automatic_command: the announced path matches as the controller encodes it");
+    const multiclient::AutomaticCommand run = multiclient::AutomaticCommand::file_transfer_start;
+    const multiclient::AutomaticCommand refuse = multiclient::AutomaticCommand::refuse;
+    announce("/sd/gcodes/my part?!~.nc");
+    // The controller sends a space as 0x01 and ?, ! and ~ as 0x02, 0x04 and 0x05.
+    CHECK(classify_automatic(1, "download /sd/gcodes/my\x01part\x02\x04\x05.nc\n") == run);
+    // Sent as itself, a space would end the path at "my".
+    CHECK(classify_automatic(1, "download /sd/gcodes/my part\x02\x04\x05.nc\n") == refuse);
+    CHECK(classify_automatic(1, "download /sd/gcodes/my\tpart\x02\x04\x05.nc\n") == refuse);
+    // The firmware reads 0x03 back as '*', so a path with '&' in it cannot match.
+    announce("/sd/gcodes/a&b.nc");
+    CHECK(classify_automatic(1, "download /sd/gcodes/a\x03" "b.nc\n") == refuse);
+    announce("/sd/gcodes/a*b.nc");
+    CHECK(classify_automatic(1, "download /sd/gcodes/a\x03" "b.nc\n") == run);
+  }
+
+  {
+    TEST("remember_announced_file: a newer announcement replaces the older one");
+    const multiclient::AutomaticCommand run = multiclient::AutomaticCommand::file_transfer_start;
+    const multiclient::AutomaticCommand refuse = multiclient::AutomaticCommand::refuse;
+    announce("/sd/gcodes/first.nc");
+    announce("/sd/gcodes/second.nc");
+    CHECK(classify_automatic(1, "download /sd/gcodes/second.nc\n") == run);
+    CHECK(classify_automatic(1, "download /sd/gcodes/first.nc\n") == refuse);
+    // Whichever controller uploaded or started it, any controller may fetch
+    // it: nothing about the sender is part of the check.
+    announce("/sd/gcodes/first.nc");
+    CHECK(classify_automatic(1, "download /sd/gcodes/first.nc\n") == run);
+    // A longer path replaced by a shorter one leaves nothing of the longer one behind.
+    announce("/sd/gcodes/a-much-longer-file-name.nc");
+    announce("/sd/gcodes/a.nc");
+    CHECK(classify_automatic(1, "download /sd/gcodes/a.nc\n") == run);
+    CHECK(classify_automatic(1, "download /sd/gcodes/a-much-longer-file-name.nc\n") == refuse);
+  }
+
+  {
+    TEST("remember_announced_file: an empty path forgets the announced file");
+    const multiclient::AutomaticCommand run = multiclient::AutomaticCommand::file_transfer_start;
+    const multiclient::AutomaticCommand refuse = multiclient::AutomaticCommand::refuse;
+    announce("/sd/gcodes/job.nc");
+    multiclient::remember_announced_file(nullptr, 0);
+    CHECK(classify_automatic(1, "download /sd/gcodes/job.nc\n") == refuse);
+    CHECK(classify_automatic(1, "download \n") == refuse);
+    CHECK(classify_automatic(1, "download /sd/config.txt\n") == run);
+  }
+
+  {
     TEST("classify_automatic_command: an unknown kind or a short payload is refused");
     const multiclient::AutomaticCommand refuse = multiclient::AutomaticCommand::refuse;
     CHECK(classify_automatic(2, "version") == refuse);
     CHECK(classify_automatic(2, "download /sd/config.txt\n") == refuse);
     CHECK(classify_automatic(0xFF, "version") == refuse);
     const uint8_t kind_only[] = {0};
-    CHECK(multiclient::classify_automatic_command(kind_only, sizeof(kind_only)) == refuse);
-    CHECK(multiclient::classify_automatic_command(kind_only, 0) == refuse);
-    CHECK(multiclient::classify_automatic_command(nullptr, 5) == refuse);
+    CHECK(multiclient::classify_automatic_command(kind_only, sizeof(kind_only), true) == refuse);
+    CHECK(multiclient::classify_automatic_command(kind_only, 0, true) == refuse);
+    CHECK(multiclient::classify_automatic_command(nullptr, 5, true) == refuse);
     // A NUL inside the path does not end the comparison early.
     const uint8_t with_nul[] = {1, 'd', 'o', 'w', 'n', 'l', 'o', 'a', 'd', ' ', '/', 's', 'd', '/',
                                 'c', 'o', 'n', 'f', 'i', 'g', '.', 't', 'x', 't', '\0', 'x'};
-    CHECK(multiclient::classify_automatic_command(with_nul, sizeof(with_nul)) == refuse);
+    CHECK(multiclient::classify_automatic_command(with_nul, sizeof(with_nul), true) == refuse);
   }
 
   {

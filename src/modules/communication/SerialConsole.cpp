@@ -487,7 +487,7 @@ bool SerialConsole::gate_dispatch(const makera::Packet &packet) {
 
 void SerialConsole::dispatch_automatic_command(const makera::Packet &packet) {
     const multiclient::AutomaticCommand command =
-        multiclient::classify_automatic_command(packet.data, packet.data_length);
+        multiclient::classify_automatic_command(packet.data, packet.data_length, THEKERNEL->get_state() == IDLE);
 
     answering_automatic = true;
     if (command == multiclient::AutomaticCommand::refuse) {
