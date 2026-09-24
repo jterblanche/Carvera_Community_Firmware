@@ -118,10 +118,8 @@ uint8_t clamp_event_path_length(std::size_t length);
 
 // The length to publish for `path` (`length` bytes) in an event: without any
 // line ending left at its end, then clamped as above. A path read from a
-// command line (upload, play) keeps that line's newline -- the card ignores
-// it when opening the file, so it goes unnoticed there -- but it is not part
-// of the file's name, and a controller given it would ask for a file that
-// does not exist.
+// command line can keep that line's newline (shift_parameter() only splits
+// on a space), but the newline is not part of the file's name.
 uint8_t event_path_length(const char* path, std::size_t length);
 
 // "upload finished": kind(1) + path_len(1) + path + size(4, BE) +
