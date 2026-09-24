@@ -167,15 +167,20 @@ void remember_announced_file(const char* path, std::size_t length) {
   announced_file->assign(path, length);
 }
 
-AutomaticCommand classify_automatic_command(const uint8_t* payload, std::size_t length, bool machine_idle) {
+AutomaticCommand classify_automatic_command(const uint8_t* payload, std::size_t length, bool machine_idle,
+                                            bool from_usb) {
   if (payload == nullptr || length < 2) return AutomaticCommand::refuse;
 
   const char* text = reinterpret_cast<const char*>(payload + 1);
   const std::size_t text_length = length - 1;
   switch (payload[0]) {
     case 0:
-      return classify_command_line(text, text_length) == Traffic::automatic ? AutomaticCommand::console_command
-                                                                            : AutomaticCommand::refuse;
+      if (classify_command_line(text, text_length) == Traffic::automatic) return AutomaticCommand::console_command;
+      // baud changes the speed of the USB link only, so it is allowed from
+      // the controller on that link and refused from a WiFi one.
+      if (from_usb && word_is(text, text_length, skip_spaces(text, text_length, 0), "baud"))
+        return AutomaticCommand::console_command;
+      return AutomaticCommand::refuse;
     case 1:
       if (is_config_download(text, text_length)) return AutomaticCommand::file_transfer_start;
       if (machine_idle && is_announced_file_download(text, text_length)) return AutomaticCommand::file_transfer_start;
