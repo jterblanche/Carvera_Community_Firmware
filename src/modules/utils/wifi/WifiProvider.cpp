@@ -571,6 +571,24 @@ WifiProvider::SendOutcome WifiProvider::send_to_wifi_client(int client_index, co
 	return SendOutcome::sent_all;
 }
 
+// Answers a read that gets() is discarding because it came from someone
+// other than the client running the current file transfer. The reply goes
+// straight to the sender's address rather than through send_to_wifi_client(),
+// because a client that connected during the transfer is not in the client
+// table yet, and it is not published: the transfer's own client must see
+// nothing but its transfer. Whether this read gets a reply at all is
+// BusyReplyLimiter's decision (libs/TransferBusy.h).
+void WifiProvider::refuse_as_busy(const multiclient::Address& sender, const u8* data, u16 length) {
+	if (!busy_replies.should_reply(sender, multiclient::needs_busy_reply(data, length), us_ticker_read())) return;
+	u8 frame[multiclient::busy_reply_frame_size];
+	const size_t frame_length = multiclient::build_busy_reply_frame(frame, sizeof(frame));
+	if (frame_length == 0) return;
+	char ip_str[16];
+	snprintf(ip_str, sizeof(ip_str), "%u.%u.%u.%u", sender.ip[0], sender.ip[1], sender.ip[2], sender.ip[3]);
+	u16 status = 0;
+	M8266WIFI_SPI_Send_Data_to_TcpClient(frame, static_cast<u16>(frame_length), tcp_link_no, ip_str, sender.port, &status);
+}
+
 void WifiProvider::broadcast_to_wifi_clients(const u8* data, size_t length) {
 	for (size_t i = 0; i < multiclient::max_wifi_clients; ++i) {
 		if (multiclient::shared_client_table().wifi_at(static_cast<int>(i)) != nullptr) {
@@ -1244,6 +1262,7 @@ void WifiProvider::on_second_tick(void *)
 void WifiProvider::on_idle(void *argument)
  {
 	if (THEKERNEL->is_uploading()) return;
+	busy_replies.clear();
 
 	// FILE_START leaves the following file data for Player::gets().
 	if (!command_waiting && (has_data_flag || M8266WIFI_SPI_Has_DataReceived())) {
@@ -1753,12 +1772,14 @@ int WifiProvider::gets(char** buf, int size)
 			// currentState, xbuff), shared by every WiFi client, so a byte
 			// that does not belong to this transfer would otherwise corrupt
 			// it. They are dropped here, before touching any of that state,
-			// which reads to the caller as no data having arrived yet.
+			// which reads to the caller as no data having arrived yet, and
+			// their sender is told the machine is busy.
 			if (received > 0) {
 				multiclient::Address sender;
 				memcpy(sender.ip, remote_ip, sizeof(sender.ip));
 				sender.port = remote_port;
 				if (!multiclient::is_transfer_owner(multiclient::shared_client_table(), active_reply_client, sender)) {
+					refuse_as_busy(sender, WifiData, received);
 					return 0;
 				}
 			}
