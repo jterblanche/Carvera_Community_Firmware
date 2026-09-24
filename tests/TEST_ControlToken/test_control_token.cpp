@@ -172,6 +172,90 @@ int main() {
   }
 
   {
+    TEST("gate: an unidentified sender is refused while somebody else holds control (single-user)");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity nobody;  // identified == false
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{});
+    CHECK(token.holder().id == 1);
+
+    const multiclient::GateResult result =
+        token.gate(nobody, multiclient::Traffic::user_caused, multiclient::MotionState{});
+    CHECK(result.refused);
+    CHECK(result.reason == multiclient::RefusalReason::not_holder);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);
+  }
+
+  {
+    TEST("gate: an unidentified sender is refused while somebody else holds control (multi-user)");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity nobody;
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+    CHECK(token.holder().id == 1);
+
+    const multiclient::GateResult result =
+        token.gate(nobody, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+    CHECK(result.refused);
+    CHECK(result.reason == multiclient::RefusalReason::not_holder);
+    CHECK(token.holder().id == 1);
+  }
+
+  {
+    // No passive exemption for a sender the machine cannot name: a stop from
+    // an unidentified client is refused even under rights that would let an
+    // identified passive client send one.
+    TEST("gate: an unidentified sender gets no passive exemption");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity nobody;
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    const multiclient::GateResult result =
+        token.gate(nobody, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user,
+                   multiclient::PassiveAction::stop, multiclient::PassiveRights::watch_stop_upload);
+    CHECK(result.refused);
+    CHECK(result.reason == multiclient::RefusalReason::not_holder);
+    CHECK(token.holder().id == 1);
+  }
+
+  {
+    // One of ours is unidentified for the first second or so of its session,
+    // until it sends hello. Its status polling must still be answered.
+    TEST("gate: automatic traffic from an unidentified sender is still answered");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity nobody;
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    const multiclient::GateResult result =
+        token.gate(nobody, multiclient::Traffic::automatic, multiclient::MotionState{}, multiclient::Mode::multi_user);
+    CHECK(!result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);
+  }
+
+  {
+    // The lone old controller: nobody holds control, so nothing is refused
+    // and it works exactly as it did before several clients could connect.
+    TEST("gate: a lone unidentified sender is refused nothing, in either mode");
+    multiclient::ControlToken single;
+    multiclient::ControlToken multi;
+    const multiclient::Identity nobody;
+
+    const multiclient::GateResult in_single =
+        single.gate(nobody, multiclient::Traffic::user_caused, multiclient::MotionState{});
+    CHECK(!in_single.refused);
+    CHECK(!single.has_holder());
+
+    const multiclient::GateResult in_multi =
+        multi.gate(nobody, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+    CHECK(!in_multi.refused);
+    CHECK(!multi.has_holder());
+  }
+
+  {
     TEST("gate: user-caused traffic seizes control silently when nothing blocks it");
     multiclient::ControlToken token;
     const multiclient::Identity office = make_identity(1, "Office");
