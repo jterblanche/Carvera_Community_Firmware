@@ -1428,7 +1428,7 @@ bool WifiProvider::gate_dispatch(int client_index, const makera::Packet &packet)
 
 void WifiProvider::dispatch_automatic_command(int client_index, const makera::Packet &packet) {
 	const multiclient::AutomaticCommand command =
-		multiclient::classify_automatic_command(packet.data, packet.data_length);
+		multiclient::classify_automatic_command(packet.data, packet.data_length, THEKERNEL->get_state() == IDLE);
 
 	// Called from on_main_loop() only, never nested in another dispatch,
 	// so both are -1 before this and are reset to -1 after it.

@@ -124,15 +124,24 @@ PassiveAction classify_passive_action(const char* line, std::size_t length);
 // libs/PublicData.h). Its payload is a kind byte -- 0 for a console
 // command, 1 for a file-transfer start -- followed by the text the ordinary
 // frame type would carry. A console command runs only if
-// classify_command_line() calls it automatic; a file-transfer start runs
+// classify_command_line() calls it automatic. A file-transfer start runs
 // only if it is the download of /sd/config.txt, the controller's
-// connect-time fetch of the machine's settings. Everything else, including
-// an unknown kind or an empty command, is refused and not executed. A
-// command that runs skips the gate: it never moves control and is never
-// refused for lack of it, in either mode.
+// connect-time fetch of the machine's settings, or, while `machine_idle`
+// (Kernel::get_state() == IDLE), the download of the file the machine last
+// announced (remember_announced_file()), which a controller without control
+// fetches to show the job. Everything else, including an unknown kind or an
+// empty command, is refused and not executed. A command that runs skips the
+// gate: it never moves control and is never refused for lack of it, in
+// either mode.
 enum class AutomaticCommand : uint8_t { refuse, console_command, file_transfer_start };
 
-AutomaticCommand classify_automatic_command(const uint8_t* payload, std::size_t length);
+AutomaticCommand classify_automatic_command(const uint8_t* payload, std::size_t length, bool machine_idle);
+
+// Remembers `path` (`length` bytes) as the file the machine last named to
+// every controller in an upload-finished or play-started event, replacing
+// the one before. It is kept until the next such event or a reboot. A
+// null path or a length of 0 forgets it.
+void remember_announced_file(const char* path, std::size_t length);
 
 // The caller's own snapshot of whether interactive motion is in progress
 // right now, reduced from Kernel::get_state() and Player::is_playing() to

@@ -70,8 +70,9 @@
 #define PTYPE_EVENT             0x68
 #define PTYPE_PUBLISHED_LINE    0x69
 
-// An automatic command: a controller's connect-time query, or its download
-// of config.txt, wrapped so it never moves control. The payload is a kind
+// An automatic command: a controller's connect-time query, its download of
+// config.txt, or its download of the file the machine last announced,
+// wrapped so it never moves control. The payload is a kind
 // byte (0 = console command, 1 = file-transfer start) followed by the text
 // PTYPE_CTRL_MULTI or PTYPE_FILE_START would otherwise carry. See
 // multiclient::classify_automatic_command().
