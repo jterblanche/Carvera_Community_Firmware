@@ -215,4 +215,14 @@ bool is_transfer_owner(const ClientTable& table, int client_index, const Address
   return owner != nullptr && same_address(owner->address, sender);
 }
 
+bool transfer_owner_connected(const ClientTable& table, int owner_index,
+                              const Address* connected, std::size_t count) {
+  const Client* owner = table.wifi_at(owner_index);
+  if (owner == nullptr || owner->send_failed) return false;
+  for (std::size_t i = 0; i < count; ++i) {
+    if (same_address(owner->address, connected[i])) return true;
+  }
+  return false;
+}
+
 }  // namespace multiclient

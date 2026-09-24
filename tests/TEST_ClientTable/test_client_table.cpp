@@ -208,6 +208,55 @@ int main() {
   }
 
   {
+    TEST("transfer_owner_connected: true while the module still lists the owner among others");
+    multiclient::ClientTable table;
+    table.add_wifi(address(10, 0, 0, 2, 51001), 0);
+    const int owner_index = table.add_wifi(address(10, 0, 0, 1, 51000), 0);
+    const multiclient::Address connected[] = {address(10, 0, 0, 2, 51001), address(10, 0, 0, 1, 51000)};
+    CHECK(multiclient::transfer_owner_connected(table, owner_index, connected, 2));
+  }
+
+  {
+    TEST("transfer_owner_connected: false once the module no longer lists the owner, "
+         "even though its slot is still occupied (nothing reaps it during an upload)");
+    multiclient::ClientTable table;
+    const int owner_index = table.add_wifi(address(10, 0, 0, 1, 51000), 0);
+    table.add_wifi(address(10, 0, 0, 2, 51001), 0);
+    const multiclient::Address connected[] = {address(10, 0, 0, 2, 51001)};
+    CHECK(!multiclient::transfer_owner_connected(table, owner_index, connected, 1));
+    CHECK(!multiclient::transfer_owner_connected(table, owner_index, nullptr, 0));
+  }
+
+  {
+    TEST("transfer_owner_connected: false for the owner's IP on a different port -- "
+         "a reconnect is a new connection, not the one the transfer is bound to");
+    multiclient::ClientTable table;
+    const int owner_index = table.add_wifi(address(10, 0, 0, 1, 51000), 0);
+    const multiclient::Address connected[] = {address(10, 0, 0, 1, 51002)};
+    CHECK(!multiclient::transfer_owner_connected(table, owner_index, connected, 1));
+  }
+
+  {
+    TEST("transfer_owner_connected: false once a send to the owner has failed, even if still listed");
+    multiclient::ClientTable table;
+    const int owner_index = table.add_wifi(address(10, 0, 0, 1, 51000), 0);
+    table.wifi_at(owner_index)->send_failed = true;
+    const multiclient::Address connected[] = {address(10, 0, 0, 1, 51000)};
+    CHECK(!multiclient::transfer_owner_connected(table, owner_index, connected, 1));
+  }
+
+  {
+    TEST("transfer_owner_connected: false for an empty slot or an index naming no client");
+    multiclient::ClientTable table;
+    const int owner_index = table.add_wifi(address(10, 0, 0, 1, 51000), 0);
+    const multiclient::Address connected[] = {address(10, 0, 0, 1, 51000)};
+    CHECK(!multiclient::transfer_owner_connected(table, -1, connected, 1));
+    CHECK(!multiclient::transfer_owner_connected(table, static_cast<int>(multiclient::max_wifi_clients), connected, 1));
+    table.remove_wifi(owner_index);
+    CHECK(!multiclient::transfer_owner_connected(table, owner_index, connected, 1));
+  }
+
+  {
     TEST("shared_client_table returns the same instance every call");
     multiclient::ClientTable& first = multiclient::shared_client_table();
     multiclient::ClientTable& second = multiclient::shared_client_table();
