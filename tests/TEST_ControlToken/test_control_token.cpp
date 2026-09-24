@@ -143,6 +143,12 @@ int main() {
     CHECK(classify_automatic(0, "ftype") == run);
     CHECK(classify_automatic(0, "time") == run);
     CHECK(classify_automatic(0, "get wcs") == run);
+    CHECK(classify_automatic(0, "config-get sd multi_client.mode") == run);
+    CHECK(classify_automatic(0, "config-get-all") == run);
+    CHECK(classify_automatic(0, "config-get-all -e") == run);
+    CHECK(classify_automatic(0, "config-get-all /sd/other.txt") == refuse);
+    CHECK(classify_automatic(0, "config-delete sd multi_client.mode") == refuse);
+    CHECK(classify_automatic(0, "config-load") == refuse);
     CHECK(classify_automatic(0, "versionx") == refuse);
     CHECK(classify_automatic(0, "get wcs extra") == refuse);
     CHECK(classify_automatic(0, "G91 G1 X10 F500") == refuse);
