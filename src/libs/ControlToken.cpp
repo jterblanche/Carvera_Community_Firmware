@@ -110,11 +110,27 @@ GateResult ControlToken::gate(const Identity& sender, Traffic traffic, const Mot
                                PassiveAction action, PassiveRights rights) {
   GateResult result;
 
-  // An unidentified sender cannot hold control and never moves it --
-  // nothing here to decide.
-  if (!sender.identified) return result;
-
+  // Automatic traffic is never gated, whoever sends it. This is checked
+  // before anything else because a client of ours is not yet identified for
+  // the first second or so of its session -- it sends hello only after its
+  // own protocol probe -- and its status polling in that window must still
+  // be answered.
   if (traffic == Traffic::automatic) return result;
+
+  // An unidentified sender cannot hold control and never moves it. While
+  // somebody else holds control its commands are refused, in either mode and
+  // with no passive exemption: the machine cannot name it, cannot hold it to
+  // account, and is about to drop it anyway. Before several clients could
+  // connect at all, such a sender could only ever be the one client on the
+  // machine, so nothing here narrows what a lone old controller may do --
+  // with only it connected there is no holder and this refuses nothing.
+  if (!sender.identified) {
+    if (holder_.identified) {
+      result.refused = true;
+      result.reason = RefusalReason::not_holder;
+    }
+    return result;
+  }
 
   // Already the holder: nothing changes, in either mode.
   if (holder_.identified && holder_.id == sender.id) return result;
