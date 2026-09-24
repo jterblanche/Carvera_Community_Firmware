@@ -122,6 +122,56 @@ bool send_error_means_client_gone(uint8_t errcode);
 // what a client sends us, never what it accepts from us.
 void note_send_result(Client& client, bool sent_everything, uint8_t errcode);
 
+// True for the WiFi module's error codes that mean it cannot take more data
+// just now, so the same bytes can go through if tried again shortly: 0x12
+// (sending buffer full) and the temporary codes listed above, 0x10, 0x11
+// and 0x1D.
+bool send_error_means_module_busy(uint8_t errcode);
+
+// How long one send to one client keeps trying while the module is busy
+// before the message is given up. The module refuses a send while 8
+// packets are waiting to go out, and a client that is reading clears some
+// of them within one network round trip, so this is several round trips
+// even on a slow link. It is also how long the main loop can be held up by
+// one client that has stopped reading, which send_to_client() below pays
+// only once for such a client, not once per message.
+constexpr uint32_t max_busy_send_wait_us = 100000;
+
+// Sends `length` bytes to `client`, at most `max_chunk` at a time, through
+// `send_chunk(offset, size, errcode)`, which returns how many bytes the
+// module took and sets `errcode` when that is fewer than `size`. Records
+// the outcome with note_send_result() and returns the bytes sent.
+//
+// While the module is only busy, the rest is tried again after `pause()`,
+// for up to max_busy_send_wait_us by `now_us()`, so a long reply is paced
+// to what the network takes instead of losing lines. A client whose last
+// send already failed gets one try and no wait, so a client that has
+// stopped reading holds up the main loop once, not on every message; the
+// first send that gets through to it again restores the wait.
+template <typename SendChunk, typename NowUs, typename Pause>
+std::size_t send_to_client(Client& client, std::size_t length, std::size_t max_chunk, SendChunk send_chunk,
+                           NowUs now_us, Pause pause) {
+  const bool may_wait = client.consecutive_send_failures == 0;
+  const uint32_t started_us = now_us();
+  std::size_t sent_index = 0;
+  while (sent_index < length) {
+    const std::size_t chunk = (length - sent_index) > max_chunk ? max_chunk : (length - sent_index);
+    uint8_t errcode = 0;
+    const std::size_t sent = send_chunk(sent_index, chunk, errcode);
+    sent_index += sent;
+    if (sent == chunk) continue;
+    if (may_wait && send_error_means_module_busy(errcode) &&
+        static_cast<uint32_t>(now_us() - started_us) < max_busy_send_wait_us) {
+      pause();
+      continue;
+    }
+    note_send_result(client, false, errcode);
+    return sent_index;
+  }
+  note_send_result(client, true, 0);
+  return sent_index;
+}
+
 // Records `id`/`name` on `client` and marks it identified. Does not touch
 // the hello-window fields. `name_len` beyond max_name_length is clamped (the
 // caller should already have refused a longer name; this is a second line
