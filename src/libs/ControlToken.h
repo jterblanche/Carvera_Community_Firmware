@@ -124,7 +124,9 @@ PassiveAction classify_passive_action(const char* line, std::size_t length);
 // libs/PublicData.h). Its payload is a kind byte -- 0 for a console
 // command, 1 for a file-transfer start -- followed by the text the ordinary
 // frame type would carry. A console command runs only if
-// classify_command_line() calls it automatic. A file-transfer start runs
+// classify_command_line() calls it automatic, or if it is `baud` and
+// `from_usb` says it arrived on the USB serial console, whose speed it sets.
+// A file-transfer start runs
 // only if it is the download of /sd/config.txt, the controller's
 // connect-time fetch of the machine's settings, or, while `machine_idle`
 // (Kernel::get_state() == IDLE), the download of the file the machine last
@@ -135,7 +137,8 @@ PassiveAction classify_passive_action(const char* line, std::size_t length);
 // either mode.
 enum class AutomaticCommand : uint8_t { refuse, console_command, file_transfer_start };
 
-AutomaticCommand classify_automatic_command(const uint8_t* payload, std::size_t length, bool machine_idle);
+AutomaticCommand classify_automatic_command(const uint8_t* payload, std::size_t length, bool machine_idle,
+                                            bool from_usb);
 
 // Remembers `path` (`length` bytes) as the file the machine last named to
 // every controller in an upload-finished or play-started event, replacing
