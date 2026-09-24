@@ -65,11 +65,44 @@ int main() {
   }
 
   {
+    TEST("classify_command_line: reading config values is automatic");
+    CHECK(classify("config-get multi_client.mode") == multiclient::Traffic::automatic);
+    CHECK(classify("config-get sd multi_client.passive_rights") == multiclient::Traffic::automatic);
+    CHECK(classify("  config-get\tsd x") == multiclient::Traffic::automatic);
+    CHECK(classify("config-get-all") == multiclient::Traffic::automatic);
+    CHECK(classify("config-get-all -e") == multiclient::Traffic::automatic);
+    CHECK(classify("config-get-all  -e  ") == multiclient::Traffic::automatic);
+  }
+
+  {
+    TEST("classify_command_line: writing or reloading config is user-caused");
+    CHECK(classify("config-set sd multi_client.mode multi_user") == multiclient::Traffic::user_caused);
+    CHECK(classify("config-delete sd multi_client.mode") == multiclient::Traffic::user_caused);
+    CHECK(classify("config-load") == multiclient::Traffic::user_caused);
+    CHECK(classify("config-restore") == multiclient::Traffic::user_caused);
+    CHECK(classify("config-default") == multiclient::Traffic::user_caused);
+  }
+
+  {
+    // With a file name, config-get-all reads that file rather than the
+    // config, so it stays with the other file commands.
+    TEST("classify_command_line: config-get-all with a file name is user-caused");
+    CHECK(classify("config-get-all /sd/config.txt") == multiclient::Traffic::user_caused);
+    CHECK(classify("config-get-all -e /sd/gcodes/job.nc") == multiclient::Traffic::user_caused);
+    CHECK(classify("config-get-all /sd/gcodes/job.nc -e") == multiclient::Traffic::user_caused);
+    CHECK(classify("config-get-all -ex") == multiclient::Traffic::user_caused);
+  }
+
+  {
     TEST("classify_command_line: a same-prefix word is not the automatic one");
     CHECK(classify("timezone") == multiclient::Traffic::user_caused);
     CHECK(classify("models") == multiclient::Traffic::user_caused);
     CHECK(classify("get wcsx") == multiclient::Traffic::user_caused);
     CHECK(classify("get wcs extra") == multiclient::Traffic::user_caused);
+    CHECK(classify("config-getx sd x") == multiclient::Traffic::user_caused);
+    CHECK(classify("config-get-allx") == multiclient::Traffic::user_caused);
+    CHECK(classify("config-gets") == multiclient::Traffic::user_caused);
+    CHECK(classify("config") == multiclient::Traffic::user_caused);
   }
 
   {
@@ -815,6 +848,63 @@ int main() {
     CHECK(!result.refused);
     CHECK(result.holder_changed);
     CHECK(token.holder().id == 2);
+  }
+
+  {
+    TEST("gate: in multi-user mode a non-holder may read config but not write it");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    const char* read = "config-get sd multi_client.passive_rights";
+    multiclient::GateResult result =
+        token.gate(workshop, classify(read), multiclient::MotionState{}, multiclient::Mode::multi_user,
+                   classify_passive(read), multiclient::PassiveRights::watch_stop_upload);
+    CHECK(!result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);
+
+    const char* write = "config-set sd multi_client.passive_rights watch_only";
+    result = token.gate(workshop, classify(write), multiclient::MotionState{}, multiclient::Mode::multi_user,
+                        classify_passive(write), multiclient::PassiveRights::watch_stop_upload);
+    CHECK(result.refused);
+    CHECK(result.reason == multiclient::RefusalReason::not_holder);
+    CHECK(token.holder().id == 1);
+  }
+
+  {
+    TEST("gate: in single-user mode reading config does not take control, writing does");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{});
+
+    multiclient::GateResult result = token.gate(workshop, classify("config-get-all -e"), multiclient::MotionState{});
+    CHECK(!result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);
+
+    result = token.gate(workshop, classify("config-set sd x 1"), multiclient::MotionState{});
+    CHECK(!result.refused);
+    CHECK(result.holder_changed);
+    CHECK(token.holder().id == 2);
+  }
+
+  {
+    TEST("gate: an unidentified sender may read config while someone holds control, but not write it");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity nobody;
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{});
+
+    multiclient::GateResult result = token.gate(nobody, classify("config-get multi_client.mode"), multiclient::MotionState{});
+    CHECK(!result.refused);
+    CHECK(token.holder().id == 1);
+
+    result = token.gate(nobody, classify("config-set sd multi_client.mode multi_user"), multiclient::MotionState{});
+    CHECK(result.refused);
+    CHECK(token.holder().id == 1);
   }
 
   std::printf("%d checks, %d failures\n", checks, failures);

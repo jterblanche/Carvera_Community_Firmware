@@ -77,6 +77,16 @@ Traffic classify_command_line(const char* line, std::size_t length) {
   if (word_is(line, length, start, "ftype")) return Traffic::automatic;
   if (word_is(line, length, start, "time")) return Traffic::automatic;
 
+  // Reading config values changes nothing, so a controller without control
+  // may do it. config-get-all counts only without a file name: given one, it
+  // reads that file from the card rather than the config.
+  if (word_is(line, length, start, "config-get")) return Traffic::automatic;
+  if (word_is(line, length, start, "config-get-all")) {
+    std::size_t i = skip_spaces(line, length, end_of_word(line, length, start));
+    while (i < length && word_is(line, length, i, "-e")) i = skip_spaces(line, length, end_of_word(line, length, i));
+    if (i >= length) return Traffic::automatic;
+  }
+
   if (word_is(line, length, start, "get")) {
     const std::size_t after_get = end_of_word(line, length, start);
     const std::size_t arg_start = skip_spaces(line, length, after_get);
