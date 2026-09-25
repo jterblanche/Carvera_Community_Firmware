@@ -542,8 +542,8 @@ void WifiProvider::disconnect_wifi_client(const multiclient::Address& address, c
 //
 // A frame is never split here in practice: WIFI_DATA_MAX_SIZE is a whole TCP
 // segment (1460 B) and every message this firmware publishes is a few
-// hundred bytes, so the loop runs exactly once. The loop remains for the
-// point-to-point reply path, which can carry more.
+// hundred bytes, so it goes to the module in one piece. Splitting remains
+// for the point-to-point reply path, which can carry more.
 //
 // The driver's status word carries an error code in its low byte, and the
 // header documents it as meaningful only when an error was encountered, so
@@ -556,27 +556,26 @@ WifiProvider::SendOutcome WifiProvider::send_to_wifi_client(int client_index, co
 	snprintf(ip_str, sizeof(ip_str), "%u.%u.%u.%u",
 		client->address.ip[0], client->address.ip[1], client->address.ip[2], client->address.ip[3]);
 
-	size_t sent_index = 0;
-	while (sent_index < length) {
-		const size_t chunk = (length - sent_index) > WIFI_DATA_MAX_SIZE ? WIFI_DATA_MAX_SIZE : (length - sent_index);
-		u16 status = 0;
-		const u16 sent = M8266WIFI_SPI_Send_Data_to_TcpClient(
-			const_cast<u8*>(data + sent_index), static_cast<u16>(chunk), tcp_link_no, ip_str, client->address.port, &status);
-		sent_index += sent;
-		if (sent != chunk) {
-			// The decision itself lives in ClientTable, away from the module
-			// and the Kernel, so it can be tested on the host: which error
-			// codes mean gone, and how long a run of temporary failures is
-			// allowed to go on. All this does is flag the client -- removing
-			// it here would invalidate the index of whichever caller is
-			// walking the table right now. reconcile_wifi_clients() reaps it
-			// on its next pass.
-			multiclient::note_send_result(*client, false, static_cast<uint8_t>(status & 0xFF));
-			return sent_index == 0 ? SendOutcome::dropped : SendOutcome::truncated;
-		}
-	}
-	multiclient::note_send_result(*client, true, 0);
-	return SendOutcome::sent_all;
+	// The decisions live in ClientTable, away from the module and the
+	// Kernel, so they can be tested on the host: how long to keep trying
+	// while the module's send buffer is full, which error codes mean gone,
+	// and how long a run of temporary failures is allowed to go on. A
+	// failed send only flags the client -- removing it here would
+	// invalidate the index of whichever caller is walking the table right
+	// now. reconcile_wifi_clients() reaps it on its next pass.
+	const size_t sent_index = multiclient::send_to_client(
+		*client, length, WIFI_DATA_MAX_SIZE,
+		[&](size_t offset, size_t chunk, uint8_t& errcode) -> size_t {
+			u16 status = 0;
+			const u16 sent = M8266WIFI_SPI_Send_Data_to_TcpClient(
+				const_cast<u8*>(data + offset), static_cast<u16>(chunk), tcp_link_no, ip_str, client->address.port, &status);
+			if (sent != chunk) errcode = static_cast<uint8_t>(status & 0xFF);
+			return sent;
+		},
+		[]() -> uint32_t { return us_ticker_read(); },
+		[this]() { M8266WIFI_Module_delay_ms(1); });
+	if (sent_index == length) return SendOutcome::sent_all;
+	return sent_index == 0 ? SendOutcome::dropped : SendOutcome::truncated;
 }
 
 // Answers a read that gets() is discarding because it came from someone

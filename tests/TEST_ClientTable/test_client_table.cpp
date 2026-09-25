@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "libs/ClientTable.h"
 
@@ -31,6 +32,55 @@ multiclient::Address address(uint8_t a, uint8_t b, uint8_t c, uint8_t d, uint16_
   addr.ip[3] = d;
   addr.port = port;
   return addr;
+}
+
+// A stand-in for the WiFi module's send side, as its driver documents it:
+// a send is refused with 0x12 ("sending buffer full") while 8 packets are
+// already waiting to go out, and the queue empties at whatever pace the
+// network allows. Time is simulated: every send costs spi_cost_us, and
+// the queue loses one packet every drain_every_us (never, when 0).
+struct FakeModule {
+  static constexpr int max_queued = 8;
+  uint32_t now = 0;
+  uint32_t spi_cost_us = 50;
+  uint32_t drain_every_us = 0;
+  uint32_t last_drain = 0;
+  int queued = 0;
+  int attempts = 0;
+
+  void advance(uint32_t us) {
+    now += us;
+    if (drain_every_us == 0) return;
+    while (queued > 0 && now - last_drain >= drain_every_us) {
+      --queued;
+      last_drain += drain_every_us;
+    }
+    if (queued == 0) last_drain = now;
+  }
+
+  // Accepts the whole chunk if there is room, nothing otherwise.
+  std::size_t send(std::size_t size, uint8_t& errcode) {
+    ++attempts;
+    advance(spi_cost_us);
+    if (queued >= max_queued) {
+      errcode = 0x12;
+      return 0;
+    }
+    ++queued;
+    return size;
+  }
+};
+
+// Sends one message to `client` through `module`, and adds it to
+// `delivered` if every byte of it went.
+void send_message(FakeModule& module, multiclient::Client& client, const std::string& message,
+                  std::vector<std::string>& delivered) {
+  const std::size_t sent = multiclient::send_to_client(
+      client, message.size(), 1460,
+      [&](std::size_t, std::size_t size, uint8_t& errcode) { return module.send(size, errcode); },
+      [&]() { return module.now; },
+      [&]() { module.advance(1000); });
+  if (sent == message.size()) delivered.push_back(message);
 }
 
 }  // namespace
@@ -741,6 +791,142 @@ int main() {
     const int reused = table.add_wifi(address(2, 2, 2, 2, 2), 1000);
     CHECK(!table.wifi_at(reused)->send_failed);
     CHECK(table.wifi_at(reused)->consecutive_send_failures == 0);
+  }
+
+  // --- Sending while the module is busy ---
+
+  {
+    TEST("which send errors mean the module is only busy");
+    CHECK(multiclient::send_error_means_module_busy(0x10));  // SPI buffer timeout
+    CHECK(multiclient::send_error_means_module_busy(0x11));  // send timeout
+    CHECK(multiclient::send_error_means_module_busy(0x12));  // sending buffer full
+    CHECK(multiclient::send_error_means_module_busy(0x1D));  // still connecting
+
+    CHECK(!multiclient::send_error_means_module_busy(0x14));  // gone
+    CHECK(!multiclient::send_error_means_module_busy(0x15));  // gone
+    CHECK(!multiclient::send_error_means_module_busy(0x1A));  // gone
+    CHECK(!multiclient::send_error_means_module_busy(0x13));  // our mistake
+    CHECK(!multiclient::send_error_means_module_busy(0x19));  // our mistake
+    CHECK(!multiclient::send_error_means_module_busy(0x1F));  // unspecified
+    CHECK(!multiclient::send_error_means_module_busy(0x00));
+  }
+
+  {
+    TEST("a long reply sent faster than the network drains arrives whole, on both clients");
+    // The shape of a config-get-all with two clients connected: for each of
+    // 88 settings, the reply line to the client that asked, then the copy
+    // of it published to that client and to the other one. Reading the
+    // next line from the card takes about a millisecond; the network takes
+    // a packet every 1.5 ms. Three packets a line outrun that, so the
+    // module's queue fills within a few lines.
+    FakeModule module;
+    module.drain_every_us = 1500;
+    multiclient::Client asker;
+    multiclient::Client watcher;
+    std::vector<std::string> replies, asker_copies, watcher_copies;
+    for (int line = 0; line < 88; ++line) {
+      module.advance(1000);
+      const std::string text = "setting." + std::to_string(line) + "=1";
+      send_message(module, asker, text, replies);
+      send_message(module, asker, "copy " + text, asker_copies);
+      send_message(module, watcher, "copy " + text, watcher_copies);
+    }
+    CHECK(replies.size() == 88);
+    CHECK(asker_copies.size() == 88);
+    CHECK(watcher_copies.size() == 88);
+    CHECK(!replies.empty() && replies.back() == "setting.87=1");
+    CHECK(!asker.send_failed);
+    CHECK(!watcher.send_failed);
+  }
+
+  {
+    TEST("a client that stops reading costs one wait, not one per message");
+    FakeModule module;
+    module.queued = FakeModule::max_queued;  // full, and never drains
+    multiclient::Client client;
+    std::vector<std::string> delivered;
+    const uint32_t started = module.now;
+    for (int i = 0; i < 88; ++i) send_message(module, client, "line", delivered);
+    CHECK(delivered.empty());
+    // The first message waits out the limit; every later one is tried once.
+    const uint32_t elapsed = module.now - started;
+    CHECK(elapsed < multiclient::max_busy_send_wait_us + 1000 + 88 * module.spi_cost_us * 2);
+    CHECK(elapsed >= multiclient::max_busy_send_wait_us);
+    // And it still ends up marked gone, as before.
+    CHECK(client.send_failed);
+  }
+
+  {
+    TEST("once a message gets through again, the next busy spell is waited out again");
+    FakeModule module;
+    module.queued = FakeModule::max_queued;
+    multiclient::Client client;
+    std::vector<std::string> delivered;
+    send_message(module, client, "lost", delivered);  // waits, then gives up
+    CHECK(client.consecutive_send_failures == 1);
+    module.queued = 0;
+    send_message(module, client, "through", delivered);
+    CHECK(client.consecutive_send_failures == 0);
+    module.queued = FakeModule::max_queued;
+    module.drain_every_us = 5000;
+    module.last_drain = module.now;
+    send_message(module, client, "waited for", delivered);
+    CHECK(delivered.size() == 2);
+    CHECK(delivered.size() == 2 && delivered[1] == "waited for");
+  }
+
+  {
+    TEST("a send the module says went to a gone client is not retried");
+    multiclient::Client client;
+    int attempts = 0;
+    uint32_t now = 0;
+    const std::size_t sent = multiclient::send_to_client(
+        client, 10, 1460,
+        [&](std::size_t, std::size_t, uint8_t& errcode) { ++attempts; errcode = 0x15; return std::size_t{0}; },
+        [&]() { return now; }, [&]() { now += 1000; });
+    CHECK(sent == 0);
+    CHECK(attempts == 1);
+    CHECK(client.send_failed);
+  }
+
+  {
+    TEST("a send refused for a mistake on our side is not retried");
+    multiclient::Client client;
+    int attempts = 0;
+    uint32_t now = 0;
+    const std::size_t sent = multiclient::send_to_client(
+        client, 10, 1460,
+        [&](std::size_t, std::size_t, uint8_t& errcode) { ++attempts; errcode = 0x13; return std::size_t{0}; },
+        [&]() { return now; }, [&]() { now += 1000; });
+    CHECK(sent == 0);
+    CHECK(attempts == 1);
+    CHECK(!client.send_failed);
+  }
+
+  {
+    TEST("a send the module takes only part of carries on from where it stopped");
+    multiclient::Client client;
+    std::vector<std::size_t> offsets, sizes;
+    uint32_t now = 0;
+    bool busy_once = true;
+    const std::size_t sent = multiclient::send_to_client(
+        client, 3000, 1460,
+        [&](std::size_t offset, std::size_t size, uint8_t& errcode) {
+          offsets.push_back(offset);
+          sizes.push_back(size);
+          if (busy_once && offset == 0) {
+            busy_once = false;
+            errcode = 0x12;
+            return std::size_t{1000};
+          }
+          return size;
+        },
+        [&]() { return now; }, [&]() { now += 1000; });
+    CHECK(sent == 3000);
+    CHECK(offsets.size() == 3);
+    CHECK(offsets.size() == 3 && offsets[0] == 0 && offsets[1] == 1000 && offsets[2] == 2460);
+    CHECK(sizes.size() == 3 && sizes[0] == 1460 && sizes[1] == 1460 && sizes[2] == 540);
+    CHECK(client.consecutive_send_failures == 0);
   }
 
   // --- Wrap-boundary pins ---

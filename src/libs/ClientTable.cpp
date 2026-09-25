@@ -64,6 +64,13 @@ bool send_error_means_client_gone(uint8_t errcode) {
       || errcode == 0x1A;  // no such client
 }
 
+bool send_error_means_module_busy(uint8_t errcode) {
+  return errcode == 0x10   // timeout waiting for the module's SPI buffer
+      || errcode == 0x11   // timeout waiting for the module to send
+      || errcode == 0x12   // module sending buffer full
+      || errcode == 0x1D;  // connection still being established
+}
+
 void note_send_result(Client& client, bool sent_everything, uint8_t errcode) {
   if (sent_everything) {
     client.consecutive_send_failures = 0;

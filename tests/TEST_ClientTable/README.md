@@ -44,3 +44,12 @@ its own client's bytes apart from every other connected client's -- true only
 for the sender at the given client index's own address, false for an
 out-of-range index, and false once that index's slot has been freed (the
 transferring client disconnecting mid-transfer).
+
+Also: sending to one client while the WiFi module's send buffer is full,
+against a stand-in for the module that refuses a send while 8 packets are
+waiting and drains at a set pace. A long reply sent faster than the network
+takes it arrives whole on the client that asked and on a second client; a
+client that has stopped reading holds things up once, not once per message,
+and is still marked gone after the usual run of failures; errors that mean
+the client is gone, or a mistake on our side, are not retried; and a send
+the module takes only part of carries on from where it stopped.
