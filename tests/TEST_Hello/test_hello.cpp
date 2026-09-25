@@ -4,9 +4,11 @@
 #include <string>
 #include <vector>
 
+#include "libs/CRC16.h"
 #include "libs/ClientTable.h"
 #include "libs/ControlToken.h"
 #include "libs/Hello.h"
+#include "libs/PublicData.h"
 
 namespace {
 
@@ -35,6 +37,38 @@ std::vector<uint8_t> hello_payload(uint8_t version, uint64_t id, const std::stri
   for (char c : name) payload.push_back(static_cast<uint8_t>(c));
   payload.push_back(link);
   return payload;
+}
+
+std::vector<uint8_t> frame(uint8_t type, const std::vector<uint8_t>& payload) {
+  const uint16_t length = static_cast<uint16_t>(payload.size() + 3);
+  std::vector<uint8_t> out = {0x86, 0x68, static_cast<uint8_t>(length >> 8), static_cast<uint8_t>(length), type};
+  out.insert(out.end(), payload.begin(), payload.end());
+  const uint16_t crc = crc16::ccitt(out.data() + 2, length);
+  out.push_back(static_cast<uint8_t>(crc >> 8));
+  out.push_back(static_cast<uint8_t>(crc));
+  out.push_back(0x55);
+  out.push_back(0xAA);
+  return out;
+}
+
+std::vector<uint8_t> text(const std::string& s) { return std::vector<uint8_t>(s.begin(), s.end()); }
+
+bool taken(uint8_t type, const std::vector<uint8_t>& payload) {
+  return multiclient::taken_before_identifying(type, payload.data(), payload.size());
+}
+
+bool sent(const std::vector<uint8_t>& bytes) {
+  return multiclient::sent_before_identifying(bytes.data(), bytes.size());
+}
+
+multiclient::Address address(uint8_t last) {
+  multiclient::Address a;
+  a.ip[0] = 192;
+  a.ip[1] = 168;
+  a.ip[2] = 1;
+  a.ip[3] = last;
+  a.port = 40000 + last;
+  return a;
 }
 
 }  // namespace
@@ -290,6 +324,107 @@ int main() {
       CHECK(out[offset++] == 1);  // Carol: now the holder
       CHECK(offset == len);
     }
+  }
+
+  {
+    TEST("nobody must identify first while nobody present has identified");
+    multiclient::ClientTable table;
+    CHECK(!multiclient::must_identify_first(table, nullptr));
+    const int a = table.add_wifi(address(1), 0);
+    CHECK(!multiclient::must_identify_first(table, table.wifi_at(a)));  // alone
+    const int b = table.add_wifi(address(2), 0);
+    CHECK(!multiclient::must_identify_first(table, table.wifi_at(a)));  // two, neither identified
+    CHECK(!multiclient::must_identify_first(table, table.wifi_at(b)));
+    table.set_usb_present(true, 0);
+    table.start_usb_hello_window(0);
+    CHECK(!multiclient::must_identify_first(table, table.usb()));
+  }
+
+  {
+    TEST("an unidentified client must identify first once another has identified, until it does");
+    multiclient::ClientTable table;
+    const int ours = table.add_wifi(address(1), 0);
+    const int late = table.add_wifi(address(2), 0);
+    table.set_usb_present(true, 0);
+    table.start_usb_hello_window(0);
+    multiclient::set_identity(*table.wifi_at(ours), 0x11ULL, "Office", 6);
+    CHECK(!multiclient::must_identify_first(table, table.wifi_at(ours)));
+    CHECK(multiclient::must_identify_first(table, table.wifi_at(late)));
+    CHECK(multiclient::must_identify_first(table, table.usb()));
+
+    multiclient::set_identity(*table.wifi_at(late), 0x22ULL, "Shop", 4);
+    CHECK(!multiclient::must_identify_first(table, table.wifi_at(late)));  // served normally from here
+    CHECK(multiclient::must_identify_first(table, table.usb()));
+  }
+
+  {
+    TEST("an identified USB link makes an unidentified WiFi client identify first");
+    multiclient::ClientTable table;
+    table.set_usb_present(true, 0);
+    table.start_usb_hello_window(0);
+    multiclient::set_identity(*table.usb(), 0x33ULL, "Laptop", 6);
+    const int late = table.add_wifi(address(3), 0);
+    CHECK(multiclient::must_identify_first(table, table.wifi_at(late)));
+    CHECK(!multiclient::must_identify_first(table, table.usb()));
+  }
+
+  {
+    TEST("the rule ends when the identified client leaves");
+    multiclient::ClientTable table;
+    const int ours = table.add_wifi(address(1), 0);
+    const int late = table.add_wifi(address(2), 0);
+    multiclient::set_identity(*table.wifi_at(ours), 0x11ULL, "Office", 6);
+    CHECK(multiclient::must_identify_first(table, table.wifi_at(late)));
+    table.remove_wifi(ours);
+    CHECK(!multiclient::must_identify_first(table, table.wifi_at(late)));
+  }
+
+  {
+    TEST("only a hello and a status query are taken before identifying");
+    CHECK(taken(PTYPE_HELLO, hello_payload(1, 1, "Office", 0)));
+    CHECK(taken(PTYPE_CTRL_SINGLE, {'?'}));
+
+    CHECK(!taken(PTYPE_CTRL_SINGLE, {}));
+    CHECK(!taken(PTYPE_CTRL_SINGLE, {'X' - 'A' + 1}));  // halt
+    CHECK(!taken(PTYPE_CTRL_SINGLE, {'Y' - 'A' + 1}));  // stop
+    CHECK(!taken(PTYPE_CTRL_SINGLE, {'Z' - 'A' + 1}));  // keep alive
+    CHECK(!taken(PTYPE_CTRL_SINGLE, {'!'}));            // feed hold
+    CHECK(!taken(PTYPE_CTRL_SINGLE, {'~'}));            // resume
+    CHECK(!taken(PTYPE_CTRL_SINGLE, {'*'}));            // diagnose
+    CHECK(!taken(PTYPE_CTRL_MULTI, text("G0 X10")));
+    CHECK(!taken(PTYPE_CTRL_MULTI, text("diagnose")));
+    CHECK(!taken(PTYPE_CTRL_MULTI, text("download /sd/config.txt")));
+    CHECK(!taken(PTYPE_FILE_START, text("upload /sd/gcodes/a.nc\n")));
+    CHECK(!taken(PTYPE_FILE_START, {}));  // a transfer cancel, which is answered
+    CHECK(!taken(PTYPE_HEARTBEAT, {}));
+    CHECK(!taken(PTYPE_CLIENT_LIST_REQ, {}));
+    CHECK(!taken(PTYPE_CONTROL_RELEASE, {}));
+    CHECK(!taken(PTYPE_FILE_DATA, text("data")));
+  }
+
+  {
+    TEST("only a hello ack and an empty status frame are sent before identifying");
+    const std::vector<uint8_t> empty_status = {0x86, 0x68, 0x00, 0x03, 0x81, 0xD4, 0xFA, 0x55, 0xAA};
+    CHECK(frame(PTYPE_STATUS_RES, {}) == empty_status);
+    CHECK(sent(empty_status));
+
+    uint8_t ack[multiclient::hello_ack_length];
+    const std::size_t ack_len = multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, 0);
+    CHECK(sent(frame(PTYPE_HELLO_ACK, std::vector<uint8_t>(ack, ack + ack_len))));
+    multiclient::build_hello_ack(ack, multiclient::hello_result_old_controller_present, 0);
+    CHECK(sent(frame(PTYPE_HELLO_ACK, std::vector<uint8_t>(ack, ack + ack_len))));
+
+    CHECK(!sent(frame(PTYPE_STATUS_RES, text("<Idle|MPos:0.000,0.000,0.000|WPos:0.000,0.000,0.000>"))));
+    CHECK(!sent(frame(PTYPE_DIAG_RES, text("{S:0,0}"))));
+    CHECK(!sent(frame(PTYPE_NORMAL_INFO, text("ok\r\n"))));
+    CHECK(!sent(frame(PTYPE_NORMAL_INFO, {})));
+    CHECK(!sent(frame(PTYPE_CLIENT_LIST_REPLY, {0})));
+    CHECK(!sent(frame(PTYPE_FILE_CAN, text("ok\r\n"))));
+    CHECK(!sent(frame(PTYPE_FIRM_VER, text("2.2.0c"))));
+    CHECK(!sent(text("ERROR: no valid frame found.\r\n")));
+    CHECK(!sent(text("<Idle|MPos:0.000,0.000,0.000>\n")));
+    CHECK(!multiclient::sent_before_identifying(nullptr, 0));
+    CHECK(!multiclient::sent_before_identifying(empty_status.data(), 5));
   }
 
   std::printf("\n%d checks, %d failures\n", checks, failures);
