@@ -370,6 +370,9 @@ void SerialConsole::on_idle(void * argument)
         query_flag = false;
         if (communication_protocol == PROTOCOL_SMOOTHIE) {
             puts(THEKERNEL->get_query_string().c_str(), 0);
+        } else if (multiclient::must_identify_first(multiclient::shared_client_table(), multiclient::shared_client_table().usb())) {
+            // No machine state, but a valid frame (libs/Hello.h).
+            PacketMessage(PTYPE_STATUS_RES, "", 0);
         } else {
             PacketMessage(PTYPE_STATUS_RES, THEKERNEL->get_query_string().c_str(), 0);
         }
@@ -567,6 +570,10 @@ void SerialConsole::on_main_loop(void * argument){
 int SerialConsole::puts(const char* s, int size)
 {
     size_t n = size == 0 ? strlen(s) : size;
+    // Everything else reaching this link while it must identify first is
+    // dropped, including messages sent to every link (libs/Hello.h).
+    if (multiclient::must_identify_first(multiclient::shared_client_table(), multiclient::shared_client_table().usb()) &&
+        !multiclient::sent_before_identifying(reinterpret_cast<const uint8_t*>(s), n)) return n;
     for (size_t i = 0; i < n; ++i) {
         this->_putc(s[i]);
     }
@@ -647,6 +654,13 @@ void SerialConsole::process_makera_byte(uint8_t received)
     if (result != makera::DecodeResult::complete) return;
 
     const makera::Packet &packet = makera_frame_decoder.packet();
+
+    // While another client has identified, this link gets nothing acted on
+    // but its hello and its status queries until it identifies too (see
+    // libs/Hello.h).
+    if (multiclient::must_identify_first(multiclient::shared_client_table(), multiclient::shared_client_table().usb()) &&
+        !multiclient::taken_before_identifying(packet.type, packet.data, packet.data_length)) return;
+
     if (packet.type == PTYPE_CTRL_SINGLE && packet.data_length > 0) {
         switch (makera::handle_control(packet.data[0])) {
             case makera::ControlAction::query: query_flag = true; break;
@@ -767,7 +781,9 @@ void SerialConsole::handle_hello(const uint8_t* payload, uint16_t payload_length
 
 // Answers a client-list request with every identified client in the shared
 // table. Answered regardless of whether this USB link is itself identified
-// -- this is a request-and-reply message, not a publish.
+// -- this is a request-and-reply message, not a publish -- unless it must
+// identify first, in which case its request never reaches here (see
+// process_makera_byte()).
 void SerialConsole::handle_client_list_request() {
     uint8_t payload[multiclient::max_client_list_reply_length];
     const std::size_t length = multiclient::build_client_list_reply(
