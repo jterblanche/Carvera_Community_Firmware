@@ -34,3 +34,12 @@ zero count and no entries; and `has_control`: false for every entry when
 nobody holds control, true only for the entry matching the current holder
 among several clients, true for the USB entry when the USB client holds
 control, and following control as it moves from one client to another.
+
+Also: which clients must identify first (none while nobody present has
+identified, however many unidentified clients there are; an unidentified
+WiFi or USB client once another client has identified, until it identifies
+itself or the identified client leaves); that only a hello and a status
+query are taken from such a client, and no other realtime byte, command,
+file transfer or handshake message; and that only a hello ack and the empty
+status frame, checked byte for byte, may be sent to it, and no status with
+content, command reply, diagnostic or plain text.

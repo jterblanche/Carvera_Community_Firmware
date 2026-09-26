@@ -2,6 +2,10 @@
 
 #include <cstring>
 
+#include "MakeraControl.h"
+#include "MakeraFrame.h"
+#include "PublicData.h"
+
 namespace multiclient {
 
 namespace {
@@ -89,6 +93,22 @@ std::size_t build_client_list_reply(const ClientTable& table, const ControlToken
 
   out[0] = count;
   return offset;
+}
+
+bool must_identify_first(const ClientTable& table, const Client* client) {
+  return client != nullptr && !client->identified && table.any_identified_present();
+}
+
+bool taken_before_identifying(uint8_t type, const uint8_t* data, std::size_t length) {
+  if (type == PTYPE_HELLO) return true;
+  return type == PTYPE_CTRL_SINGLE && length > 0 && data != nullptr &&
+         makera::decode_control(data[0]) == makera::ControlAction::query;
+}
+
+bool sent_before_identifying(const uint8_t* data, std::size_t length) {
+  if (data == nullptr || length < makera::frame_overhead || makera::read_be16(data) != makera::header) return false;
+  if (data[4] == PTYPE_HELLO_ACK) return true;
+  return data[4] == PTYPE_STATUS_RES && length == makera::frame_overhead;
 }
 
 }  // namespace multiclient

@@ -59,4 +59,26 @@ constexpr std::size_t max_client_list_reply_length = 1 + (max_wifi_clients + 1) 
 std::size_t build_client_list_reply(const ClientTable& table, const ControlToken& control, uint8_t* out,
                                      std::size_t out_capacity);
 
+// True while `client` has not identified but another client present has.
+// Such a client is shown nothing of the machine and has nothing it sends
+// acted on until it identifies: a controller that cannot identify sees a
+// busy machine, as it would if the machine refused a second connection.
+// False for nullptr, for an identified client, and whenever nobody present
+// has identified, so a lone controller that never says hello is served
+// exactly as before.
+bool must_identify_first(const ClientTable& table, const Client* client);
+
+// True for the frames still taken from a client that must identify first:
+// its hello, and a status query ('?' as a realtime frame). Everything else
+// from it is dropped unread.
+bool taken_before_identifying(uint8_t type, const uint8_t* data, std::size_t length);
+
+// True if `data`, about to be sent to a client that must identify first,
+// may go to it: a hello ack, or a status frame with an empty payload. The
+// empty status frame is how such a client's status query is answered. It
+// shows no machine state, and controllers from before hello existed drop a
+// status frame with nothing in it, but it is a valid frame, which is what
+// a controller that knows hello waits for before sending its own.
+bool sent_before_identifying(const uint8_t* data, std::size_t length);
+
 }  // namespace multiclient

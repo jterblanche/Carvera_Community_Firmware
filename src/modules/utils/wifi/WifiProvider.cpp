@@ -414,6 +414,14 @@ void WifiProvider::receive_wifi_data() {
 			if (result != makera::ResyncResult::complete) continue;
 
 			const makera::Packet &packet = client.decoder.packet();
+
+			// While another client has identified, one that has not gets
+			// nothing acted on but its hello and its status queries (see
+			// libs/Hello.h).
+			if (multiclient::must_identify_first(multiclient::shared_client_table(),
+			                                     multiclient::shared_client_table().wifi_at(client_index)) &&
+			    !multiclient::taken_before_identifying(packet.type, packet.data, packet.data_length)) continue;
+
 			if (packet.type == PTYPE_CTRL_SINGLE && packet.data_length > 0) {
 				const makera::ControlAction action = makera::decode_control(packet.data[0]);
 				if (action == makera::ControlAction::stop) {
@@ -552,6 +560,10 @@ void WifiProvider::disconnect_wifi_client(const multiclient::Address& address, c
 WifiProvider::SendOutcome WifiProvider::send_to_wifi_client(int client_index, const u8* data, size_t length) {
 	multiclient::Client *client = multiclient::shared_client_table().wifi_at(client_index);
 	if (client == nullptr) return SendOutcome::dropped;
+	// Not sent, and not counted as a failed send either: the client is fine,
+	// it just has not identified while another client has (libs/Hello.h).
+	if (multiclient::must_identify_first(multiclient::shared_client_table(), client) &&
+	    !multiclient::sent_before_identifying(data, length)) return SendOutcome::dropped;
 	char ip_str[16];
 	snprintf(ip_str, sizeof(ip_str), "%u.%u.%u.%u",
 		client->address.ip[0], client->address.ip[1], client->address.ip[2], client->address.ip[3]);
@@ -609,7 +621,8 @@ void WifiProvider::broadcast_to_wifi_clients(const u8* data, size_t length) {
 // this branch is broadcast this way. It exists so a later status/event/
 // console publish only reaches clients that identified themselves, leaving
 // broadcast_to_wifi_clients() above exactly as it is (reaching every
-// connected client, identified or not) for the messages that already use
+// connected client, identified or not, apart from one that must identify
+// first -- see send_to_wifi_client()) for the messages that already use
 // it today, such as a halt notice -- a lone unidentified client must keep
 // seeing those exactly as it does now.
 void WifiProvider::broadcast_to_identified_wifi_clients(const u8* data, size_t length) {
@@ -829,7 +842,8 @@ void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, u
 // Answers a client-list request with every identified client in the shared
 // table, addressed to the requester only. Answered regardless of whether
 // the requester itself is identified -- this is a request-and-reply
-// message, not a publish.
+// message, not a publish -- unless it must identify first, in which case
+// its request never reaches here (see receive_wifi_data()).
 void WifiProvider::handle_wifi_client_list_request(int client_index) {
 	uint8_t payload[multiclient::max_client_list_reply_length];
 	const std::size_t length = multiclient::build_client_list_reply(
@@ -877,8 +891,9 @@ void WifiProvider::handle_wifi_control_release(int client_index) {
 // file issues; whether that disconnect closes the link cleanly is not
 // verified by this branch. There is no equivalent action for USB: the
 // firmware has no way to sever that link, so an old, not-alone USB
-// controller simply stays unidentified and limited to request-and-reply,
-// same as it would be alone.
+// controller simply stays unidentified. While nobody present has
+// identified it is still served, same as it would be alone; once someone
+// has, it is shown nothing (see must_identify_first() in libs/Hello.h).
 //
 // While nobody present has identified, ordering among the unidentified is
 // decided by who arrived first, not by whether everyone happens to be old
@@ -1316,7 +1331,14 @@ void WifiProvider::on_idle(void *argument)
 				client.query_flag = false;
 				const int saved_reply_client = active_reply_client;
 				active_reply_client = static_cast<int>(i);
-				PacketMessage(PTYPE_STATUS_RES, THEKERNEL->get_query_string().c_str(), 0);
+				// An empty status frame for a client that must identify
+				// first: no machine state, but a valid frame (libs/Hello.h).
+				if (multiclient::must_identify_first(multiclient::shared_client_table(),
+				                                     multiclient::shared_client_table().wifi_at(static_cast<int>(i)))) {
+					PacketMessage(PTYPE_STATUS_RES, "", 0);
+				} else {
+					PacketMessage(PTYPE_STATUS_RES, THEKERNEL->get_query_string().c_str(), 0);
+				}
 				active_reply_client = saved_reply_client;
 			}
 			if (client.diagnose_flag) {
