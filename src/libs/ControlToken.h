@@ -94,8 +94,11 @@ enum class Traffic : uint8_t { automatic, user_caused };
 // handshake as reading it, so both forms are automatic), and `get wcs`.
 // Reading config values is automatic too: `config-get`, and `config-get-all`
 // with no file name (`-e` only).
+// Listing the card is automatic too: `ls`, with any arguments (Jaun, 3 Oct
+// 2026 -- listing never needs nor takes control, whoever sends it and
+// however it is sent, typed or from the file browser's `ls -e -s <dir>`).
 // Every other command word -- every G-code line, MDI, jog, probe, homing,
-// spindle, override, play/abort/suspend/resume, upload/download, ls/cat,
+// spindle, override, play/abort/suspend/resume, upload/download, cat,
 // rm/mv, config-set and every other config command that writes or reloads,
 // and anything not on this short list -- is user-caused.
 // A blank line (length 0) is user-caused: nothing legitimate sends one, and

@@ -128,6 +128,12 @@ Traffic classify_command_line(const char* line, std::size_t length) {
   if (word_is(line, length, start, "ftype")) return Traffic::automatic;
   if (word_is(line, length, start, "time")) return Traffic::automatic;
 
+  // Listing the card never needs nor takes control (Jaun, 3 Oct 2026),
+  // whatever arguments follow -- the file browser always sends
+  // "ls -e -s <dir>", a typed "ls" sends none, and ls_command()
+  // (SimpleShell.cpp) only ever reads the card, never writes it.
+  if (word_is(line, length, start, "ls")) return Traffic::automatic;
+
   // Reading config values changes nothing, so a controller without control
   // may do it. config-get-all counts only without a file name: given one, it
   // reads that file from the card rather than the config.
