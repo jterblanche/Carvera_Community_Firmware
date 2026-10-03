@@ -1070,8 +1070,8 @@ int main() {
     // PTYPE_AUTO_COMMAND never consults the control token at all (see
     // classify_automatic_command()), so WifiProvider/SerialConsole must
     // keep letting it wait for the current dispatch to end, exactly as
-    // before this ticket's fix -- gating it early here would be a no-op at
-    // best and a behaviour change at worst.
+    // before this fix -- gating it early here would be a no-op at best and
+    // a behaviour change at worst.
     TEST("gates_on_arrival: an automatic command is not, nor is anything handled inline");
     CHECK(!multiclient::gates_on_arrival(PTYPE_AUTO_COMMAND));
     CHECK(!multiclient::gates_on_arrival(PTYPE_CTRL_SINGLE));

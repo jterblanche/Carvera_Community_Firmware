@@ -287,10 +287,12 @@ class ControlToken {
   // without yet being sure this is the last word. It cannot be the last
   // word, because the queued frame's own physical effect, if any (a jog,
   // an automatic tool-change move), is not synchronous with
-  // THEKERNEL->dispatch_console_line() returning for every command (see
-  // the change explanation, "why peek must not mutate"), so motion can
-  // still start, from somebody else's already-dispatching command, in the
-  // window between this peek and the frame's own turn at gate(). Moving
+  // THEKERNEL->dispatch_console_line() returning for every command: a
+  // plain, non-continuous jog or the automatic tool-change move queues its
+  // move and returns almost at once, well before the move itself finishes.
+  // So motion can still start, from somebody else's already-dispatching
+  // command, in the window between this peek and the frame's own turn at
+  // gate(). Moving
   // holder() here, on a peek that is not yet the last word, would make
   // that race worse, not better: a sender that peek() waved through while
   // genuinely idle would already be recorded as holder by the time
