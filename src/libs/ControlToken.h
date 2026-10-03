@@ -97,6 +97,9 @@ enum class Traffic : uint8_t { automatic, user_caused };
 // Listing the card is automatic too: `ls`, with any arguments (Jaun, 3 Oct
 // 2026 -- listing never needs nor takes control, whoever sends it and
 // however it is sent, typed or from the file browser's `ls -e -s <dir>`).
+// `md5sum` is automatic for the same reason -- a read-only query, used by
+// the controller to verify a passive upload -- though that extension is
+// proposed for review, not (yet) part of Jaun's recorded decision above.
 // Every other command word -- every G-code line, MDI, jog, probe, homing,
 // spindle, override, play/abort/suspend/resume, upload/download, cat,
 // rm/mv, config-set and every other config command that writes or reloads,

@@ -134,6 +134,18 @@ Traffic classify_command_line(const char* line, std::size_t length) {
   // (SimpleShell.cpp) only ever reads the card, never writes it.
   if (word_is(line, length, start, "ls")) return Traffic::automatic;
 
+  // Extension of the same principle beyond Jaun's recorded decision (his
+  // decision names listing only; this is proposed for his review, not yet
+  // his explicit call): md5sum_command() (SimpleShell.cpp) only ever
+  // opens, reads and hashes a file -- it never writes -- and the
+  // controller's own post-upload integrity check (_verify_uploaded_md5 in
+  // main.py, via Controller.md5Command(), "md5sum <path>") is exactly the
+  // kind of read-only query the automatic allow-list exists for. Left
+  // user-caused, a passive upload a non-holder is allowed to make at
+  // PassiveRights::watch_stop_upload would succeed and then have its own
+  // verification refused by the gate.
+  if (word_is(line, length, start, "md5sum")) return Traffic::automatic;
+
   // Reading config values changes nothing, so a controller without control
   // may do it. config-get-all counts only without a file name: given one, it
   // reads that file from the card rather than the config.

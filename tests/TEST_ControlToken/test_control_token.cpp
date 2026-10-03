@@ -86,6 +86,26 @@ int main() {
   }
 
   {
+    // Extension beyond Jaun's recorded 3 Oct 2026 decision (that decision
+    // names listing only) -- for his review, not yet his explicit call:
+    // md5sum, like ls, only ever reads a file (SimpleShell::md5sum_command
+    // opens, reads and hashes it; it never writes), and the controller's
+    // post-upload integrity check (_verify_uploaded_md5 -> md5Command() ->
+    // "md5sum <path>") is exactly the kind of read-only, connect-time-style
+    // query the automatic allow-list already exists for. Left user-caused,
+    // a passive upload a non-holder is allowed to make at
+    // watch_stop_upload would succeed and then have its own verification
+    // refused by the gate.
+    TEST("classify_command_line: reading a file's md5sum is automatic (extension, for review)");
+    CHECK(classify("md5sum /sd/gcodes/job.nc") == multiclient::Traffic::automatic);
+    CHECK(classify("md5sum /sd/firmware.bin") == multiclient::Traffic::automatic);
+    CHECK(classify("  md5sum\t/sd/gcodes/job.nc") == multiclient::Traffic::automatic);
+    // A same-prefix word is not `md5sum` itself.
+    CHECK(classify("md5sums /sd/gcodes/job.nc") == multiclient::Traffic::user_caused);
+    CHECK(classify("md5sumx") == multiclient::Traffic::user_caused);
+  }
+
+  {
     TEST("classify_command_line: reading config values is automatic");
     CHECK(classify("config-get multi_client.mode") == multiclient::Traffic::automatic);
     CHECK(classify("config-get sd multi_client.passive_rights") == multiclient::Traffic::automatic);
@@ -169,6 +189,7 @@ int main() {
     CHECK(classify_automatic(0, "config-get-all -e") == run);
     CHECK(classify_automatic(0, "ls") == run);
     CHECK(classify_automatic(0, "ls -e -s /sd/gcodes") == run);
+    CHECK(classify_automatic(0, "md5sum /sd/gcodes/job.nc") == run);
     CHECK(classify_automatic(0, "config-get-all /sd/other.txt") == refuse);
     CHECK(classify_automatic(0, "config-delete sd multi_client.mode") == refuse);
     CHECK(classify_automatic(0, "config-load") == refuse);
@@ -643,6 +664,25 @@ int main() {
 
     const multiclient::GateResult result =
         token.gate(workshop, classify("ls -e -s /sd/gcodes"), multiclient::MotionState{}, multiclient::Mode::multi_user);
+    CHECK(!result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);  // still Office
+  }
+
+  {
+    // Same as the ls test above, for the review extension: without this,
+    // a passive upload a non-holder is allowed to make at
+    // watch_stop_upload (PassiveRights::watch_stop_upload) would succeed
+    // and then have the controller's own post-upload verification
+    // (_verify_uploaded_md5 -> "md5sum <path>") refused by the gate.
+    TEST("gate: md5sum from a non-holder in multi-user mode never takes or needs control");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    const multiclient::GateResult result = token.gate(
+        workshop, classify("md5sum /sd/gcodes/job.nc"), multiclient::MotionState{}, multiclient::Mode::multi_user);
     CHECK(!result.refused);
     CHECK(!result.holder_changed);
     CHECK(token.holder().id == 1);  // still Office
