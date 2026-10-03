@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "libs/ControlToken.h"
+#include "libs/PublicData.h"
 
 namespace {
 
@@ -1057,6 +1058,82 @@ int main() {
     result = token.gate(nobody, classify("config-set sd multi_client.mode multi_user"), multiclient::MotionState{});
     CHECK(result.refused);
     CHECK(token.holder().id == 1);
+  }
+
+  {
+    TEST("gates_on_arrival: an ordinary command and a file-transfer start are gated at arrival");
+    CHECK(multiclient::gates_on_arrival(PTYPE_CTRL_MULTI));
+    CHECK(multiclient::gates_on_arrival(PTYPE_FILE_START));
+  }
+
+  {
+    // PTYPE_AUTO_COMMAND never consults the control token at all (see
+    // classify_automatic_command()), so WifiProvider/SerialConsole must
+    // keep letting it wait for the current dispatch to end, exactly as
+    // before this ticket's fix -- gating it early here would be a no-op at
+    // best and a behaviour change at worst.
+    TEST("gates_on_arrival: an automatic command is not, nor is anything handled inline");
+    CHECK(!multiclient::gates_on_arrival(PTYPE_AUTO_COMMAND));
+    CHECK(!multiclient::gates_on_arrival(PTYPE_CTRL_SINGLE));
+    CHECK(!multiclient::gates_on_arrival(PTYPE_HELLO));
+    CHECK(!multiclient::gates_on_arrival(PTYPE_HEARTBEAT));
+    CHECK(!multiclient::gates_on_arrival(PTYPE_CLIENT_LIST_REQ));
+    CHECK(!multiclient::gates_on_arrival(PTYPE_RELAY));
+    CHECK(!multiclient::gates_on_arrival(PTYPE_CONTROL_RELEASE));
+  }
+
+  {
+    // The scenario observed on the machine on 3 Oct 2026: while the holder
+    // (office) is in the middle of a jog, a homing move or an automatic
+    // tool-change move, a non-holder (workshop) sends a status/jog/ls-style
+    // command. WifiProvider/SerialConsole must gate it against the motion
+    // state as it is *right then* -- gates_on_arrival() says ordinary
+    // commands and file-transfer starts are exactly the frames that must be
+    // decided at that moment, not once the move has ended and the snapshot
+    // would read Idle. This locks down the pure half of the fix: gate()
+    // itself has always honoured whatever MotionState it is given, so
+    // calling it with the motion snapshot taken at arrival -- not a later,
+    // stale one -- is what makes the refusal real. See WifiProvider::
+    // receive_wifi_data() and SerialConsole::process_makera_byte() for
+    // where that snapshot is now taken.
+    TEST("gate: M114, a jog press and ls from a non-holder are refused while the holder's move is running");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{});
+
+    multiclient::MotionState jog_in_progress;
+    jog_in_progress.run = true;  // $J move: RUN, not playing a job
+    CHECK(multiclient::gates_on_arrival(PTYPE_CTRL_MULTI));
+    multiclient::GateResult result = token.gate(workshop, classify("M114"), jog_in_progress);
+    CHECK(result.refused);
+    CHECK(result.reason == multiclient::RefusalReason::motion_in_progress);
+    CHECK(token.holder().id == 1);  // control did not move
+
+    result = token.gate(workshop, classify("$J=X10 F500"), jog_in_progress);
+    CHECK(result.refused);
+    CHECK(token.holder().id == 1);
+
+    multiclient::MotionState homing;
+    homing.homing = true;  // $H
+    result = token.gate(workshop, classify("ls"), homing);
+    CHECK(result.refused);
+    CHECK(token.holder().id == 1);
+
+    multiclient::MotionState m6_move;
+    m6_move.run = true;  // the M6 tool-change move itself, not the wait
+    result = token.gate(workshop, classify("M114"), m6_move);
+    CHECK(result.refused);
+    CHECK(token.holder().id == 1);
+
+    // Once the move has actually finished -- the snapshot a caller would
+    // see if it only gated at dispatch time, after waiting for the
+    // holder's command to finish -- the same command is let through
+    // instead of refused, which is exactly why the snapshot must be taken
+    // at arrival rather than afterwards.
+    result = token.gate(workshop, classify("M114"), multiclient::MotionState{});
+    CHECK(!result.refused);
+    CHECK(token.holder().id == 2);
   }
 
   std::printf("%d checks, %d failures\n", checks, failures);

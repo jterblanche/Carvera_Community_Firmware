@@ -3,6 +3,8 @@
 #include <cstring>
 #include <string>
 
+#include "PublicData.h"
+
 namespace multiclient {
 
 namespace {
@@ -287,6 +289,10 @@ bool reconcile_holder(ControlToken& token, const ClientTable& table) {
   if (table.find_wifi_by_id(id) >= 0) return false;
   if (table.usb_has_id(id)) return false;
   return token.release_if_holder(id);
+}
+
+bool gates_on_arrival(uint8_t packet_type) {
+  return packet_type == PTYPE_CTRL_MULTI || packet_type == PTYPE_FILE_START;
 }
 
 }  // namespace multiclient

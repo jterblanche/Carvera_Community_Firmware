@@ -295,4 +295,21 @@ ControlToken& shared_control_token();
 // ClientTable/ControlToken pair the same way the rest of this file is.
 bool reconcile_holder(ControlToken& token, const ClientTable& table);
 
+// Whether a frame of this wire type (PublicData.h's PTYPE_* constants) must
+// have its control-token-and-motion decision made as soon as it arrives,
+// rather than only once it is finally dispatched. True for an ordinary
+// command (PTYPE_CTRL_MULTI) and a file-transfer start (PTYPE_FILE_START):
+// deciding only once the holder's own jog, probe, homing or automatic
+// tool-change move has finished checks the motion state *after* the move
+// that was supposed to block it, which is exactly the bug this exists to
+// avoid (the machine observation of 3 Oct 2026: a non-holder's command
+// queued during such a move and ran as soon as it ended). False for an
+// automatic-command frame (PTYPE_AUTO_COMMAND): it never consults the
+// control token at all -- classify_automatic_command() decides it on its
+// own -- so there is nothing here to bring forward; it keeps waiting for
+// the dispatch to end exactly as before. Takes the raw wire type rather
+// than makera::Packet so it needs no framing header, the same reason
+// classify_command_line() takes already-unwrapped text.
+bool gates_on_arrival(uint8_t packet_type);
+
 }  // namespace multiclient
