@@ -161,16 +161,48 @@ private:
     void send_framed_to_identified_wifi_clients_except(uint64_t exclude_id, char cmd, const uint8_t* payload,
                                                          size_t length);
 
+    // Classifies `packet` from `client_index` and reads the machine's own
+    // motion state right now, into exactly the arguments ControlToken::
+    // gate()/peek() take. Shared by gate_dispatch() and
+    // refused_on_arrival() so the two calls they make -- one at arrival,
+    // one at dispatch -- are guaranteed to agree on everything except the
+    // motion snapshot itself, which is the one thing that must be taken
+    // fresh each time.
+    struct GateInputs {
+        multiclient::Traffic traffic;
+        multiclient::PassiveAction action;
+        multiclient::Identity sender;
+        multiclient::MotionState motion;
+    };
+    GateInputs gate_inputs_for(int client_index, const makera::Packet& packet);
+
     // The control-token gate (libs/ControlToken.h), for the one command
     // about to be dispatched from `client_index`. Classifies `packet`,
     // reads the machine's own motion state, and asks the shared
-    // ControlToken to decide. Returns true if the caller should go on to
-    // dispatch the command; false means this function has already sent a
-    // visible refusal reply to `client_index` and the caller must not
-    // dispatch it. Publishes a control-changed event when the holder
-    // actually changes -- the same gate SerialConsole::gate_dispatch()
+    // ControlToken to decide -- the authoritative call: the only one that
+    // may change holder() and the only one after which the caller must
+    // publish a control-changed event. Returns true if the caller should
+    // go on to dispatch the command; false means this function has already
+    // sent a visible refusal reply to `client_index` and the caller must
+    // not dispatch it. The same gate SerialConsole::gate_dispatch()
     // implements for the USB link, against the same shared token.
     bool gate_dispatch(int client_index, const makera::Packet& packet);
+
+    // The early, non-committing half of the same gate, called from
+    // receive_wifi_data() as soon as a frame of a type gates_on_arrival()
+    // names arrives, against the motion state at that moment -- see
+    // ControlToken::peek() for why it must not be the one that changes
+    // holder(). Returns true (and has already sent the same visible
+    // refusal reply gate_dispatch() would) only when the frame is refused
+    // outright at arrival; otherwise it is queued as normal and
+    // gate_dispatch() still runs, for real, once it is this frame's turn
+    // to actually be dispatched.
+    bool refused_on_arrival(int client_index, const makera::Packet& packet);
+
+    // The printf() refusal reply gate_dispatch() and refused_on_arrival()
+    // both send, worded from `result` and `client_index` exactly the same
+    // way regardless of which of the two calls it.
+    void reply_gate_refusal(int client_index, const multiclient::GateResult& result);
 
     // Runs or refuses one automatic command (PTYPE_AUTO_COMMAND) from
     // `client_index`, without the control gate -- see
