@@ -128,22 +128,17 @@ Traffic classify_command_line(const char* line, std::size_t length) {
   if (word_is(line, length, start, "ftype")) return Traffic::automatic;
   if (word_is(line, length, start, "time")) return Traffic::automatic;
 
-  // Listing the card never needs nor takes control (Jaun, 3 Oct 2026),
-  // whatever arguments follow -- the file browser always sends
-  // "ls -e -s <dir>", a typed "ls" sends none, and ls_command()
-  // (SimpleShell.cpp) only ever reads the card, never writes it.
+  // Listing the card only reads it (ls_command, SimpleShell.cpp), so it
+  // never needs or takes control, whatever arguments follow -- the file
+  // browser always sends "ls -e -s <dir>", a typed "ls" sends none.
   if (word_is(line, length, start, "ls")) return Traffic::automatic;
 
-  // Extension of the same principle beyond Jaun's recorded decision (his
-  // decision names listing only; this is proposed for his review, not yet
-  // his explicit call): md5sum_command() (SimpleShell.cpp) only ever
-  // opens, reads and hashes a file -- it never writes -- and the
-  // controller's own post-upload integrity check (_verify_uploaded_md5 in
-  // main.py, via Controller.md5Command(), "md5sum <path>") is exactly the
-  // kind of read-only query the automatic allow-list exists for. Left
-  // user-caused, a passive upload a non-holder is allowed to make at
-  // PassiveRights::watch_stop_upload would succeed and then have its own
-  // verification refused by the gate.
+  // md5sum only reads and hashes a file (md5sum_command, SimpleShell.cpp);
+  // a controller without control uses it to verify an upload it was
+  // allowed to make (_verify_uploaded_md5 in main.py, via
+  // Controller.md5Command(), "md5sum <path>"). Left user-caused, that
+  // verification would be refused by the gate right after the passive
+  // upload it is checking succeeded under PassiveRights::watch_stop_upload.
   if (word_is(line, length, start, "md5sum")) return Traffic::automatic;
 
   // Reading config values changes nothing, so a controller without control

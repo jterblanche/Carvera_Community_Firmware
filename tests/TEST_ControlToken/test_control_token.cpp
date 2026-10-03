@@ -69,10 +69,10 @@ int main() {
   }
 
   {
-    // Jaun's decision, 3 Oct 2026: listing the card never needs nor takes
-    // control, in either mode, whoever sends it and however it is sent
-    // (typed `ls` or the file browser's `ls -e -s <dir>`) -- so `ls` is on
-    // the automatic allow-list like the queries above, with any arguments.
+    // Listing the card only reads it, in either mode, whoever sends it and
+    // however it is sent (typed `ls` or the file browser's `ls -e -s
+    // <dir>`) -- so `ls` is on the automatic allow-list like the queries
+    // above, with any arguments.
     TEST("classify_command_line: listing the card is automatic, with any arguments");
     CHECK(classify("ls") == multiclient::Traffic::automatic);
     CHECK(classify("ls /sd/gcodes") == multiclient::Traffic::automatic);
@@ -86,8 +86,6 @@ int main() {
   }
 
   {
-    // Extension beyond Jaun's recorded 3 Oct 2026 decision (that decision
-    // names listing only) -- for his review, not yet his explicit call:
     // md5sum, like ls, only ever reads a file (SimpleShell::md5sum_command
     // opens, reads and hashes it; it never writes), and the controller's
     // post-upload integrity check (_verify_uploaded_md5 -> md5Command() ->
@@ -96,7 +94,7 @@ int main() {
     // a passive upload a non-holder is allowed to make at
     // watch_stop_upload would succeed and then have its own verification
     // refused by the gate.
-    TEST("classify_command_line: reading a file's md5sum is automatic (extension, for review)");
+    TEST("classify_command_line: reading a file's md5sum is automatic");
     CHECK(classify("md5sum /sd/gcodes/job.nc") == multiclient::Traffic::automatic);
     CHECK(classify("md5sum /sd/firmware.bin") == multiclient::Traffic::automatic);
     CHECK(classify("  md5sum\t/sd/gcodes/job.nc") == multiclient::Traffic::automatic);
@@ -670,11 +668,11 @@ int main() {
   }
 
   {
-    // Same as the ls test above, for the review extension: without this,
-    // a passive upload a non-holder is allowed to make at
-    // watch_stop_upload (PassiveRights::watch_stop_upload) would succeed
-    // and then have the controller's own post-upload verification
-    // (_verify_uploaded_md5 -> "md5sum <path>") refused by the gate.
+    // Same as the ls test above, for md5sum: without this, a passive
+    // upload a non-holder is allowed to make at watch_stop_upload
+    // (PassiveRights::watch_stop_upload) would succeed and then have the
+    // controller's own post-upload verification (_verify_uploaded_md5 ->
+    // "md5sum <path>") refused by the gate.
     TEST("gate: md5sum from a non-holder in multi-user mode never takes or needs control");
     multiclient::ControlToken token;
     const multiclient::Identity office = make_identity(1, "Office");
