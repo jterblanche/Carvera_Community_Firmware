@@ -133,10 +133,9 @@ class SerialConsole : public Module, public StreamOutput {
         bool gate_dispatch(const makera::Packet& packet);
 
         // The early, non-committing half of the same gate, called from
-        // process_makera_byte() as soon as a frame of a type
-        // gates_on_arrival() names arrives. See
-        // WifiProvider::refused_on_arrival() for why this must not be the
-        // call that changes holder().
+        // process_makera_byte() as soon as a frame other than an
+        // automatic command arrives. See WifiProvider::refused_on_arrival()
+        // for why this must not be the call that changes holder().
         bool refused_on_arrival(const makera::Packet& packet);
 
         // The printf() refusal reply gate_dispatch() and

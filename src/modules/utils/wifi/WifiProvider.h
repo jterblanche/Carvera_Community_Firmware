@@ -189,8 +189,8 @@ private:
     bool gate_dispatch(int client_index, const makera::Packet& packet);
 
     // The early, non-committing half of the same gate, called from
-    // receive_wifi_data() as soon as a frame of a type gates_on_arrival()
-    // names arrives, against the motion state at that moment -- see
+    // receive_wifi_data() as soon as a frame other than an automatic
+    // command arrives, against the motion state at that moment -- see
     // ControlToken::peek() for why it must not be the one that changes
     // holder(). Returns true (and has already sent the same visible
     // refusal reply gate_dispatch() would) only when the frame is refused

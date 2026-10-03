@@ -469,10 +469,10 @@ void SerialConsole::reply_gate_refusal(const multiclient::GateResult &result) {
     if (result.reason == multiclient::RefusalReason::not_holder) {
         printf("error:Refused -- %.*s has control\r\n", static_cast<int>(holder.name_len), holder.name);
     } else if (holder.identified) {
-        printf("error:Transfer refused -- %.*s has control and an interactive move is in progress\r\n",
+        printf("error:Refused -- %.*s has control and an interactive move is in progress\r\n",
                static_cast<int>(holder.name_len), holder.name);
     } else {
-        printf("error:Transfer refused -- an interactive move is in progress\r\n");
+        printf("error:Refused -- an interactive move is in progress\r\n");
     }
 }
 
@@ -750,22 +750,20 @@ void SerialConsole::process_makera_byte(uint8_t received)
         }
 
         // The control-token gate (libs/ControlToken.h) peeks now, against
-        // the motion state right now, for anything multiclient::
-        // gates_on_arrival() says needs it -- not only once this frame is
-        // finally dispatched. process_makera_byte() is reached from
-        // on_idle(), which is itself re-entered while a jog, probe, homing
-        // or automatic tool-change move's own dispatch is still running;
-        // peeking only once that dispatch ends would check the motion
-        // state *after* the move that was supposed to block it, which is
-        // the bug this fixes (machine observation, 3 Oct 2026). A refused
-        // frame gets its reply from refused_on_arrival() and is dropped
-        // here, never queued -- but it only ever refuses, never seizes
-        // control (see ControlToken::peek()). Whatever it lets through
-        // still goes through gate_dispatch(), for real, at its own turn to
-        // dispatch below: see WifiProvider's matching comment for why that
-        // second, authoritative check is needed and not just belt-and-
-        // braces.
-        if (multiclient::gates_on_arrival(packet.type) && refused_on_arrival(packet)) return;
+        // the motion state right now, for anything but an automatic
+        // command -- not only once this frame is finally dispatched.
+        // process_makera_byte() is reached from on_idle(), which is
+        // itself re-entered while a jog, probe, homing or automatic
+        // tool-change move's own dispatch is still running; peeking only
+        // once that dispatch ends would check the motion state *after*
+        // the move that was supposed to block it. A refused frame gets
+        // its reply from refused_on_arrival() and is dropped here, never
+        // queued -- but it only ever refuses, never seizes control (see
+        // ControlToken::peek()). Whatever it lets through still goes
+        // through gate_dispatch(), for real, at its own turn to dispatch
+        // below: see WifiProvider's matching comment for why that second,
+        // authoritative check is needed and not just belt-and-braces.
+        if (packet.type != PTYPE_AUTO_COMMAND && refused_on_arrival(packet)) return;
 
         command_waiting = true;
 #if defined(STREAMED_JOB_PLAYBACK)

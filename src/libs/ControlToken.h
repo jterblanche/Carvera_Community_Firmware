@@ -272,36 +272,21 @@ class ControlToken {
                    PassiveAction action = PassiveAction::none, PassiveRights rights = PassiveRights::watch_only);
 
   // The same decision as gate(), against holder() as it stands right now,
-  // but committing nothing: holder() is left exactly as it was, whatever
-  // the result says, and the returned GateResult::holder_changed is always
-  // false, whatever gate() would have answered for the same inputs right
-  // now -- there is nothing for a caller to publish a control-changed
-  // event for, and this makes that impossible to get wrong by reading the
-  // result the way gate()'s callers correctly do. For a message of a wire
-  // type
-  // gates_on_arrival() says must be decided as soon as it arrives
-  // (WifiProvider::receive_wifi_data, SerialConsole::process_makera_byte),
-  // this is what runs there: it answers "would this be refused right
-  // now", early enough to refuse the common case -- motion already in
-  // progress when the frame arrives -- before the frame is even queued,
-  // without yet being sure this is the last word. It cannot be the last
-  // word, because the queued frame's own physical effect, if any (a jog,
-  // an automatic tool-change move), is not synchronous with
-  // THEKERNEL->dispatch_console_line() returning for every command: a
-  // plain, non-continuous jog or the automatic tool-change move queues its
-  // move and returns almost at once, well before the move itself finishes.
-  // So motion can still start, from somebody else's already-dispatching
-  // command, in the window between this peek and the frame's own turn at
-  // gate(). Moving
-  // holder() here, on a peek that is not yet the last word, would make
-  // that race worse, not better: a sender that peek() waved through while
-  // genuinely idle would already be recorded as holder by the time
-  // somebody else's motion starts, and gate()'s own "already the holder:
-  // nothing changes" rule would then wave the same frame through again at
-  // dispatch, blocks_transfer() never consulted a second time. Leaving
-  // holder() untouched here is what lets gate()'s later, authoritative
-  // call see the sender as still not the holder, so its own fresh motion
-  // snapshot is the one that decides.
+  // but committing nothing: holder() is left exactly as it was, and the
+  // returned GateResult::holder_changed is always false, whatever gate()
+  // would have answered for the same inputs. Called as soon as a message
+  // arrives, before it is known whether this is the last word on it (a
+  // plain jog or the automatic tool-change move queues its physical move
+  // and returns from dispatch almost at once, well before the move itself
+  // finishes, so motion can still start, from somebody else's already-
+  // dispatching command, before this message's own turn at gate()).
+  // peek() must not commit a seizure of control here: doing so would seat
+  // a sender as holder before the motion it should have been weighed
+  // against had started, and gate()'s own "already the holder: nothing
+  // changes" rule would then wave that sender's frame through at dispatch
+  // regardless of that motion. Leaving holder() untouched is what keeps
+  // gate()'s later, authoritative call seeing the sender as not yet the
+  // holder, so its own fresh motion snapshot is the one that decides.
   GateResult peek(const Identity& sender, Traffic traffic, const MotionState& motion, Mode mode = Mode::single_user,
                   PassiveAction action = PassiveAction::none, PassiveRights rights = PassiveRights::watch_only) const;
 
@@ -332,22 +317,5 @@ ControlToken& shared_control_token();
 // shared singletons, so it stays host-testable against a private
 // ClientTable/ControlToken pair the same way the rest of this file is.
 bool reconcile_holder(ControlToken& token, const ClientTable& table);
-
-// Whether a frame of this wire type (PublicData.h's PTYPE_* constants) must
-// have its control-token-and-motion decision made as soon as it arrives,
-// rather than only once it is finally dispatched. True for an ordinary
-// command (PTYPE_CTRL_MULTI) and a file-transfer start (PTYPE_FILE_START):
-// deciding only once the holder's own jog, probe, homing or automatic
-// tool-change move has finished checks the motion state *after* the move
-// that was supposed to block it, which is exactly the bug this exists to
-// avoid (the machine observation of 3 Oct 2026: a non-holder's command
-// queued during such a move and ran as soon as it ended). False for an
-// automatic-command frame (PTYPE_AUTO_COMMAND): it never consults the
-// control token at all -- classify_automatic_command() decides it on its
-// own -- so there is nothing here to bring forward; it keeps waiting for
-// the dispatch to end exactly as before. Takes the raw wire type rather
-// than makera::Packet so it needs no framing header, the same reason
-// classify_command_line() takes already-unwrapped text.
-bool gates_on_arrival(uint8_t packet_type);
 
 }  // namespace multiclient

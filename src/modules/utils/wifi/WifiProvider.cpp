@@ -488,29 +488,26 @@ void WifiProvider::receive_wifi_data() {
 				continue;
 			}
 
-			// The control-token gate (libs/ControlToken.h) peeks now, against
-			// the motion state right now, for anything multiclient::
-			// gates_on_arrival() says needs it -- not only once this frame
-			// is finally dispatched. A jog, probe, homing or automatic
-			// tool-change move can hold the holder's own dispatch open for
-			// as long as the move takes, and this loop keeps running
-			// throughout it (receive_wifi_data() is re-entered from
-			// on_idle() while that dispatch is in progress, the same
-			// reentrancy the diagnostic reply above already relies on).
-			// Peeking only once the dispatch ends would check the motion
-			// state *after* the move that was supposed to block it, which
-			// is the bug this fixes (machine observation, 3 Oct 2026):
-			// another client's command sat queued during the move and ran
-			// as soon as it was over. refused_on_arrival() sends its own
-			// refusal reply and the frame is dropped here, never queued --
-			// but it only ever refuses; it never seizes control (see
-			// ControlToken::peek()). Whatever it lets through still goes
-			// through gate_dispatch(), for real, at its own turn to
+			// The control-token gate (libs/ControlToken.h) peeks now,
+			// against the motion state right now, for anything but an
+			// automatic command -- not only once this frame is finally
+			// dispatched. A jog, probe, homing or automatic tool-change
+			// move can hold the holder's own dispatch open for as long as
+			// the move takes, and this loop keeps running throughout it
+			// (receive_wifi_data() is re-entered from on_idle() while that
+			// dispatch is in progress, the same reentrancy the diagnostic
+			// reply above already relies on). Peeking only once the
+			// dispatch ends would check the motion state *after* the move
+			// that was supposed to block it. refused_on_arrival() sends
+			// its own refusal reply and the frame is dropped here, never
+			// queued -- but it only ever refuses; it never seizes control
+			// (see ControlToken::peek()). Whatever it lets through still
+			// goes through gate_dispatch(), for real, at its own turn to
 			// dispatch below: a frame can look idle here and still find
 			// motion under way by then, started by someone else's own
 			// command in between, and that second, authoritative check is
 			// what catches it.
-			if (multiclient::gates_on_arrival(packet.type) && refused_on_arrival(client_index, packet)) continue;
+			if (packet.type != PTYPE_AUTO_COMMAND && refused_on_arrival(client_index, packet)) continue;
 
 			command_waiting = true;
 			command_waiting_client = client_index;
@@ -1446,10 +1443,10 @@ void WifiProvider::reply_gate_refusal(int client_index, const multiclient::GateR
 	if (result.reason == multiclient::RefusalReason::not_holder) {
 		printf("error:Refused -- %.*s has control\r\n", static_cast<int>(holder.name_len), holder.name);
 	} else if (holder.identified) {
-		printf("error:Transfer refused -- %.*s has control and an interactive move is in progress\r\n",
+		printf("error:Refused -- %.*s has control and an interactive move is in progress\r\n",
 		       static_cast<int>(holder.name_len), holder.name);
 	} else {
-		printf("error:Transfer refused -- an interactive move is in progress\r\n");
+		printf("error:Refused -- an interactive move is in progress\r\n");
 	}
 	active_reply_client = saved_reply_client;
 }
@@ -1490,10 +1487,10 @@ bool WifiProvider::gate_dispatch(int client_index, const makera::Packet &packet)
 }
 
 // The early half of the same gate: ControlToken::peek(), against the
-// motion state right now, for a frame that has just arrived -- see
-// gates_on_arrival() and the comment at its call site in
-// receive_wifi_data(). Commits nothing (peek() never changes holder(), and
-// there is accordingly never a control-changed event to publish here).
+// motion state right now, for a frame that has just arrived -- see the
+// comment at its call site in receive_wifi_data(). Commits nothing
+// (peek() never changes holder(), and there is accordingly never a
+// control-changed event to publish here).
 // This exists to refuse the common case -- motion already in progress when
 // the frame arrives -- immediately, without waiting for the frame's own
 // turn to dispatch; gate_dispatch() still runs at that later moment

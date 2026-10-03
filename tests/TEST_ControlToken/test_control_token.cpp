@@ -3,7 +3,6 @@
 #include <cstring>
 
 #include "libs/ControlToken.h"
-#include "libs/PublicData.h"
 
 namespace {
 
@@ -1061,41 +1060,16 @@ int main() {
   }
 
   {
-    TEST("gates_on_arrival: an ordinary command and a file-transfer start are gated at arrival");
-    CHECK(multiclient::gates_on_arrival(PTYPE_CTRL_MULTI));
-    CHECK(multiclient::gates_on_arrival(PTYPE_FILE_START));
-  }
-
-  {
-    // PTYPE_AUTO_COMMAND never consults the control token at all (see
-    // classify_automatic_command()), so WifiProvider/SerialConsole must
-    // keep letting it wait for the current dispatch to end, exactly as
-    // before this fix -- gating it early here would be a no-op at best and
-    // a behaviour change at worst.
-    TEST("gates_on_arrival: an automatic command is not, nor is anything handled inline");
-    CHECK(!multiclient::gates_on_arrival(PTYPE_AUTO_COMMAND));
-    CHECK(!multiclient::gates_on_arrival(PTYPE_CTRL_SINGLE));
-    CHECK(!multiclient::gates_on_arrival(PTYPE_HELLO));
-    CHECK(!multiclient::gates_on_arrival(PTYPE_HEARTBEAT));
-    CHECK(!multiclient::gates_on_arrival(PTYPE_CLIENT_LIST_REQ));
-    CHECK(!multiclient::gates_on_arrival(PTYPE_RELAY));
-    CHECK(!multiclient::gates_on_arrival(PTYPE_CONTROL_RELEASE));
-  }
-
-  {
-    // The scenario observed on the machine on 3 Oct 2026: while the holder
-    // (office) is in the middle of a jog, a homing move or an automatic
-    // tool-change move, a non-holder (workshop) sends a status/jog/ls-style
-    // command. WifiProvider/SerialConsole must decide it against the
-    // motion state as it is *right then* -- gates_on_arrival() says
-    // ordinary commands and file-transfer starts are exactly the frames
-    // that must be decided at that moment, not once the move has ended and
-    // the snapshot would read Idle. peek() is what actually runs at
-    // arrival (see WifiProvider::receive_wifi_data() and SerialConsole::
-    // process_makera_byte()): it must refuse here exactly as gate() would,
-    // and -- unlike gate() -- must leave the holder untouched regardless,
-    // since this is not yet the authoritative call (see the next test for
-    // why that distinction matters).
+    // While the holder (office) is in the middle of a jog, a homing move
+    // or an automatic tool-change move, a non-holder (workshop) sends a
+    // status/jog/ls-style command. WifiProvider/SerialConsole must decide
+    // it against the motion state as it is *right then*, not once the
+    // move has ended and the snapshot would read Idle. peek() is what
+    // actually runs at arrival (see WifiProvider::receive_wifi_data() and
+    // SerialConsole::process_makera_byte()): it must refuse here exactly
+    // as gate() would, and -- unlike gate() -- must leave the holder
+    // untouched regardless, since this is not yet the authoritative call
+    // (see the next test for why that distinction matters).
     TEST("peek: M114, a jog press and ls from a non-holder are refused while the holder's move is running");
     multiclient::ControlToken token;
     const multiclient::Identity office = make_identity(1, "Office");
@@ -1104,7 +1078,6 @@ int main() {
 
     multiclient::MotionState jog_in_progress;
     jog_in_progress.run = true;  // $J move: RUN, not playing a job
-    CHECK(multiclient::gates_on_arrival(PTYPE_CTRL_MULTI));
     multiclient::GateResult result = token.peek(workshop, classify("M114"), jog_in_progress);
     CHECK(result.refused);
     CHECK(result.reason == multiclient::RefusalReason::motion_in_progress);
@@ -1187,11 +1160,10 @@ int main() {
     // motion snapshot, is what refuses it -- because workshop was never
     // prematurely made the holder by the earlier peek(), office still is,
     // and office's physical motion is what blocks_transfer() now sees.
-    // Had peek() itself seized control (the earlier, single-gate-call
-    // design this replaced), workshop would already have been "the
-    // holder" by this point and gate()'s own "already the holder: nothing
-    // changes" rule would have let it through regardless of the motion --
-    // exactly the hole this test exists to keep closed.
+    // Had peek() itself seized control, workshop would already have been
+    // "the holder" by this point and gate()'s own "already the holder:
+    // nothing changes" rule would have let it through regardless of the
+    // motion -- exactly the hole this test exists to keep closed.
     TEST("gate: a frame peek() accepted while idle is still refused at dispatch once motion has started");
     multiclient::ControlToken token;
     const multiclient::Identity office = make_identity(1, "Office");
@@ -1221,9 +1193,9 @@ int main() {
     // this: peek() answers exactly what gate() always has for an
     // unidentified sender with nobody holding control -- not refused,
     // whatever the motion state, because there is no holder yet for it to
-    // be weighed against (see gate()'s own comment on this branch). This
-    // is reviewer question (c): a single old controller behaves exactly as
-    // before, through either call.
+    // be weighed against (see gate()'s own comment on this branch). A
+    // single old controller behaves exactly as before, through either
+    // call.
     TEST("peek: a lone unidentified sender is refused nothing, in either mode, matching gate()");
     multiclient::ControlToken token;
     const multiclient::Identity unidentified;  // identified == false
