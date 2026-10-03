@@ -232,15 +232,19 @@ class ControlToken {
   bool has_holder() const { return holder_.identified; }
   const Identity& holder() const { return holder_; }
 
-  // The single gate: called once, from the one place each link's own
-  // command dispatch converges (WifiProvider::on_main_loop,
-  // SerialConsole::on_main_loop), for every message about to be
-  // dispatched. `sender` is the identity of whichever client sent it (an
-  // unidentified sender is always let through unchanged: it cannot yet
-  // hold control, and this firmware answers a hello before anything else
-  // it sends can reach here). `traffic` is already classified by the
-  // caller; `motion` is the caller's own snapshot of the machine right
-  // now.
+  // The authoritative gate: called once a message is actually about to be
+  // dispatched, from the one place each link's own command dispatch
+  // converges (WifiProvider::on_main_loop, SerialConsole::on_main_loop).
+  // This is the only call that commits anything -- it is the one that may
+  // change holder() and that the caller must publish a control-changed
+  // event for when it does. `sender` is the identity of whichever client
+  // sent it (an unidentified sender is always let through unchanged: it
+  // cannot yet hold control, and this firmware answers a hello before
+  // anything else it sends can reach here). `traffic` is already
+  // classified by the caller; `motion` is the caller's own snapshot of the
+  // machine right now -- taken fresh, at this call, which is why a second
+  // call for the same message (see peek() below) can land a different
+  // answer than the first.
   //
   // `mode`, `action` and `rights` all default to their single-user-mode
   // values, so a caller that never passes them -- every existing call, and
@@ -266,6 +270,38 @@ class ControlToken {
   //   released or disconnected.
   GateResult gate(const Identity& sender, Traffic traffic, const MotionState& motion, Mode mode = Mode::single_user,
                    PassiveAction action = PassiveAction::none, PassiveRights rights = PassiveRights::watch_only);
+
+  // The same decision as gate(), against holder() as it stands right now,
+  // but committing nothing: holder() is left exactly as it was, whatever
+  // the result says, and the returned GateResult::holder_changed is always
+  // false, whatever gate() would have answered for the same inputs right
+  // now -- there is nothing for a caller to publish a control-changed
+  // event for, and this makes that impossible to get wrong by reading the
+  // result the way gate()'s callers correctly do. For a message of a wire
+  // type
+  // gates_on_arrival() says must be decided as soon as it arrives
+  // (WifiProvider::receive_wifi_data, SerialConsole::process_makera_byte),
+  // this is what runs there: it answers "would this be refused right
+  // now", early enough to refuse the common case -- motion already in
+  // progress when the frame arrives -- before the frame is even queued,
+  // without yet being sure this is the last word. It cannot be the last
+  // word, because the queued frame's own physical effect, if any (a jog,
+  // an automatic tool-change move), is not synchronous with
+  // THEKERNEL->dispatch_console_line() returning for every command (see
+  // the change explanation, "why peek must not mutate"), so motion can
+  // still start, from somebody else's already-dispatching command, in the
+  // window between this peek and the frame's own turn at gate(). Moving
+  // holder() here, on a peek that is not yet the last word, would make
+  // that race worse, not better: a sender that peek() waved through while
+  // genuinely idle would already be recorded as holder by the time
+  // somebody else's motion starts, and gate()'s own "already the holder:
+  // nothing changes" rule would then wave the same frame through again at
+  // dispatch, blocks_transfer() never consulted a second time. Leaving
+  // holder() untouched here is what lets gate()'s later, authoritative
+  // call see the sender as still not the holder, so its own fresh motion
+  // snapshot is the one that decides.
+  GateResult peek(const Identity& sender, Traffic traffic, const MotionState& motion, Mode mode = Mode::single_user,
+                  PassiveAction action = PassiveAction::none, PassiveRights rights = PassiveRights::watch_only) const;
 
   // Clears the holder unconditionally, with no report of whether anything
   // changed -- for a fresh boot or a protocol switch, where every client's
