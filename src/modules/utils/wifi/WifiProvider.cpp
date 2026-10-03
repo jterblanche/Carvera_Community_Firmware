@@ -488,6 +488,24 @@ void WifiProvider::receive_wifi_data() {
 				continue;
 			}
 
+			// The control-token gate (libs/ControlToken.h) runs now, against
+			// the motion state right now, for anything multiclient::
+			// gates_on_arrival() says to decide at all -- not once this
+			// frame is finally dispatched. A jog, probe, homing or
+			// automatic tool-change move can hold the holder's own dispatch
+			// open for as long as the move takes, and this loop keeps
+			// running throughout it (receive_wifi_data() is re-entered from
+			// on_idle() while that dispatch is in progress, the same
+			// reentrancy the diagnostic reply above already relies on).
+			// Gating only once the dispatch ends would check the motion
+			// state *after* the move that was supposed to block it, which
+			// is the bug this fixes (machine observation, 3 Oct 2026):
+			// another client's command sat queued during the move and ran
+			// as soon as it was over. gate_dispatch() sends its own
+			// refusal reply (with its own active_reply_client save/restore)
+			// and the frame is simply dropped here, never queued.
+			if (multiclient::gates_on_arrival(packet.type) && !gate_dispatch(client_index, packet)) continue;
+
 			command_waiting = true;
 			command_waiting_client = client_index;
 			const bool file_transfer_start = packet.type == PTYPE_FILE_START ||
@@ -1376,15 +1394,18 @@ void WifiProvider::on_idle(void *argument)
 }
 
 // The control-token gate (libs/ControlToken.h): the one place a WiFi
-// client's command is decided against the shared control token, right
-// before it would otherwise be dispatched. See SerialConsole::gate_dispatch()
-// for the same gate on the USB link, against the same
-// multiclient::shared_control_token() -- this is deliberately one function
-// per transport rather than one shared free function, because this side
-// needs a client_index and an active_reply_client save/restore that USB's
-// single-client link has no equivalent for -- but both call into the same
-// ControlToken::gate() decision, so the rule itself lives in exactly one
-// place.
+// client's command is decided against the shared control token. Called from
+// receive_wifi_data(), as soon as multiclient::gates_on_arrival() says a
+// frame's type needs it -- at arrival, not once the frame is finally
+// dispatched, so the decision reflects the motion state at that moment even
+// while another client's dispatch is still running. See
+// SerialConsole::gate_dispatch() for the same gate on the USB link, against
+// the same multiclient::shared_control_token() -- this is deliberately one
+// function per transport rather than one shared free function, because this
+// side needs a client_index and an active_reply_client save/restore that
+// USB's single-client link has no equivalent for -- but both call into the
+// same ControlToken::gate() decision, so the rule itself lives in exactly
+// one place.
 bool WifiProvider::gate_dispatch(int client_index, const makera::Packet &packet) {
 	const multiclient::Traffic traffic = packet.type == PTYPE_FILE_START
 		? multiclient::classify_file_transfer_start()
@@ -1486,12 +1507,11 @@ void WifiProvider::on_main_loop(void *argument)
 				return;
 			}
 
-			// The control-token gate (libs/ControlToken.h): classifies this
-			// command, moves the token in single-user mode, or refuses it
-			// with a visible reason while interactive motion is in
-			// progress. A refused command is never published or dispatched.
-			if (!gate_dispatch(client_index, packet)) return;
-
+			// The control-token gate (libs/ControlToken.h) already ran for
+			// this frame, in receive_wifi_data(), at the moment it arrived
+			// -- see the comment there. A frame that would have been
+			// refused never reaches here: it got its reply and was dropped
+			// before command_waiting was ever set.
 			struct SerialMessage message;
 			message.message.assign(reinterpret_cast<const char *>(packet.data), packet.data_length);
 			message.stream = this;

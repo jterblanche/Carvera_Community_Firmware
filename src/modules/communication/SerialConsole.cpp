@@ -432,9 +432,12 @@ void SerialConsole::on_second_tick(void *argument) {
 }
 
 // The control-token gate (libs/ControlToken.h): the one place the USB
-// link's own command is decided against the shared control token, right
-// before it would otherwise be dispatched. See WifiProvider::gate_dispatch()
-// for the same gate on WiFi, against the same
+// link's own command is decided against the shared control token. Called
+// from process_makera_byte(), as soon as multiclient::gates_on_arrival()
+// says a frame's type needs it -- at arrival, not once the frame is
+// finally dispatched, so the decision reflects the motion state at that
+// moment even while another client's dispatch is still running. See
+// WifiProvider::gate_dispatch() for the same gate on WiFi, against the same
 // multiclient::shared_control_token().
 bool SerialConsole::gate_dispatch(const makera::Packet &packet) {
     const multiclient::Traffic traffic = packet.type == PTYPE_FILE_START
@@ -521,13 +524,11 @@ void SerialConsole::on_main_loop(void * argument){
                 return;
             }
 
-            // The control-token gate (libs/ControlToken.h): classifies
-            // this command, moves the token in single-user mode, or
-            // refuses it with a visible reason while interactive motion is
-            // in progress. A refused command is never published or
-            // dispatched.
-            if (!gate_dispatch(packet)) return;
-
+            // The control-token gate (libs/ControlToken.h) already ran for
+            // this frame, in process_makera_byte(), at the moment it
+            // arrived -- see the comment there. A frame that would have
+            // been refused never reaches here: it got its reply and was
+            // dropped before command_waiting was ever set.
             struct SerialMessage message;
             message.message.assign(reinterpret_cast<const char *>(packet.data), packet.data_length);
             message.stream = this;
@@ -716,6 +717,20 @@ void SerialConsole::process_makera_byte(uint8_t received)
             if (packet.type == PTYPE_FILE_START) makera_file_cancel = true;
             return;
         }
+
+        // The control-token gate (libs/ControlToken.h) runs now, against
+        // the motion state right now, for anything multiclient::
+        // gates_on_arrival() says to decide at all -- not once this frame
+        // is finally dispatched. process_makera_byte() is reached from
+        // on_idle(), which is itself re-entered while a jog, probe, homing
+        // or automatic tool-change move's own dispatch is still running;
+        // gating only once that dispatch ends would check the motion
+        // state *after* the move that was supposed to block it, which is
+        // the bug this fixes (machine observation, 3 Oct 2026). A refused
+        // frame gets its reply from gate_dispatch() and is simply dropped
+        // here, never queued.
+        if (multiclient::gates_on_arrival(packet.type) && !gate_dispatch(packet)) return;
+
         command_waiting = true;
 #if defined(STREAMED_JOB_PLAYBACK)
     } else if (packet.type >= PTYPE_PLAY_VIEW && packet.type <= PTYPE_GOTO_LINES) {
