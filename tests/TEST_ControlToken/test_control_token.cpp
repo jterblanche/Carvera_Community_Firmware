@@ -1062,15 +1062,15 @@ int main() {
   {
     // While the holder (office) is in the middle of a jog, a homing move
     // or an automatic tool-change move, a non-holder (workshop) sends a
-    // status/jog/ls-style command. WifiProvider/SerialConsole must decide
-    // it against the motion state as it is *right then*, not once the
-    // move has ended and the snapshot would read Idle. peek() is what
+    // status/jog/file-delete-style command. WifiProvider/SerialConsole must
+    // decide it against the motion state as it is *right then*, not once
+    // the move has ended and the snapshot would read Idle. peek() is what
     // actually runs at arrival (see WifiProvider::receive_wifi_data() and
     // SerialConsole::process_makera_byte()): it must refuse here exactly
     // as gate() would, and -- unlike gate() -- must leave the holder
     // untouched regardless, since this is not yet the authoritative call
     // (see the next test for why that distinction matters).
-    TEST("peek: M114, a jog press and ls from a non-holder are refused while the holder's move is running");
+    TEST("peek: M114, a jog press and rm from a non-holder are refused while the holder's move is running");
     multiclient::ControlToken token;
     const multiclient::Identity office = make_identity(1, "Office");
     const multiclient::Identity workshop = make_identity(2, "Workshop");
@@ -1089,7 +1089,7 @@ int main() {
 
     multiclient::MotionState homing;
     homing.homing = true;  // $H
-    result = token.peek(workshop, classify("ls"), homing);
+    result = token.peek(workshop, classify("rm test.nc"), homing);
     CHECK(result.refused);
     CHECK(token.holder().id == 1);
 
