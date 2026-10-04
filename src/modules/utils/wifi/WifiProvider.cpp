@@ -736,7 +736,10 @@ void WifiProvider::publish_status_if_due(uint32_t now_us) {
 void WifiProvider::publish_console_line(int client_index, const char* text, size_t length) {
 	const multiclient::Client *client = multiclient::shared_client_table().wifi_at(client_index);
 	if (client == nullptr) return;
+	publish_console_line(multiclient::identity_of(client), text, length);
+}
 
+void WifiProvider::publish_console_line(const multiclient::Identity &identity, const char* text, size_t length) {
 	// A do/while, not a while: an empty line (length 0) is still one
 	// published line, with one empty-text fragment, not zero fragments.
 	uint8_t frame[8 + 1 + multiclient::max_name_length + 1 + multiclient::max_console_line_text_bytes];
@@ -745,7 +748,7 @@ void WifiProvider::publish_console_line(int client_index, const char* text, size
 		const size_t chunk_length = multiclient::console_line_chunk_length(length - offset);
 		const bool more = multiclient::console_line_has_more(length - offset, chunk_length);
 		const size_t frame_length = multiclient::build_console_line_frame(
-			client->id, client->name, client->name_len, text + offset, chunk_length, more, frame, sizeof(frame));
+			identity.id, identity.name, identity.name_len, text + offset, chunk_length, more, frame, sizeof(frame));
 		if (frame_length == 0) return; // should not happen: frame is sized for the worst case
 		THEKERNEL->streams->publish_multiclient(PTYPE_PUBLISHED_LINE, frame, frame_length);
 		offset += chunk_length;
@@ -1438,7 +1441,9 @@ WifiProvider::GateInputs WifiProvider::gate_inputs_for(int client_index, const m
 // that don't speak the framed protocol yet.
 void WifiProvider::reply_gate_refusal(int client_index, const multiclient::GateResult &result) {
 	const int saved_reply_client = active_reply_client;
+	const multiclient::Identity saved_reply_identity = active_reply_identity;
 	active_reply_client = client_index;
+	active_reply_identity = multiclient::identity_of(multiclient::shared_client_table().wifi_at(client_index));
 	const multiclient::Identity &holder = multiclient::shared_control_token().holder();
 	if (result.reason == multiclient::RefusalReason::not_holder) {
 		printf("error:Refused -- %.*s has control\r\n", static_cast<int>(holder.name_len), holder.name);
@@ -1449,6 +1454,7 @@ void WifiProvider::reply_gate_refusal(int client_index, const multiclient::GateR
 		printf("error:Refused -- an interactive move is in progress\r\n");
 	}
 	active_reply_client = saved_reply_client;
+	active_reply_identity = saved_reply_identity;
 }
 
 // The control-token gate (libs/ControlToken.h): the authoritative call,
@@ -1581,7 +1587,16 @@ void WifiProvider::on_main_loop(void *argument)
 			// should be -1 again once it returns. Nested re-entry during
 			// the dispatch (via ON_IDLE) is what on_idle()'s own sites save
 			// and restore around, so it doesn't leak back out to here.
+			//
+			// active_reply_identity is captured here, from the same
+			// wifi_at(client_index) the echo above just used, rather than
+			// looked up again once the dispatch below returns: dispatching
+			// it can run arbitrary code, and PacketMessage()'s own reply at
+			// the end of that dispatch must still be tagged with who sent
+			// this command, not with whatever (or whoever) this table slot
+			// holds by the time the dispatch finishes.
 			active_reply_client = client_index;
+			active_reply_identity = multiclient::identity_of(multiclient::shared_client_table().wifi_at(client_index));
 			THEKERNEL->dispatch_console_line(message);
 			active_reply_client = -1;
 		}
@@ -1677,7 +1692,7 @@ void WifiProvider::PacketMessage(char cmd, const char* s, int size)
 	if (cmd == PTYPE_NORMAL_INFO && communication_protocol == PROTOCOL_MAKERA &&
 	    active_reply_client >= 0 && active_reply_client != automatic_reply_client &&
 	    !StreamOutputPool::is_broadcasting()) {
-		publish_console_line(active_reply_client, s, total_length);
+		publish_console_line(active_reply_identity, s, total_length);
 	}
 }
 

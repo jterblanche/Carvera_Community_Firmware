@@ -150,6 +150,12 @@ private:
     // USB) -- see StreamOutput::publish_multiclient().
     void publish_console_line(int client_index, const char* text, size_t length);
 
+    // Same encoding, addressed by an identity captured earlier instead of
+    // looked up again now. active_reply_client's two sites that cross a
+    // dispatch -- on_main_loop()'s own, and reply_gate_refusal() -- use this
+    // instead, via active_reply_identity below.
+    void publish_console_line(const multiclient::Identity &identity, const char* text, size_t length);
+
     // Sends the wire-framed bytes built from `cmd`+`payload` to every
     // identified WiFi client. The framing helper both publish_console_line
     // (via THEKERNEL->streams->publish_multiclient(), which calls back into
@@ -297,6 +303,20 @@ private:
     // broadcasts, which is what a halt notice or an unprompted kernel
     // message wants.
     int active_reply_client = -1;
+    // The sender's identity, captured by value (multiclient::identity_of())
+    // at the same moment active_reply_client is set to that same sender's
+    // index, from the same wifi_at(client_index) the command's own echo was
+    // tagged with. The reply's publish (PacketMessage(), reached once the
+    // dispatch this opens finishes) uses this snapshot instead of looking
+    // the table up again: dispatching a command runs arbitrary code (the
+    // control-token gate's own control-changed event, a config write, a
+    // file open), and if any of it drops or re-identifies this same slot
+    // before the reply is sent -- a reconnect under the same id, an idle
+    // timeout, a protocol switch -- a fresh lookup at that later point
+    // would tag the reply with whatever is in the slot by then, empty or
+    // someone else's, rather than who actually sent the command being
+    // replied to.
+    multiclient::Identity active_reply_identity;
     // The client whose automatic command is being answered right now, or
     // -1. A reply to it is not published to the other clients.
     int automatic_reply_client = -1;

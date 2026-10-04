@@ -109,6 +109,11 @@ class SerialConsole : public Module, public StreamOutput {
         // equivalent.
         void publish_console_line(const char* text, size_t length);
 
+        // Same encoding, addressed by an identity captured earlier instead
+        // of looked up again now -- see reply_identity below for why the
+        // reply needs this and the command's own echo (above) does not.
+        void publish_console_line(const multiclient::Identity &identity, const char* text, size_t length);
+
         // Classifies `packet` and reads the machine's own motion state
         // right now, into exactly the arguments ControlToken::gate()/
         // peek() take. See WifiProvider::GateInputs/gate_inputs_for() for
@@ -167,6 +172,13 @@ class SerialConsole : public Module, public StreamOutput {
           // reply is not published.
           bool answering_automatic:1;
         };
+        // The sender's identity, captured by value (multiclient::identity_of())
+        // right before a command's own dispatch, from the same usb() the
+        // command's own echo was tagged with -- see WifiProvider's matching
+        // active_reply_identity for why PacketMessage()'s reply publish
+        // uses this snapshot instead of looking the table up again once
+        // the dispatch (which can run arbitrary code) returns.
+        multiclient::Identity reply_identity;
         volatile bool makera_file_cancel;
         volatile bool makera_rx_overflow;
 };

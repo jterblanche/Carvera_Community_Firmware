@@ -465,6 +465,7 @@ SerialConsole::GateInputs SerialConsole::gate_inputs_for(const makera::Packet &p
 // which frames through PacketMessage(), not puts() -- same reasoning as
 // WifiProvider::reply_gate_refusal().
 void SerialConsole::reply_gate_refusal(const multiclient::GateResult &result) {
+    reply_identity = multiclient::identity_of(multiclient::shared_client_table().usb());
     const multiclient::Identity &holder = multiclient::shared_control_token().holder();
     if (result.reason == multiclient::RefusalReason::not_holder) {
         printf("error:Refused -- %.*s has control\r\n", static_cast<int>(holder.name_len), holder.name);
@@ -573,6 +574,14 @@ void SerialConsole::on_main_loop(void * argument){
                 publish_console_line(message.message.c_str(), message.message.size());
             }
 
+            // Captured here, from the same usb() the echo above just used,
+            // rather than looked up again once dispatch_console_line()
+            // returns: dispatching a command can run arbitrary code (a
+            // config write, a file open), and PacketMessage()'s own reply
+            // at the end of that dispatch must still be tagged with who
+            // sent this command, not with whatever this link's identity is
+            // by the time the dispatch finishes.
+            reply_identity = multiclient::identity_of(multiclient::shared_client_table().usb());
             THEKERNEL->dispatch_console_line(message);
         }
         return;
@@ -876,7 +885,7 @@ void SerialConsole::PacketMessage(char cmd, const char* s, int size) {
 
     if (cmd == PTYPE_NORMAL_INFO && communication_protocol == PROTOCOL_MAKERA && !answering_automatic) {
         const size_t total_length = size == 0 ? (s == nullptr ? 0 : strlen(s)) : static_cast<size_t>(size);
-        publish_console_line(s, total_length);
+        publish_console_line(reply_identity, s, total_length);
     }
 }
 
@@ -888,14 +897,17 @@ void SerialConsole::PacketMessage(char cmd, const char* s, int size) {
 void SerialConsole::publish_console_line(const char* text, size_t length) {
     const multiclient::Client *self = multiclient::shared_client_table().usb();
     if (self == nullptr) return;
+    publish_console_line(multiclient::identity_of(self), text, length);
+}
 
+void SerialConsole::publish_console_line(const multiclient::Identity &identity, const char* text, size_t length) {
     uint8_t frame[8 + 1 + multiclient::max_name_length + 1 + multiclient::max_console_line_text_bytes];
     size_t offset = 0;
     do {
         const size_t chunk_length = multiclient::console_line_chunk_length(length - offset);
         const bool more = multiclient::console_line_has_more(length - offset, chunk_length);
         const size_t frame_length = multiclient::build_console_line_frame(
-            self->id, self->name, self->name_len, text + offset, chunk_length, more, frame, sizeof(frame));
+            identity.id, identity.name, identity.name_len, text + offset, chunk_length, more, frame, sizeof(frame));
         if (frame_length == 0) return; // should not happen: frame is sized for the worst case
         THEKERNEL->streams->publish_multiclient(PTYPE_PUBLISHED_LINE, frame, frame_length);
         offset += chunk_length;
