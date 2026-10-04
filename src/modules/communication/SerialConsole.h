@@ -109,13 +109,39 @@ class SerialConsole : public Module, public StreamOutput {
         // equivalent.
         void publish_console_line(const char* text, size_t length);
 
+        // Classifies `packet` and reads the machine's own motion state
+        // right now, into exactly the arguments ControlToken::gate()/
+        // peek() take. See WifiProvider::GateInputs/gate_inputs_for() for
+        // why this is shared between gate_dispatch() and
+        // refused_on_arrival() rather than duplicated.
+        struct GateInputs {
+            multiclient::Traffic traffic;
+            multiclient::PassiveAction action;
+            multiclient::Identity sender;
+            multiclient::MotionState motion;
+        };
+        GateInputs gate_inputs_for(const makera::Packet& packet);
+
         // The control-token gate (libs/ControlToken.h), for the one USB
-        // command about to be dispatched. See
+        // command about to be dispatched -- the authoritative call: the
+        // only one that may change holder() and the only one after which
+        // a control-changed event is published. See
         // WifiProvider::gate_dispatch() for the same gate on the WiFi
         // link, against the same shared ControlToken -- one rule, two thin
         // per-transport call sites, since each transport addresses its own
         // refusal reply differently.
         bool gate_dispatch(const makera::Packet& packet);
+
+        // The early, non-committing half of the same gate, called from
+        // process_makera_byte() as soon as a frame other than an
+        // automatic command arrives. See WifiProvider::refused_on_arrival()
+        // for why this must not be the call that changes holder().
+        bool refused_on_arrival(const makera::Packet& packet);
+
+        // The printf() refusal reply gate_dispatch() and
+        // refused_on_arrival() both send, worded from `result` the same
+        // way regardless of which of the two calls it.
+        void reply_gate_refusal(const multiclient::GateResult& result);
 
         // Runs or refuses one automatic command (PTYPE_AUTO_COMMAND)
         // without the control gate -- see

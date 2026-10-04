@@ -237,15 +237,19 @@ class ControlToken {
   bool has_holder() const { return holder_.identified; }
   const Identity& holder() const { return holder_; }
 
-  // The single gate: called once, from the one place each link's own
-  // command dispatch converges (WifiProvider::on_main_loop,
-  // SerialConsole::on_main_loop), for every message about to be
-  // dispatched. `sender` is the identity of whichever client sent it (an
-  // unidentified sender is always let through unchanged: it cannot yet
-  // hold control, and this firmware answers a hello before anything else
-  // it sends can reach here). `traffic` is already classified by the
-  // caller; `motion` is the caller's own snapshot of the machine right
-  // now.
+  // The authoritative gate: called once a message is actually about to be
+  // dispatched, from the one place each link's own command dispatch
+  // converges (WifiProvider::on_main_loop, SerialConsole::on_main_loop).
+  // This is the only call that commits anything -- it is the one that may
+  // change holder() and that the caller must publish a control-changed
+  // event for when it does. `sender` is the identity of whichever client
+  // sent it (an unidentified sender is always let through unchanged: it
+  // cannot yet hold control, and this firmware answers a hello before
+  // anything else it sends can reach here). `traffic` is already
+  // classified by the caller; `motion` is the caller's own snapshot of the
+  // machine right now -- taken fresh, at this call, which is why a second
+  // call for the same message (see peek() below) can land a different
+  // answer than the first.
   //
   // `mode`, `action` and `rights` all default to their single-user-mode
   // values, so a caller that never passes them -- every existing call, and
@@ -271,6 +275,25 @@ class ControlToken {
   //   released or disconnected.
   GateResult gate(const Identity& sender, Traffic traffic, const MotionState& motion, Mode mode = Mode::single_user,
                    PassiveAction action = PassiveAction::none, PassiveRights rights = PassiveRights::watch_only);
+
+  // The same decision as gate(), against holder() as it stands right now,
+  // but committing nothing: holder() is left exactly as it was, and the
+  // returned GateResult::holder_changed is always false, whatever gate()
+  // would have answered for the same inputs. Called as soon as a message
+  // arrives, before it is known whether this is the last word on it (a
+  // plain jog or the automatic tool-change move queues its physical move
+  // and returns from dispatch almost at once, well before the move itself
+  // finishes, so motion can still start, from somebody else's already-
+  // dispatching command, before this message's own turn at gate()).
+  // peek() must not commit a seizure of control here: doing so would seat
+  // a sender as holder before the motion it should have been weighed
+  // against had started, and gate()'s own "already the holder: nothing
+  // changes" rule would then wave that sender's frame through at dispatch
+  // regardless of that motion. Leaving holder() untouched is what keeps
+  // gate()'s later, authoritative call seeing the sender as not yet the
+  // holder, so its own fresh motion snapshot is the one that decides.
+  GateResult peek(const Identity& sender, Traffic traffic, const MotionState& motion, Mode mode = Mode::single_user,
+                  PassiveAction action = PassiveAction::none, PassiveRights rights = PassiveRights::watch_only) const;
 
   // Clears the holder unconditionally, with no report of whether anything
   // changed -- for a fresh boot or a protocol switch, where every client's

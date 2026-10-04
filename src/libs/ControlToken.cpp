@@ -229,8 +229,17 @@ Identity identity_of(const Client* client) {
   return identity;
 }
 
-GateResult ControlToken::gate(const Identity& sender, Traffic traffic, const MotionState& motion, Mode mode,
-                               PassiveAction action, PassiveRights rights) {
+namespace {
+
+// The gate()/peek() decision, as a pure function of `holder` -- read only,
+// never written here -- and the same inputs gate() takes. gate() calls this
+// with its own holder_ and commits the holder change the result implies;
+// peek() calls it exactly the same way but commits nothing (see peek()'s
+// comment in ControlToken.h for why that matters). Keeping the decision
+// itself in one place, shared by both, is what guarantees they can never
+// quietly drift into disagreeing about what should be refused.
+GateResult decide(const Identity& holder, const Identity& sender, Traffic traffic, const MotionState& motion,
+                   Mode mode, PassiveAction action, PassiveRights rights) {
   GateResult result;
 
   // Automatic traffic is never gated, whoever sends it. This is checked
@@ -248,7 +257,7 @@ GateResult ControlToken::gate(const Identity& sender, Traffic traffic, const Mot
   // machine, so nothing here narrows what a lone old controller may do --
   // with only it connected there is no holder and this refuses nothing.
   if (!sender.identified) {
-    if (holder_.identified) {
+    if (holder.identified) {
       result.refused = true;
       result.reason = RefusalReason::not_holder;
     }
@@ -256,9 +265,9 @@ GateResult ControlToken::gate(const Identity& sender, Traffic traffic, const Mot
   }
 
   // Already the holder: nothing changes, in either mode.
-  if (holder_.identified && holder_.id == sender.id) return result;
+  if (holder.identified && holder.id == sender.id) return result;
 
-  if (mode == Mode::multi_user && holder_.identified) {
+  if (mode == Mode::multi_user && holder.identified) {
     // Someone else holds control. Whatever the machine is doing, only a
     // privileged passive action executes -- and it never takes control,
     // whoever sends it (that is the whole point of it being passive).
@@ -276,8 +285,30 @@ GateResult ControlToken::gate(const Identity& sender, Traffic traffic, const Mot
     return result;
   }
 
-  holder_ = sender;
   result.holder_changed = true;
+  return result;
+}
+
+}  // namespace
+
+GateResult ControlToken::gate(const Identity& sender, Traffic traffic, const MotionState& motion, Mode mode,
+                               PassiveAction action, PassiveRights rights) {
+  GateResult result = decide(holder_, sender, traffic, motion, mode, action, rights);
+  if (result.holder_changed) holder_ = sender;
+  return result;
+}
+
+GateResult ControlToken::peek(const Identity& sender, Traffic traffic, const MotionState& motion, Mode mode,
+                               PassiveAction action, PassiveRights rights) const {
+  GateResult result = decide(holder_, sender, traffic, motion, mode, action, rights);
+  // Forced false, not just left alone: decide() still answers "would this
+  // seize control", because that is also the half of its answer gate()
+  // needs, but peek() commits nothing, so there is nothing for a caller to
+  // publish a control-changed event for. Reporting decide()'s raw answer
+  // here would be a standing invitation for some future caller to read
+  // holder_changed as "go publish the event" the way gate()'s callers
+  // correctly do, and get it wrong.
+  result.holder_changed = false;
   return result;
 }
 
