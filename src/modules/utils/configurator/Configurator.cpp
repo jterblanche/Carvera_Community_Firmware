@@ -8,6 +8,7 @@
 
 #include "libs/Kernel.h"
 #include "Configurator.h"
+#include "libs/ConfigWriteGate.h"
 #include "libs/nuts_bolts.h"
 #include "libs/utils.h"
 #include "libs/SerialMessage.h"
@@ -25,6 +26,11 @@
 #define CONF_SD         2
 #define CONF_EEPROM     3
 
+bool configurator_refuses_write()
+{
+    uint8_t state = THEKERNEL->get_state();
+    return config_write_gate::refuses_write({state == IDLE, state == ALARM, state == SLEEP});
+}
 
 // Output a ConfigValue from the specified ConfigSource to the stream
 void Configurator::config_get_command( string parameters, StreamOutput *stream )
@@ -67,6 +73,11 @@ void Configurator::config_get_command( string parameters, StreamOutput *stream )
 // Write the specified setting to the specified ConfigSource
 void Configurator::config_set_command( string parameters, StreamOutput *stream )
 {
+    if (configurator_refuses_write()) {
+        stream->printf("error:Refused -- can't change settings while the machine is busy\r\n");
+        return;
+    }
+
     string source = shift_parameter(parameters);
     string setting = shift_parameter(parameters);
     string value = shift_parameter(parameters);
@@ -101,6 +112,11 @@ void Configurator::config_set_command( string parameters, StreamOutput *stream )
 // Delete the specified setting from the specified ConfigSource (file only; removes the line from config.txt)
 void Configurator::config_delete_command( string parameters, StreamOutput *stream )
 {
+    if (configurator_refuses_write()) {
+        stream->printf("error:Refused -- can't change settings while the machine is busy\r\n");
+        return;
+    }
+
     string source = shift_parameter(parameters);
     string setting = shift_parameter(parameters);
     if(source.empty() || setting.empty()) {
@@ -125,6 +141,11 @@ void Configurator::config_delete_command( string parameters, StreamOutput *strea
 // Reload config values from the specified ConfigSource, NOTE used for debugging by dumping the config-cache
 void Configurator::config_load_command( string parameters, StreamOutput *stream )
 {
+    if (configurator_refuses_write()) {
+        stream->printf("error:Refused -- can't change settings while the machine is busy\r\n");
+        return;
+    }
+
     string source = shift_parameter(parameters);
     if(source == "load") {
         THEKERNEL->config->config_cache_load();
