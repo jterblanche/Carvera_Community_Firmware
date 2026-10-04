@@ -1596,6 +1596,11 @@ void SimpleShell::enable_4th_hd( string parameters, StreamOutput *stream)
 {
 	if(CARVERA == THEKERNEL->factory_set->MachineModel)
     {
+	    if (configurator_refuses_write()) {
+	        stream->printf("error:Refused -- can't change settings while the machine is busy\r\n");
+	        return;
+	    }
+
 		THEKERNEL->factory_set->FuncSetting |= 0x01;
 	    THEKERNEL->write_Factory_data();
 		// rewrite coordinate.rotation_offset_x to sd    
@@ -1633,6 +1638,11 @@ void SimpleShell::disable_4th_hd( string parameters, StreamOutput *stream)
 {
 	if(CARVERA == THEKERNEL->factory_set->MachineModel)
     {
+	    if (configurator_refuses_write()) {
+	        stream->printf("error:Refused -- can't change settings while the machine is busy\r\n");
+	        return;
+	    }
+
 		THEKERNEL->factory_set->FuncSetting &= ~0x01;
 	    THEKERNEL->write_Factory_data();
 		// rewrite coordinate.rotation_offset_x to sd    
