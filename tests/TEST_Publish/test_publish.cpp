@@ -278,16 +278,51 @@ int main() {
   }
 
   {
-    TEST("build_upload_finished_event writes kind, path, size and checksum_type none");
+    TEST("build_upload_finished_event writes kind, path, size and checksum_type none when given no digest");
     uint8_t out[300];
     const std::size_t len =
-        multiclient::build_upload_finished_event("/sd/gcodes/part.nc", 18, 123456, out, sizeof(out));
+        multiclient::build_upload_finished_event("/sd/gcodes/part.nc", 18, 123456, nullptr, out, sizeof(out));
     CHECK(len == 1 + 1 + 18 + 4 + 1);
     CHECK(out[0] == multiclient::event_kind_upload_finished);
     CHECK(out[1] == 18);
     CHECK(std::memcmp(out + 2, "/sd/gcodes/part.nc", 18) == 0);
     CHECK(read_be32(out + 2 + 18) == 123456u);
     CHECK(out[2 + 18 + 4] == multiclient::event_checksum_none);
+  }
+
+  {
+    TEST("build_upload_finished_event writes checksum_type md5 and the 16 digest bytes when given one");
+    uint8_t digest[multiclient::md5_digest_bytes];
+    for (std::size_t i = 0; i < sizeof(digest); ++i) digest[i] = static_cast<uint8_t>(0x10 + i);
+    uint8_t out[300];
+    const std::size_t len =
+        multiclient::build_upload_finished_event("/sd/gcodes/part.nc", 18, 123456, digest, out, sizeof(out));
+    CHECK(len == 1 + 1 + 18 + 4 + 1 + multiclient::md5_digest_bytes);
+    CHECK(out[0] == multiclient::event_kind_upload_finished);
+    CHECK(out[1] == 18);
+    CHECK(std::memcmp(out + 2, "/sd/gcodes/part.nc", 18) == 0);
+    CHECK(read_be32(out + 2 + 18) == 123456u);
+    CHECK(out[2 + 18 + 4] == multiclient::event_checksum_md5);
+    CHECK(std::memcmp(out + 2 + 18 + 4 + 1, digest, sizeof(digest)) == 0);
+  }
+
+  {
+    TEST("build_upload_finished_event with a digest refuses to write past out_capacity");
+    uint8_t digest[multiclient::md5_digest_bytes] = {};
+    uint8_t out[1 + 1 + 3 + 4 + 1 + multiclient::md5_digest_bytes - 1];  // one byte short
+    CHECK(multiclient::build_upload_finished_event("abc", 3, 1, digest, out, sizeof(out)) == 0);
+  }
+
+  {
+    TEST("decode_md5_hex decodes 32 hex characters into 16 raw bytes, both cases");
+    uint8_t out[multiclient::md5_digest_bytes];
+    multiclient::decode_md5_hex("0123456789abcdeffedcba9876543210", out);
+    const uint8_t expected_lower[multiclient::md5_digest_bytes] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+                                                                     0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10};
+    CHECK(std::memcmp(out, expected_lower, sizeof(out)) == 0);
+
+    multiclient::decode_md5_hex("0123456789ABCDEFFEDCBA9876543210", out);
+    CHECK(std::memcmp(out, expected_lower, sizeof(out)) == 0);
   }
 
   {
@@ -398,7 +433,7 @@ int main() {
   {
     TEST("every event builder refuses to write past out_capacity");
     uint8_t out[3];
-    CHECK(multiclient::build_upload_finished_event("abc", 3, 1, out, sizeof(out)) == 0);
+    CHECK(multiclient::build_upload_finished_event("abc", 3, 1, nullptr, out, sizeof(out)) == 0);
     CHECK(multiclient::build_play_started_event("abc", 3, out, sizeof(out)) == 0);
     CHECK(multiclient::build_job_ended_event("abc", 3, 0, 0, 0, out, sizeof(out)) == 0);
     uint8_t tiny[1];
