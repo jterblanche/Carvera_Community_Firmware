@@ -69,6 +69,41 @@ int main() {
   }
 
   {
+    // Listing the card only reads it, in either mode, whoever sends it and
+    // however it is sent (typed `ls` or the file browser's `ls -e -s
+    // <dir>`) -- so `ls` is on the automatic allow-list like the queries
+    // above, with any arguments.
+    TEST("classify_command_line: listing the card is automatic, with any arguments");
+    CHECK(classify("ls") == multiclient::Traffic::automatic);
+    CHECK(classify("ls /sd/gcodes") == multiclient::Traffic::automatic);
+    CHECK(classify("ls -e -s /sd/gcodes") == multiclient::Traffic::automatic);
+    CHECK(classify("ls -s -e /sd/gcodes") == multiclient::Traffic::automatic);
+    CHECK(classify("  ls\t-e") == multiclient::Traffic::automatic);
+    // A same-prefix word is not `ls` itself -- same boundary rule as
+    // "model"/"models" above.
+    CHECK(classify("lsconfig") == multiclient::Traffic::user_caused);
+    CHECK(classify("lsx /sd/gcodes") == multiclient::Traffic::user_caused);
+  }
+
+  {
+    // md5sum, like ls, only ever reads a file (SimpleShell::md5sum_command
+    // opens, reads and hashes it; it never writes), and the controller's
+    // post-upload integrity check (_verify_uploaded_md5 -> md5Command() ->
+    // "md5sum <path>") is exactly the kind of read-only, connect-time-style
+    // query the automatic allow-list already exists for. Left user-caused,
+    // a passive upload a non-holder is allowed to make at
+    // watch_stop_upload would succeed and then have its own verification
+    // refused by the gate.
+    TEST("classify_command_line: reading a file's md5sum is automatic");
+    CHECK(classify("md5sum /sd/gcodes/job.nc") == multiclient::Traffic::automatic);
+    CHECK(classify("md5sum /sd/firmware.bin") == multiclient::Traffic::automatic);
+    CHECK(classify("  md5sum\t/sd/gcodes/job.nc") == multiclient::Traffic::automatic);
+    // A same-prefix word is not `md5sum` itself.
+    CHECK(classify("md5sums /sd/gcodes/job.nc") == multiclient::Traffic::user_caused);
+    CHECK(classify("md5sumx") == multiclient::Traffic::user_caused);
+  }
+
+  {
     TEST("classify_command_line: reading config values is automatic");
     CHECK(classify("config-get multi_client.mode") == multiclient::Traffic::automatic);
     CHECK(classify("config-get sd multi_client.passive_rights") == multiclient::Traffic::automatic);
@@ -121,7 +156,7 @@ int main() {
     CHECK(classify("resume") == multiclient::Traffic::user_caused);
     CHECK(classify("upload test.nc") == multiclient::Traffic::user_caused);
     CHECK(classify("download test.nc") == multiclient::Traffic::user_caused);
-    CHECK(classify("ls") == multiclient::Traffic::user_caused);
+    CHECK(classify("cat test.nc") == multiclient::Traffic::user_caused);
     CHECK(classify("rm test.nc") == multiclient::Traffic::user_caused);
     CHECK(classify("get temp") == multiclient::Traffic::user_caused);
     CHECK(classify("") == multiclient::Traffic::user_caused);
@@ -150,6 +185,9 @@ int main() {
     CHECK(classify_automatic(0, "config-get sd multi_client.mode") == run);
     CHECK(classify_automatic(0, "config-get-all") == run);
     CHECK(classify_automatic(0, "config-get-all -e") == run);
+    CHECK(classify_automatic(0, "ls") == run);
+    CHECK(classify_automatic(0, "ls -e -s /sd/gcodes") == run);
+    CHECK(classify_automatic(0, "md5sum /sd/gcodes/job.nc") == run);
     CHECK(classify_automatic(0, "config-get-all /sd/other.txt") == refuse);
     CHECK(classify_automatic(0, "config-delete sd multi_client.mode") == refuse);
     CHECK(classify_automatic(0, "config-load") == refuse);
@@ -611,6 +649,44 @@ int main() {
   }
 
   {
+    // Ties classify_command_line() and gate() together for `ls`: unlike the
+    // tool-change confirm below, `ls` is on the automatic allow-list, so a
+    // non-holder's `ls` in multi-user mode is answered without being
+    // refused and without taking control away from the holder -- a
+    // controller without control can always list the card.
+    TEST("gate: ls from a non-holder in multi-user mode never takes or needs control");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    const multiclient::GateResult result =
+        token.gate(workshop, classify("ls -e -s /sd/gcodes"), multiclient::MotionState{}, multiclient::Mode::multi_user);
+    CHECK(!result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);  // still Office
+  }
+
+  {
+    // Same as the ls test above, for md5sum: without this, a passive
+    // upload a non-holder is allowed to make at watch_stop_upload
+    // (PassiveRights::watch_stop_upload) would succeed and then have the
+    // controller's own post-upload verification (_verify_uploaded_md5 ->
+    // "md5sum <path>") refused by the gate.
+    TEST("gate: md5sum from a non-holder in multi-user mode never takes or needs control");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    const multiclient::GateResult result = token.gate(
+        workshop, classify("md5sum /sd/gcodes/job.nc"), multiclient::MotionState{}, multiclient::Mode::multi_user);
+    CHECK(!result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);  // still Office
+  }
+
+  {
     // Ties classify_command_line() and gate() together with the actual
     // manual tool-change confirm text, end to end: a tool-change wait
     // (TOOL/WAIT, run=false) never blocks a transfer (see the test above),
@@ -1057,6 +1133,159 @@ int main() {
     result = token.gate(nobody, classify("config-set sd multi_client.mode multi_user"), multiclient::MotionState{});
     CHECK(result.refused);
     CHECK(token.holder().id == 1);
+  }
+
+  {
+    // While the holder (office) is in the middle of a jog, a homing move
+    // or an automatic tool-change move, a non-holder (workshop) sends a
+    // status/jog/file-delete-style command. WifiProvider/SerialConsole must
+    // decide it against the motion state as it is *right then*, not once
+    // the move has ended and the snapshot would read Idle. peek() is what
+    // actually runs at arrival (see WifiProvider::receive_wifi_data() and
+    // SerialConsole::process_makera_byte()): it must refuse here exactly
+    // as gate() would, and -- unlike gate() -- must leave the holder
+    // untouched regardless, since this is not yet the authoritative call
+    // (see the next test for why that distinction matters).
+    TEST("peek: M114, a jog press and rm from a non-holder are refused while the holder's move is running");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{});
+
+    multiclient::MotionState jog_in_progress;
+    jog_in_progress.run = true;  // $J move: RUN, not playing a job
+    multiclient::GateResult result = token.peek(workshop, classify("M114"), jog_in_progress);
+    CHECK(result.refused);
+    CHECK(result.reason == multiclient::RefusalReason::motion_in_progress);
+    CHECK(token.holder().id == 1);  // control did not move
+
+    result = token.peek(workshop, classify("$J=X10 F500"), jog_in_progress);
+    CHECK(result.refused);
+    CHECK(token.holder().id == 1);
+
+    multiclient::MotionState homing;
+    homing.homing = true;  // $H
+    result = token.peek(workshop, classify("rm test.nc"), homing);
+    CHECK(result.refused);
+    CHECK(token.holder().id == 1);
+
+    multiclient::MotionState m6_move;
+    m6_move.run = true;  // the M6 tool-change move itself, not the wait
+    result = token.peek(workshop, classify("M114"), m6_move);
+    CHECK(result.refused);
+    CHECK(token.holder().id == 1);
+
+    // Once the move has actually finished -- the snapshot a caller would
+    // see if it only checked at dispatch time, after waiting for the
+    // holder's command to finish -- the same command is accepted instead
+    // of refused, which is exactly why the snapshot must be taken at
+    // arrival rather than afterwards. peek() reports the acceptance but
+    // still does not move the holder -- only gate(), at the frame's own
+    // dispatch, does that for real.
+    result = token.peek(workshop, classify("M114"), multiclient::MotionState{});
+    CHECK(!result.refused);
+    CHECK(token.holder().id == 1);  // still office: peek() never commits
+  }
+
+  {
+    // peek() must never move the holder or report holder_changed, in any
+    // of the shapes gate() itself can answer: a plain accept-and-seize, a
+    // motion refusal, a not-holder refusal, and the already-holder no-op.
+    // A caller that accidentally used peek()'s result the way it uses
+    // gate()'s -- publishing a control-changed event, or just trusting
+    // holder_changed -- would silently do nothing, which is the safe
+    // failure direction, but this pins down that holder() itself truly
+    // never moves either.
+    TEST("peek: never moves the holder or reports holder_changed, however it decides");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+
+    multiclient::GateResult result = token.peek(office, multiclient::Traffic::user_caused, multiclient::MotionState{});
+    CHECK(!result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(!token.has_holder());  // control free: peek() did not seize it
+
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{});  // now really seize it
+
+    multiclient::MotionState jog_in_progress;
+    jog_in_progress.run = true;
+    result = token.peek(workshop, multiclient::Traffic::user_caused, jog_in_progress);
+    CHECK(result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);
+
+    result = token.peek(office, multiclient::Traffic::user_caused, jog_in_progress);  // already the holder
+    CHECK(!result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);
+  }
+
+  {
+    // The race a dispatch-time-only check would miss, and why gate() must
+    // run again at dispatch instead of trusting peek()'s answer: workshop's
+    // frame arrives while the machine is genuinely idle (office's own jog
+    // has been queued but has not started moving yet -- a plain, non-
+    // continuous jog returns from dispatch almost as soon as it queues the
+    // move, long before the physical motion is over, so "not currently
+    // dispatching" is not the same as "not currently moving"). peek() sees
+    // Idle and does not refuse -- correctly, for that instant -- but, since
+    // it never commits, office is still the recorded holder when, a moment
+    // later, office's jog actually starts moving. workshop's frame now
+    // reaches its own turn to dispatch: gate(), called again with a fresh
+    // motion snapshot, is what refuses it -- because workshop was never
+    // prematurely made the holder by the earlier peek(), office still is,
+    // and office's physical motion is what blocks_transfer() now sees.
+    // Had peek() itself seized control, workshop would already have been
+    // "the holder" by this point and gate()'s own "already the holder:
+    // nothing changes" rule would have let it through regardless of the
+    // motion -- exactly the hole this test exists to keep closed.
+    TEST("gate: a frame peek() accepted while idle is still refused at dispatch once motion has started");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{});  // office already holds
+
+    // workshop's frame arrives while truly idle (office's jog is queued
+    // but has not started physically moving).
+    multiclient::GateResult peeked = token.peek(workshop, classify("$J=X10 F500"), multiclient::MotionState{});
+    CHECK(!peeked.refused);
+    CHECK(token.holder().id == 1);  // peek() did not touch this
+
+    // office's jog now actually starts moving, before workshop's frame
+    // gets its own turn to dispatch.
+    multiclient::MotionState jog_now_running;
+    jog_now_running.run = true;
+
+    // workshop's frame's real turn: gate(), with the fresh snapshot.
+    multiclient::GateResult dispatched = token.gate(workshop, classify("$J=X10 F500"), jog_now_running);
+    CHECK(dispatched.refused);
+    CHECK(dispatched.reason == multiclient::RefusalReason::motion_in_progress);
+    CHECK(token.holder().id == 1);  // control never moved to workshop
+  }
+
+  {
+    // A lone, never-identified (old) controller is unaffected by any of
+    // this: peek() answers exactly what gate() always has for an
+    // unidentified sender with nobody holding control -- not refused,
+    // whatever the motion state, because there is no holder yet for it to
+    // be weighed against (see gate()'s own comment on this branch). A
+    // single old controller behaves exactly as before, through either
+    // call.
+    TEST("peek: a lone unidentified sender is refused nothing, in either mode, matching gate()");
+    multiclient::ControlToken token;
+    const multiclient::Identity unidentified;  // identified == false
+
+    multiclient::MotionState jog_in_progress;
+    jog_in_progress.run = true;
+    multiclient::GateResult result =
+        token.peek(unidentified, classify("$J=X10 F500"), jog_in_progress, multiclient::Mode::single_user);
+    CHECK(!result.refused);
+    CHECK(!token.has_holder());
+
+    result = token.peek(unidentified, classify("$J=X10 F500"), jog_in_progress, multiclient::Mode::multi_user);
+    CHECK(!result.refused);
+    CHECK(!token.has_holder());
   }
 
   std::printf("%d checks, %d failures\n", checks, failures);

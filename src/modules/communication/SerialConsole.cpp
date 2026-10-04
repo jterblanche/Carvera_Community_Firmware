@@ -431,49 +431,67 @@ void SerialConsole::on_second_tick(void *argument) {
     }
 }
 
-// The control-token gate (libs/ControlToken.h): the one place the USB
-// link's own command is decided against the shared control token, right
-// before it would otherwise be dispatched. See WifiProvider::gate_dispatch()
-// for the same gate on WiFi, against the same
-// multiclient::shared_control_token().
-bool SerialConsole::gate_dispatch(const makera::Packet &packet) {
-    const multiclient::Traffic traffic = packet.type == PTYPE_FILE_START
+// Builds the inputs ControlToken::gate()/peek() need from `packet`, the same
+// way WifiProvider::gate_inputs_for() does for the WiFi link -- shared by
+// gate_dispatch() (the authoritative, dispatch-time call) and
+// refused_on_arrival() (the early, non-committing call at arrival). The
+// motion snapshot is read fresh on every call: see WifiProvider::
+// gate_inputs_for()'s own comment for why that is deliberate.
+SerialConsole::GateInputs SerialConsole::gate_inputs_for(const makera::Packet &packet) {
+    GateInputs in;
+    in.traffic = packet.type == PTYPE_FILE_START
         ? multiclient::classify_file_transfer_start()
         : multiclient::classify_command_line(reinterpret_cast<const char*>(packet.data), packet.data_length);
     // Only meaningful in multi-user mode (see ControlToken::gate()), but
     // classified unconditionally -- it is cheap, and gate() ignores it
     // outside multi-user mode.
-    const multiclient::PassiveAction action =
-        multiclient::classify_passive_action(reinterpret_cast<const char*>(packet.data), packet.data_length);
+    in.action = multiclient::classify_passive_action(reinterpret_cast<const char*>(packet.data), packet.data_length);
+    in.sender = multiclient::identity_of(multiclient::shared_client_table().usb());
 
-    const multiclient::Identity sender = multiclient::identity_of(multiclient::shared_client_table().usb());
-
-    // See WifiProvider::gate_dispatch()'s own comment: RUN alone is
+    // See WifiProvider::gate_inputs_for()'s own comment: RUN alone is
     // ambiguous between a running job, a jog, an MDI move and an automatic
     // tool-change move; is_playing() disambiguates it.
     const uint8_t machine_state = THEKERNEL->get_state();
-    multiclient::MotionState motion;
-    motion.run = (machine_state == RUN);
-    motion.homing = (machine_state == HOME);
-    motion.idle = (machine_state == IDLE);
+    in.motion.run = (machine_state == RUN);
+    in.motion.homing = (machine_state == HOME);
+    in.motion.idle = (machine_state == IDLE);
     bool playing = false;
-    if (PublicData::get_value(player_checksum, is_playing_checksum, &playing)) motion.job_playing = playing;
+    if (PublicData::get_value(player_checksum, is_playing_checksum, &playing)) in.motion.job_playing = playing;
+    return in;
+}
+
+// The printf() refusal reply, worded the same way regardless of whether
+// gate_dispatch() or refused_on_arrival() is the one sending it. printf(),
+// which frames through PacketMessage(), not puts() -- same reasoning as
+// WifiProvider::reply_gate_refusal().
+void SerialConsole::reply_gate_refusal(const multiclient::GateResult &result) {
+    const multiclient::Identity &holder = multiclient::shared_control_token().holder();
+    if (result.reason == multiclient::RefusalReason::not_holder) {
+        printf("error:Refused -- %.*s has control\r\n", static_cast<int>(holder.name_len), holder.name);
+    } else if (holder.identified) {
+        printf("error:Refused -- %.*s has control and an interactive move is in progress\r\n",
+               static_cast<int>(holder.name_len), holder.name);
+    } else {
+        printf("error:Refused -- an interactive move is in progress\r\n");
+    }
+}
+
+// The control-token gate (libs/ControlToken.h): the authoritative call,
+// deciding the USB link's own command against the shared control token for
+// real. Called from on_main_loop(), at the moment this frame is actually
+// about to be dispatched -- the only call of the two (see
+// refused_on_arrival() below) that may change holder() and the only one
+// after which a control-changed event is published. See
+// WifiProvider::gate_dispatch() for the same gate on WiFi, against the same
+// multiclient::shared_control_token().
+bool SerialConsole::gate_dispatch(const makera::Packet &packet) {
+    const GateInputs in = gate_inputs_for(packet);
 
     const multiclient::GateResult result = multiclient::shared_control_token().gate(
-        sender, traffic, motion, multi_client_mode, action, multi_client_passive_rights);
+        in.sender, in.traffic, in.motion, multi_client_mode, in.action, multi_client_passive_rights);
 
     if (result.refused) {
-        // printf(), which frames through PacketMessage(), not puts() --
-        // same reasoning as WifiProvider::gate_dispatch().
-        const multiclient::Identity &holder = multiclient::shared_control_token().holder();
-        if (result.reason == multiclient::RefusalReason::not_holder) {
-            printf("error:Refused -- %.*s has control\r\n", static_cast<int>(holder.name_len), holder.name);
-        } else if (holder.identified) {
-            printf("error:Transfer refused -- %.*s has control and an interactive move is in progress\r\n",
-                   static_cast<int>(holder.name_len), holder.name);
-        } else {
-            printf("error:Transfer refused -- an interactive move is in progress\r\n");
-        }
+        reply_gate_refusal(result);
         return false;
     }
 
@@ -485,6 +503,19 @@ bool SerialConsole::gate_dispatch(const makera::Packet &packet) {
         if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
     }
 
+    return true;
+}
+
+// The early half of the same gate: ControlToken::peek(), against the
+// motion state right now, for a frame that has just arrived -- see
+// WifiProvider::refused_on_arrival()'s own comment, which applies here
+// unchanged (both links share the same ControlToken and the same race).
+bool SerialConsole::refused_on_arrival(const makera::Packet &packet) {
+    const GateInputs in = gate_inputs_for(packet);
+    const multiclient::GateResult result = multiclient::shared_control_token().peek(
+        in.sender, in.traffic, in.motion, multi_client_mode, in.action, multi_client_passive_rights);
+    if (!result.refused) return false;
+    reply_gate_refusal(result);
     return true;
 }
 
@@ -521,11 +552,12 @@ void SerialConsole::on_main_loop(void * argument){
                 return;
             }
 
-            // The control-token gate (libs/ControlToken.h): classifies
-            // this command, moves the token in single-user mode, or
-            // refuses it with a visible reason while interactive motion is
-            // in progress. A refused command is never published or
-            // dispatched.
+            // The control-token gate (libs/ControlToken.h) already peeked
+            // at this frame, in process_makera_byte(), at the moment it
+            // arrived -- see the comment there -- and a frame refused then
+            // never reaches here. gate_dispatch() now runs for real,
+            // against a fresh motion snapshot: see WifiProvider's matching
+            // comment for why the peek is not the last word.
             if (!gate_dispatch(packet)) return;
 
             struct SerialMessage message;
@@ -716,6 +748,23 @@ void SerialConsole::process_makera_byte(uint8_t received)
             if (packet.type == PTYPE_FILE_START) makera_file_cancel = true;
             return;
         }
+
+        // The control-token gate (libs/ControlToken.h) peeks now, against
+        // the motion state right now, for anything but an automatic
+        // command -- not only once this frame is finally dispatched.
+        // process_makera_byte() is reached from on_idle(), which is
+        // itself re-entered while a jog, probe, homing or automatic
+        // tool-change move's own dispatch is still running; peeking only
+        // once that dispatch ends would check the motion state *after*
+        // the move that was supposed to block it. A refused frame gets
+        // its reply from refused_on_arrival() and is dropped here, never
+        // queued -- but it only ever refuses, never seizes control (see
+        // ControlToken::peek()). Whatever it lets through still goes
+        // through gate_dispatch(), for real, at its own turn to dispatch
+        // below: see WifiProvider's matching comment for why that second,
+        // authoritative check is needed and not just belt-and-braces.
+        if (packet.type != PTYPE_AUTO_COMMAND && refused_on_arrival(packet)) return;
+
         command_waiting = true;
 #if defined(STREAMED_JOB_PLAYBACK)
     } else if (packet.type >= PTYPE_PLAY_VIEW && packet.type <= PTYPE_GOTO_LINES) {
