@@ -128,6 +128,19 @@ Traffic classify_command_line(const char* line, std::size_t length) {
   if (word_is(line, length, start, "ftype")) return Traffic::automatic;
   if (word_is(line, length, start, "time")) return Traffic::automatic;
 
+  // Listing the card only reads it (ls_command, SimpleShell.cpp), so it
+  // never needs or takes control, whatever arguments follow -- the file
+  // browser always sends "ls -e -s <dir>", a typed "ls" sends none.
+  if (word_is(line, length, start, "ls")) return Traffic::automatic;
+
+  // md5sum only reads and hashes a file (md5sum_command, SimpleShell.cpp);
+  // a controller without control uses it to verify an upload it was
+  // allowed to make (_verify_uploaded_md5 in main.py, via
+  // Controller.md5Command(), "md5sum <path>"). Left user-caused, that
+  // verification would be refused by the gate right after the passive
+  // upload it is checking succeeded under PassiveRights::watch_stop_upload.
+  if (word_is(line, length, start, "md5sum")) return Traffic::automatic;
+
   // Reading config values changes nothing, so a controller without control
   // may do it. config-get-all counts only without a file name: given one, it
   // reads that file from the card rather than the config.
