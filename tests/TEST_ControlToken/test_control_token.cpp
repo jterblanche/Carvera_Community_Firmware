@@ -69,6 +69,41 @@ int main() {
   }
 
   {
+    // Listing the card only reads it, in either mode, whoever sends it and
+    // however it is sent (typed `ls` or the file browser's `ls -e -s
+    // <dir>`) -- so `ls` is on the automatic allow-list like the queries
+    // above, with any arguments.
+    TEST("classify_command_line: listing the card is automatic, with any arguments");
+    CHECK(classify("ls") == multiclient::Traffic::automatic);
+    CHECK(classify("ls /sd/gcodes") == multiclient::Traffic::automatic);
+    CHECK(classify("ls -e -s /sd/gcodes") == multiclient::Traffic::automatic);
+    CHECK(classify("ls -s -e /sd/gcodes") == multiclient::Traffic::automatic);
+    CHECK(classify("  ls\t-e") == multiclient::Traffic::automatic);
+    // A same-prefix word is not `ls` itself -- same boundary rule as
+    // "model"/"models" above.
+    CHECK(classify("lsconfig") == multiclient::Traffic::user_caused);
+    CHECK(classify("lsx /sd/gcodes") == multiclient::Traffic::user_caused);
+  }
+
+  {
+    // md5sum, like ls, only ever reads a file (SimpleShell::md5sum_command
+    // opens, reads and hashes it; it never writes), and the controller's
+    // post-upload integrity check (_verify_uploaded_md5 -> md5Command() ->
+    // "md5sum <path>") is exactly the kind of read-only, connect-time-style
+    // query the automatic allow-list already exists for. Left user-caused,
+    // a passive upload a non-holder is allowed to make at
+    // watch_stop_upload would succeed and then have its own verification
+    // refused by the gate.
+    TEST("classify_command_line: reading a file's md5sum is automatic");
+    CHECK(classify("md5sum /sd/gcodes/job.nc") == multiclient::Traffic::automatic);
+    CHECK(classify("md5sum /sd/firmware.bin") == multiclient::Traffic::automatic);
+    CHECK(classify("  md5sum\t/sd/gcodes/job.nc") == multiclient::Traffic::automatic);
+    // A same-prefix word is not `md5sum` itself.
+    CHECK(classify("md5sums /sd/gcodes/job.nc") == multiclient::Traffic::user_caused);
+    CHECK(classify("md5sumx") == multiclient::Traffic::user_caused);
+  }
+
+  {
     TEST("classify_command_line: reading config values is automatic");
     CHECK(classify("config-get multi_client.mode") == multiclient::Traffic::automatic);
     CHECK(classify("config-get sd multi_client.passive_rights") == multiclient::Traffic::automatic);
@@ -121,7 +156,7 @@ int main() {
     CHECK(classify("resume") == multiclient::Traffic::user_caused);
     CHECK(classify("upload test.nc") == multiclient::Traffic::user_caused);
     CHECK(classify("download test.nc") == multiclient::Traffic::user_caused);
-    CHECK(classify("ls") == multiclient::Traffic::user_caused);
+    CHECK(classify("cat test.nc") == multiclient::Traffic::user_caused);
     CHECK(classify("rm test.nc") == multiclient::Traffic::user_caused);
     CHECK(classify("get temp") == multiclient::Traffic::user_caused);
     CHECK(classify("") == multiclient::Traffic::user_caused);
@@ -150,6 +185,9 @@ int main() {
     CHECK(classify_automatic(0, "config-get sd multi_client.mode") == run);
     CHECK(classify_automatic(0, "config-get-all") == run);
     CHECK(classify_automatic(0, "config-get-all -e") == run);
+    CHECK(classify_automatic(0, "ls") == run);
+    CHECK(classify_automatic(0, "ls -e -s /sd/gcodes") == run);
+    CHECK(classify_automatic(0, "md5sum /sd/gcodes/job.nc") == run);
     CHECK(classify_automatic(0, "config-get-all /sd/other.txt") == refuse);
     CHECK(classify_automatic(0, "config-delete sd multi_client.mode") == refuse);
     CHECK(classify_automatic(0, "config-load") == refuse);
@@ -608,6 +646,44 @@ int main() {
     CHECK(!result.refused);
     CHECK(result.holder_changed);
     CHECK(token.holder().id == 2);
+  }
+
+  {
+    // Ties classify_command_line() and gate() together for `ls`: unlike the
+    // tool-change confirm below, `ls` is on the automatic allow-list, so a
+    // non-holder's `ls` in multi-user mode is answered without being
+    // refused and without taking control away from the holder -- a
+    // controller without control can always list the card.
+    TEST("gate: ls from a non-holder in multi-user mode never takes or needs control");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    const multiclient::GateResult result =
+        token.gate(workshop, classify("ls -e -s /sd/gcodes"), multiclient::MotionState{}, multiclient::Mode::multi_user);
+    CHECK(!result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);  // still Office
+  }
+
+  {
+    // Same as the ls test above, for md5sum: without this, a passive
+    // upload a non-holder is allowed to make at watch_stop_upload
+    // (PassiveRights::watch_stop_upload) would succeed and then have the
+    // controller's own post-upload verification (_verify_uploaded_md5 ->
+    // "md5sum <path>") refused by the gate.
+    TEST("gate: md5sum from a non-holder in multi-user mode never takes or needs control");
+    multiclient::ControlToken token;
+    const multiclient::Identity office = make_identity(1, "Office");
+    const multiclient::Identity workshop = make_identity(2, "Workshop");
+    token.gate(office, multiclient::Traffic::user_caused, multiclient::MotionState{}, multiclient::Mode::multi_user);
+
+    const multiclient::GateResult result = token.gate(
+        workshop, classify("md5sum /sd/gcodes/job.nc"), multiclient::MotionState{}, multiclient::Mode::multi_user);
+    CHECK(!result.refused);
+    CHECK(!result.holder_changed);
+    CHECK(token.holder().id == 1);  // still Office
   }
 
   {
