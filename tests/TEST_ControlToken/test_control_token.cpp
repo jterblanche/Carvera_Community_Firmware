@@ -464,6 +464,63 @@ int main() {
   }
 
   {
+    // See docs/testing: a published reply was carrying an empty sender
+    // name while the published copy of the command that caused it carried
+    // the right one. Both are tagged by looking the sender up in the
+    // client table -- the echo right away, the reply only once dispatching
+    // the command (which can run arbitrary code: a config write, a file
+    // open, the control-token gate's own control-changed event) returns.
+    // identity_of() returning a plain value copy, not a reference into the
+    // table, is what makes capturing it once -- at the same time as the
+    // echo, before any of that runs -- and reusing it for the reply safe
+    // against the slot being cleared or reused in between.
+    TEST("identity_of: a captured snapshot survives the wifi slot being cleared");
+    multiclient::ClientTable table;
+    multiclient::Address address;
+    address.ip[0] = 10;
+    address.port = 2222;
+    const int index = table.add_wifi(address, /*now_us=*/1000);
+    multiclient::set_identity(*table.wifi_at(index), 7, "PC", 2);
+
+    const multiclient::Identity captured = multiclient::identity_of(table.wifi_at(index));
+
+    // Something during that command's own dispatch drops the slot -- a
+    // disconnect, a reconnect under the same id, a protocol switch.
+    table.clear_wifi();
+
+    // A fresh lookup at reply time now finds nothing there: looking the
+    // table up again at that point, instead of reusing what was captured
+    // at acceptance time, is the bug.
+    CHECK(table.wifi_at(index) == nullptr);
+
+    // The captured snapshot is unaffected.
+    CHECK(captured.identified);
+    CHECK(captured.id == 7);
+    CHECK(captured.name_len == 2);
+    CHECK(std::memcmp(captured.name, "PC", 2) == 0);
+  }
+
+  {
+    TEST("identity_of: a captured snapshot survives the usb slot being re-identified");
+    multiclient::ClientTable table;
+    table.set_usb_present(true, 0);
+    multiclient::set_identity(*table.usb(), 11, "Laptop", 6);
+
+    const multiclient::Identity captured = multiclient::identity_of(table.usb());
+
+    // An idle timeout or a protocol switch clears the identity mid-
+    // dispatch, and the link re-identifies under a different name before
+    // the reply would be sent.
+    table.clear_usb_identity();
+    multiclient::set_identity(*table.usb(), 99, "Someone else", 12);
+
+    CHECK(captured.identified);
+    CHECK(captured.id == 11);
+    CHECK(captured.name_len == 6);
+    CHECK(std::memcmp(captured.name, "Laptop", 6) == 0);
+  }
+
+  {
     TEST("gate: automatic traffic never moves the token, even with nobody holding it");
     multiclient::ControlToken token;
     const multiclient::Identity office = make_identity(1, "Office");
