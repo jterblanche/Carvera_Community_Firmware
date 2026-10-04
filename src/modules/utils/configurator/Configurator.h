@@ -14,6 +14,15 @@ using std::string;
 
 class StreamOutput;
 
+// Whether a settings write should be refused right now because the machine
+// is busy (see libs/ConfigWriteGate.h): Idle, Alarm and Sleep accept it,
+// same as always; every other state -- a job running or paused, homing, a
+// jog, probe or move in progress, or a tool change under way -- refuses it.
+// Shared by Configurator's own write commands below and by SimpleShell's
+// config_restore_command/config_default_command, which are not part of this
+// class but write settings the same way.
+bool configurator_refuses_write();
+
 class Configurator
 {
 public:

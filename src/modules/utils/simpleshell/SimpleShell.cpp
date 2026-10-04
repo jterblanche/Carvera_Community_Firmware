@@ -3268,6 +3268,11 @@ void SimpleShell::config_get_all_command( string parameters, StreamOutput *strea
 // restore config from default
 void SimpleShell::config_restore_command( string parameters, StreamOutput *stream )
 {
+    if (configurator_refuses_write()) {
+        stream->printf("error:Refused -- can't change settings while the machine is busy\r\n");
+        return;
+    }
+
     // Get parameters ( filename and line limit )
 	string current_filename = "/sd/config.txt";
     string default_filename = "/sd/config.default";
@@ -3297,6 +3302,11 @@ void SimpleShell::config_restore_command( string parameters, StreamOutput *strea
 // save current config file to default
 void SimpleShell::config_default_command( string parameters, StreamOutput *stream )
 {
+    if (configurator_refuses_write()) {
+        stream->printf("error:Refused -- can't change settings while the machine is busy\r\n");
+        return;
+    }
+
     // Get parameters ( filename and line limit )
 	string current_filename = "/sd/config.txt";
     string default_filename = "/sd/config.default";
