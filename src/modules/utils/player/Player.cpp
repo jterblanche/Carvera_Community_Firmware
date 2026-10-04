@@ -2056,6 +2056,10 @@ _exit:
 	return 0;
 }
 
+// Forward declaration: defined below, alongside fill_md5_from_path(), but
+// needed here too, for the .md5 sidecar upload_command() reads on success.
+static bool md5_digest_usable(const char *s);
+
 void Player::upload_command( string parameters, StreamOutput *stream )
 {
     uint32_t u32filesize = 0;
@@ -2537,17 +2541,34 @@ upload_success:
     }
 	stream->printf("Info: upload success: %s.\r\n", desfilename.c_str());
 
-	// Publishes the upload-finished event (the 0x68 event, kind 1) to
-	// every identified client. checksum_type is always "none" here: the
-	// MD5 this upload was verified against (above) is only ever compared,
-	// not kept anywhere after the fact, and recomputing it again just for
-	// this event would redo real work for a field where checksum_type 0 is
-	// already a defined, valid value ("none").
+	// Publishes the upload-finished event (the 0x68 event, kind 1) to every
+	// identified client, with the uploader's own MD5 digest when the .md5
+	// sidecar this upload wrote (above, md5_filename) holds one -- the same
+	// 32 hex characters download_command() already trusts
+	// (md5_digest_usable()), decoded to raw bytes without re-hashing the
+	// file. Falls back to checksum_type none when the sidecar is missing or
+	// unusable, for example the Smoothie-protocol upload of firmware.bin,
+	// which never gets one written (above).
 	{
 		const uint8_t path_len = multiclient::event_path_length(desfilename.c_str(), desfilename.size());
-		uint8_t payload[2 + multiclient::max_event_path_length + 4 + 1];
-		const size_t length =
-			multiclient::build_upload_finished_event(desfilename.c_str(), path_len, u32filesize, payload, sizeof(payload));
+		uint8_t payload[2 + multiclient::max_event_path_length + 4 + 1 + multiclient::md5_digest_bytes];
+
+		char md5_hex[32];
+		bool have_digest = false;
+		FILE *fd_md5_read = fwfs::fopen(md5_filename.c_str(), "rb");
+		if (fd_md5_read != NULL) {
+			have_digest = fwfs::fread(md5_hex, sizeof(char), sizeof(md5_hex), fd_md5_read) == sizeof(md5_hex)
+			           && md5_digest_usable(md5_hex);
+			fwfs::fclose(fd_md5_read);
+		}
+
+		uint8_t digest[multiclient::md5_digest_bytes];
+		if (have_digest) {
+			multiclient::decode_md5_hex(md5_hex, digest);
+		}
+
+		const size_t length = multiclient::build_upload_finished_event(
+			desfilename.c_str(), path_len, u32filesize, have_digest ? digest : NULL, payload, sizeof(payload));
 		if (length != 0) {
 			THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
 			multiclient::remember_announced_file(desfilename.c_str(), path_len);

@@ -63,6 +63,20 @@ uint8_t event_path_length(const char* path, std::size_t length) {
 }
 
 namespace {
+uint8_t hex_nibble(char c) {
+  if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(c - 'a' + 10);
+  if (c >= 'A' && c <= 'F') return static_cast<uint8_t>(c - 'A' + 10);
+  return static_cast<uint8_t>(c - '0');
+}
+}  // namespace
+
+void decode_md5_hex(const char* hex, uint8_t* out16) {
+  for (std::size_t i = 0; i < md5_digest_bytes; ++i) {
+    out16[i] = static_cast<uint8_t>((hex_nibble(hex[2 * i]) << 4) | hex_nibble(hex[2 * i + 1]));
+  }
+}
+
+namespace {
 // Appends kind(1) + path_len(1) + path to `out` at offset 0. Returns the
 // offset just past the path, or 0 if it did not fit -- every event payload
 // in this file starts this way.
@@ -77,14 +91,19 @@ std::size_t append_kind_and_path(uint8_t kind, const char* path, uint8_t path_le
 }
 }  // namespace
 
-std::size_t build_upload_finished_event(const char* path, uint8_t path_len, uint32_t size, uint8_t* out,
-                                         std::size_t out_capacity) {
+std::size_t build_upload_finished_event(const char* path, uint8_t path_len, uint32_t size,
+                                         const uint8_t* md5_digest, uint8_t* out, std::size_t out_capacity) {
   std::size_t offset = append_kind_and_path(event_kind_upload_finished, path, path_len, out, out_capacity);
   if (offset == 0) return 0;
-  if (offset + 4 + 1 > out_capacity) return 0;
+  const std::size_t checksum_length = md5_digest != nullptr ? md5_digest_bytes : 0;
+  if (offset + 4 + 1 + checksum_length > out_capacity) return 0;
   for (int i = 0; i < 4; ++i) out[offset + i] = static_cast<uint8_t>(size >> (8 * (3 - i)));
   offset += 4;
-  out[offset++] = event_checksum_none;
+  out[offset++] = md5_digest != nullptr ? event_checksum_md5 : event_checksum_none;
+  if (checksum_length != 0) {
+    std::memcpy(out + offset, md5_digest, checksum_length);
+    offset += checksum_length;
+  }
   return offset;
 }
 

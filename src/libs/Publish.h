@@ -100,13 +100,20 @@ constexpr uint8_t event_kind_control_changed = 5;
 constexpr uint8_t event_kind_client_joined = 6;
 constexpr uint8_t event_kind_client_left = 7;
 
-// event_kind_upload_finished's checksum_type. This build always writes
-// event_checksum_none: the upload path already computes and verifies an MD5
-// against the uploader's own checksum, then discards it, and recomputing it
-// here would re-read the whole file off the card just to fill a field the
-// protocol defines as an explicitly valid "none", not "not implemented yet".
+// event_kind_upload_finished's checksum_type: event_checksum_none when the
+// upload path found no usable digest to publish, event_checksum_md5 when it
+// did (16 raw bytes follow the checksum_type byte).
 constexpr uint8_t event_checksum_none = 0;
 constexpr uint8_t event_checksum_md5 = 1;
+
+// Raw byte length of an MD5 digest, as published after event_checksum_md5.
+constexpr std::size_t md5_digest_bytes = 16;
+
+// Decodes 32 hex characters into the 16 raw bytes they represent, two
+// characters per byte, most significant nibble first. The caller must
+// already know `hex` holds 32 valid hex characters (upper or lower case) --
+// this does not re-validate them.
+void decode_md5_hex(const char* hex, uint8_t* out16);
 
 // The u8 length prefix's own ceiling for a path in an event payload.
 constexpr std::size_t max_event_path_length = 250;
@@ -123,10 +130,13 @@ uint8_t clamp_event_path_length(std::size_t length);
 uint8_t event_path_length(const char* path, std::size_t length);
 
 // "upload finished": kind(1) + path_len(1) + path + size(4, BE) +
-// checksum_type(1) + checksum(0 B, since checksum_type is always none
-// here). Returns the payload length, or 0 if it would not fit.
-std::size_t build_upload_finished_event(const char* path, uint8_t path_len, uint32_t size, uint8_t* out,
-                                         std::size_t out_capacity);
+// checksum_type(1) + checksum(0 or md5_digest_bytes B). `md5_digest` is a
+// pointer to 16 raw bytes already decoded from the upload's own .md5
+// sidecar (decode_md5_hex() above) when the upload path found a usable one,
+// or nullptr when it did not -- this never hashes the file itself. Returns
+// the payload length, or 0 if it would not fit.
+std::size_t build_upload_finished_event(const char* path, uint8_t path_len, uint32_t size,
+                                         const uint8_t* md5_digest, uint8_t* out, std::size_t out_capacity);
 
 // "play started": kind(1) + path_len(1) + path.
 std::size_t build_play_started_event(const char* path, uint8_t path_len, uint8_t* out, std::size_t out_capacity);
