@@ -1986,7 +1986,7 @@ int Player::decompress(string sfilename, string dfilename, uint32_t sfilesize, S
 		u32BlockSize = u8ReadBuffer_hdr[0] * (1 << 24) + u8ReadBuffer_hdr[1] * (1 << 16) + u8ReadBuffer_hdr[2] * (1 << 8) + u8ReadBuffer_hdr[3];
 		if(!u32BlockSize)
 		{
-            if (communication_protocol == PROTOCOL_SMOOTHIE) {
+            if (communication_protocol == PROTOCOL_MAKERA) {
 			    sprintf(error_msg, "Error: decompress file error,bad block num.");
             }
             goto _exit;
@@ -1995,7 +1995,7 @@ int Player::decompress(string sfilename, string dfilename, uint32_t sfilesize, S
 		u32DcmprsSize = qlz_decompress((const char *)xbuff, fbuff, &s_stDecompressState);
 		if(!u32DcmprsSize)
 		{
-            if (communication_protocol == PROTOCOL_SMOOTHIE) {
+            if (communication_protocol == PROTOCOL_MAKERA) {
                 sprintf(error_msg, "Error: decompress file error,bad decompress size.");
             }
 			goto _exit;
