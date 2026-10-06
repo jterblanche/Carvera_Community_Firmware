@@ -20,6 +20,8 @@
 #include "FileConfigSource.h"
 #include "ConfigValue.h"
 #include "ConfigCache.h"
+#include "PublicData.h"
+#include "PlayerPublicAccess.h"
 
 #define CONF_NONE       0
 #define CONF_ROM        1
@@ -29,7 +31,10 @@
 bool configurator_refuses_write()
 {
     uint8_t state = THEKERNEL->get_state();
-    return config_write_gate::refuses_write({state == IDLE, state == ALARM, state == SLEEP});
+    void *return_value = nullptr;
+    bool playing = PublicData::get_value(player_checksum, is_playing_checksum, &return_value) &&
+                   *static_cast<bool *>(return_value);
+    return config_write_gate::refuses_write({state == IDLE, state == ALARM, state == SLEEP, playing});
 }
 
 // Output a ConfigValue from the specified ConfigSource to the stream
