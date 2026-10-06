@@ -16,6 +16,7 @@ using std::string;
 #include "libs/MakeraControl.h"
 #include "libs/MakeraFrame.h"
 #include "libs/ClientTable.h"
+#include "libs/JobStartWait.h"
 #include "libs/nuts_bolts.h"
 #include "SerialConsole.h"
 #include "libs/RingBuffer.h"
@@ -484,6 +485,14 @@ void SerialConsole::reply_gate_refusal(const multiclient::GateResult &result) {
 // WifiProvider::gate_dispatch() for the same gate on WiFi, against the same
 // multiclient::shared_control_token().
 bool SerialConsole::gate_dispatch(const makera::Packet &packet) {
+    // Checked before the control gate, so a refused command never moves
+    // control either.
+    if (packet.type == PTYPE_CTRL_MULTI && multiclient::shared_job_start_wait().pending() &&
+        multiclient::refused_while_start_pending(reinterpret_cast<const char*>(packet.data), packet.data_length)) {
+        printf("%s", multiclient::job_start_pending_reply);
+        return false;
+    }
+
     const GateInputs in = gate_inputs_for(packet);
 
     const multiclient::GateResult result = multiclient::shared_control_token().gate(
@@ -723,6 +732,13 @@ void SerialConsole::process_makera_byte(uint8_t received)
         return;
     }
 
+    // Never touches the control token: see WifiProvider's matching case.
+    if (packet.type == PTYPE_JOB_START_READY) {
+        multiclient::Client *self = multiclient::shared_client_table().usb();
+        if (self != nullptr) multiclient::shared_job_start_wait().mark_ready(*self, packet.data, packet.data_length);
+        return;
+    }
+
     if (packet.type == PTYPE_RELAY) {
         handle_relay(packet.data, packet.data_length);
         return;
@@ -806,7 +822,8 @@ void SerialConsole::handle_hello(const uint8_t* payload, uint16_t payload_length
         if (table.has_old_client(now_us, -1, /*exclude_usb=*/true)) {
             uint8_t ack[multiclient::hello_ack_length];
             const std::size_t ack_len = multiclient::build_hello_ack(
-                ack, multiclient::hello_result_old_controller_present, hello_ack_mode());
+                ack, multiclient::hello_result_old_controller_present, hello_ack_mode(),
+                multiclient::shared_job_start_wait().hello_ack_features());
             PacketMessage(PTYPE_HELLO_ACK, reinterpret_cast<const char*>(ack), static_cast<int>(ack_len));
             return;
         }
@@ -820,10 +837,11 @@ void SerialConsole::handle_hello(const uint8_t* payload, uint16_t payload_length
             if (joined_length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, joined_payload, joined_length);
         }
     }
+    self->features = hello.features;
 
     uint8_t ack[multiclient::hello_ack_length];
-    const std::size_t ack_len =
-        multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, hello_ack_mode());
+    const std::size_t ack_len = multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, hello_ack_mode(),
+                                                             multiclient::shared_job_start_wait().hello_ack_features());
     PacketMessage(PTYPE_HELLO_ACK, reinterpret_cast<const char*>(ack), static_cast<int>(ack_len));
 }
 

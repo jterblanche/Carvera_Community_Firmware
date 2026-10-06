@@ -143,23 +143,57 @@ int main() {
   }
 
   {
-    TEST("build_hello_ack writes protocol_version, result and mode");
-    uint8_t ack[multiclient::hello_ack_length];
-    const std::size_t len =
-        multiclient::build_hello_ack(ack, multiclient::hello_result_old_controller_present, multiclient::hello_mode_single_user);
-    CHECK(len == 3);
-    CHECK(ack[0] == 1);
-    CHECK(ack[1] == multiclient::hello_result_old_controller_present);
-    CHECK(ack[2] == multiclient::hello_mode_single_user);
+    TEST("a hello that ends at the link field has no features");
+    const auto payload = hello_payload(1, 1, "Office PC", 0);
+    multiclient::Hello hello;
+    hello.features = 0xFF;
+    CHECK(multiclient::parse_hello(payload.data(), payload.size(), hello));
+    CHECK(hello.features == 0);
   }
 
   {
-    TEST("build_hello_ack reports multi-user mode when asked to");
+    TEST("the byte after the link field is the features byte");
+    auto payload = hello_payload(1, 1, "Office PC", 1);
+    payload.push_back(multiclient::hello_feature_job_start_wait);
+    multiclient::Hello hello;
+    CHECK(multiclient::parse_hello(payload.data(), payload.size(), hello));
+    CHECK(hello.link == multiclient::Link::usb);
+    CHECK(hello.features == multiclient::hello_feature_job_start_wait);
+    CHECK(multiclient::hello_feature_job_start_wait == 0x01);
+  }
+
+  {
+    TEST("bytes after the features byte are ignored");
+    auto payload = hello_payload(1, 1, "", 0);
+    payload.push_back(0x03);
+    payload.push_back(0xAA);
+    multiclient::Hello hello;
+    CHECK(multiclient::parse_hello(payload.data(), payload.size(), hello));
+    CHECK(hello.features == 0x03);
+  }
+
+  {
+    TEST("build_hello_ack writes protocol_version, result, mode and features");
     uint8_t ack[multiclient::hello_ack_length];
-    const std::size_t len =
-        multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, multiclient::hello_mode_multi_user);
-    CHECK(len == 3);
+    const std::size_t len = multiclient::build_hello_ack(ack, multiclient::hello_result_old_controller_present,
+                                                         multiclient::hello_mode_single_user, 0);
+    CHECK(len == 4);
+    CHECK(multiclient::hello_ack_length == 4);
+    CHECK(ack[0] == 1);
+    CHECK(ack[1] == multiclient::hello_result_old_controller_present);
+    CHECK(ack[2] == multiclient::hello_mode_single_user);
+    CHECK(ack[3] == 0);
+  }
+
+  {
+    TEST("build_hello_ack reports multi-user mode and the job-start wait when asked to");
+    uint8_t ack[multiclient::hello_ack_length];
+    const std::size_t len = multiclient::build_hello_ack(ack, multiclient::hello_result_accepted,
+                                                         multiclient::hello_mode_multi_user,
+                                                         multiclient::hello_feature_job_start_wait);
+    CHECK(len == 4);
     CHECK(ack[2] == multiclient::hello_mode_multi_user);
+    CHECK(ack[3] == multiclient::hello_feature_job_start_wait);
     CHECK(multiclient::hello_mode_multi_user != multiclient::hello_mode_single_user);
   }
 
@@ -409,9 +443,10 @@ int main() {
     CHECK(sent(empty_status));
 
     uint8_t ack[multiclient::hello_ack_length];
-    const std::size_t ack_len = multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, 0);
+    const std::size_t ack_len = multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, 0, 0);
     CHECK(sent(frame(PTYPE_HELLO_ACK, std::vector<uint8_t>(ack, ack + ack_len))));
-    multiclient::build_hello_ack(ack, multiclient::hello_result_old_controller_present, 0);
+    multiclient::build_hello_ack(ack, multiclient::hello_result_old_controller_present, 0,
+                                 multiclient::hello_feature_job_start_wait);
     CHECK(sent(frame(PTYPE_HELLO_ACK, std::vector<uint8_t>(ack, ack + ack_len))));
 
     CHECK(!sent(frame(PTYPE_STATUS_RES, text("<Idle|MPos:0.000,0.000,0.000|WPos:0.000,0.000,0.000>"))));

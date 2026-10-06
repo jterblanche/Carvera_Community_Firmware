@@ -77,6 +77,12 @@
 // PTYPE_CTRL_MULTI or PTYPE_FILE_START would otherwise carry. See
 // multiclient::classify_automatic_command().
 #define PTYPE_AUTO_COMMAND      0x6B
+
+// Job-start ready: an identified controller says it has loaded the job the
+// machine is holding a start for, or has given up loading it, so the start
+// need not wait for it any longer (libs/JobStartWait.h). Payload:
+// start_id(2, big-endian), the id from the job-start event it answers.
+#define PTYPE_JOB_START_READY   0x6C
 #include <stdint.h>
 
 class PublicData {

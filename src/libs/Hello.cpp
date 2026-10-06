@@ -54,13 +54,15 @@ bool parse_hello(const uint8_t* payload, std::size_t length, Hello& out) {
   if (name_len != 0) std::memcpy(out.name, payload + 10, name_len);
   out.name[name_len] = '\0';
   out.link = (payload[10 + name_len] == 1) ? Link::usb : Link::wifi;
+  out.features = length > full_length ? payload[full_length] : 0;
   return true;
 }
 
-std::size_t build_hello_ack(uint8_t* out, uint8_t result, uint8_t mode) {
+std::size_t build_hello_ack(uint8_t* out, uint8_t result, uint8_t mode, uint8_t features) {
   out[0] = hello_protocol_version;
   out[1] = result;
   out[2] = mode;
+  out[3] = features;
   return hello_ack_length;
 }
 

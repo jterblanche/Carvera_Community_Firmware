@@ -92,6 +92,14 @@ struct Client {
   // effectively gone, so the count is what tells the two apart. Reset to 0
   // by any send that fully succeeds.
   uint8_t consecutive_send_failures = 0;
+
+  // The features byte from this client's hello (libs/Hello.h), 0 until it
+  // identifies or when it sent none.
+  uint8_t features = 0;
+
+  // The start id of the last job-start wait this client said it is ready
+  // for (libs/JobStartWait.h). 0, which no wait uses, until it says so.
+  uint16_t job_start_ready = 0;
 };
 
 // How many consecutive temporary send failures mark a client as gone. At

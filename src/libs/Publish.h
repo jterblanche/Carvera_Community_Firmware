@@ -99,6 +99,7 @@ constexpr uint8_t event_kind_alarm_halt = 4;
 constexpr uint8_t event_kind_control_changed = 5;
 constexpr uint8_t event_kind_client_joined = 6;
 constexpr uint8_t event_kind_client_left = 7;
+constexpr uint8_t event_kind_job_start = 8;
 
 // The checksum_type of event_kind_upload_finished and
 // event_kind_play_started: event_checksum_none when the machine found no
@@ -202,5 +203,59 @@ std::size_t build_client_joined_event(uint64_t client_id, const char* name, uint
 // runs.
 std::size_t build_client_left_event(uint64_t client_id, const char* name, uint8_t name_len, uint8_t* out,
                                      std::size_t out_capacity);
+
+// "job start" phases: a start is held while other controllers load the
+// file (waiting, sent when the hold begins and once a second after), then
+// it ends one of two ways, each sent once (starting, just before the job's
+// own play-started; cancelled, and the job does not run).
+constexpr uint8_t job_start_phase_waiting = 0;
+constexpr uint8_t job_start_phase_starting = 1;
+constexpr uint8_t job_start_phase_cancelled = 2;
+
+// "job start" reasons: why the hold ended, or job_start_reason_waiting
+// while it has not.
+constexpr uint8_t job_start_reason_waiting = 0;
+constexpr uint8_t job_start_reason_all_ready = 1;     // starting: every awaited controller is ready
+constexpr uint8_t job_start_reason_time_limit = 2;    // starting: multi_client.start_wait_s ran out
+constexpr uint8_t job_start_reason_start_now = 3;     // starting: start-now
+constexpr uint8_t job_start_reason_aborted = 4;       // cancelled: abort
+constexpr uint8_t job_start_reason_starter_left = 5;  // cancelled: the controller that started it left
+constexpr uint8_t job_start_reason_halted = 6;        // cancelled: the machine entered alarm/halt
+
+// The most controllers a "job start" event lists as not ready: one per
+// client the table can hold, every WiFi slot plus USB.
+constexpr std::size_t max_job_start_not_ready = max_wifi_clients + 1;
+
+// The fields of one "job start" event. `md5_digest` is 16 raw bytes or
+// nullptr, as for play-started. `not_ready_ids` holds `not_ready_count`
+// client ids; past max_job_start_not_ready they are not sent.
+struct JobStartEvent {
+  const char* path = nullptr;
+  uint8_t path_len = 0;
+  uint32_t size = 0;
+  const uint8_t* md5_digest = nullptr;
+  uint16_t start_id = 0;
+  uint8_t phase = job_start_phase_waiting;
+  uint8_t reason = job_start_reason_waiting;
+  uint8_t seconds_left = 0;
+  uint64_t starter_id = 0;
+  const uint64_t* not_ready_ids = nullptr;
+  uint8_t not_ready_count = 0;
+};
+
+// Longest "job start" payload: the file fields at their longest, the fixed
+// wait fields, and a full not-ready list.
+constexpr std::size_t max_job_start_event_length = 1 + 1 + max_event_path_length + 4 + 1 + md5_digest_bytes +
+                                                   2 + 1 + 1 + 1 + 8 + 1 + 8 * max_job_start_not_ready;
+
+// "job start": kind(1) + path_len(1) + path + size(4, BE) +
+// checksum_type(1) + checksum(0 or md5_digest_bytes B) -- byte for byte
+// the play-started layout up to here, so a controller reads the file with
+// the same code -- then start_id(2, BE) + phase(1) + reason(1) +
+// seconds_left(1) + starter_id(8, BE) + not_ready_count(1) +
+// not_ready_ids(8 B each, BE). Published while a job start is held for
+// other controllers to load the file (libs/JobStartWait.h). Returns the
+// payload length, or 0 if it would not fit.
+std::size_t build_job_start_event(const JobStartEvent& event, uint8_t* out, std::size_t out_capacity);
 
 }  // namespace multiclient

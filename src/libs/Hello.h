@@ -21,7 +21,19 @@ constexpr uint8_t hello_result_old_controller_present = 2;
 constexpr uint8_t hello_mode_single_user = 0;
 constexpr uint8_t hello_mode_multi_user = 1;
 
-constexpr std::size_t hello_ack_length = 3;
+constexpr std::size_t hello_ack_length = 4;
+
+// Bits of the `features` byte a hello and a hello ack may each carry after
+// their last original field. In a hello, a set bit says the controller
+// takes part in that feature; in a hello ack, that the machine runs it.
+// Bits not defined here are sent as 0 and ignored when read.
+//
+// hello_feature_job_start_wait: in a hello, the controller loads a job the
+// machine announces before starting it and says when it is ready
+// (libs/JobStartWait.h), so the machine may hold a start for it. In a hello
+// ack, the machine holds a start for such controllers
+// (multi_client.start_wait_s is not 0).
+constexpr uint8_t hello_feature_job_start_wait = 0x01;
 
 // A parsed hello payload.
 struct Hello {
@@ -29,20 +41,26 @@ struct Hello {
   char name[max_name_length + 1] = {0};  // NUL-terminated
   uint8_t name_len = 0;
   Link link = Link::wifi;
+  uint8_t features = 0;
 };
 
 // Parses a hello payload: protocol_version(1) + id(8, big-endian) +
-// name_len(1) + name(name_len) + link(1). Returns false, leaving `out`
-// unspecified, when the payload is too short for its own name_len, when
-// name_len exceeds max_name_length, or when protocol_version is not the one
-// recognised value (1) -- the caller then treats the sender as unidentified,
-// exactly as if nothing had arrived. Trailing bytes past the link field are
-// ignored, so a future version's appended fields don't break this parser.
+// name_len(1) + name(name_len) + link(1) + features(1, optional). Returns
+// false, leaving `out` unspecified, when the payload is too short for its
+// own name_len, when name_len exceeds max_name_length, or when
+// protocol_version is not the one recognised value (1) -- the caller then
+// treats the sender as unidentified, exactly as if nothing had arrived. A
+// payload that ends at the link field, as every controller from before the
+// features byte sends it, parses with features 0. Trailing bytes past the
+// features byte are ignored, so a future version's appended fields don't
+// break this parser.
 bool parse_hello(const uint8_t* payload, std::size_t length, Hello& out);
 
 // Builds a hello-ack payload into `out` (must have room for
-// hello_ack_length bytes). Returns hello_ack_length.
-std::size_t build_hello_ack(uint8_t* out, uint8_t result, uint8_t mode);
+// hello_ack_length bytes): protocol_version(1) + result(1) + mode(1) +
+// features(1). Returns hello_ack_length. A controller from before the
+// features byte reads the first three and ignores the fourth.
+std::size_t build_hello_ack(uint8_t* out, uint8_t result, uint8_t mode, uint8_t features);
 
 // Longest possible client-list-reply payload: count(1) + up to
 // (max_wifi_clients + 1) entries of at most 8+1+max_name_length+1+1 bytes
