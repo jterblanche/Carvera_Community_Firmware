@@ -25,7 +25,8 @@ decoders.
 Parsing a well-formed hello, including a zero-length name; rejecting a
 payload too short for its own name length, a name length over the 31-byte
 limit, and an unrecognised protocol version; ignoring trailing bytes past
-the link field (a future version's appended fields); the link byte mapping
+the link field (a future version's appended fields); the optional features
+byte and the optional 8-byte launch part after it; the link byte mapping
 to WiFi or USB; building a hello ack and reading back its three fields;
 building a client-list reply from a table with a mix of identified and
 unidentified WiFi and USB clients, checking only the identified ones are

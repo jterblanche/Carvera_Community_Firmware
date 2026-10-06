@@ -55,6 +55,11 @@ bool parse_hello(const uint8_t* payload, std::size_t length, Hello& out) {
   out.name[name_len] = '\0';
   out.link = (payload[10 + name_len] == 1) ? Link::usb : Link::wifi;
   out.features = length > full_length ? payload[full_length] : 0;
+  out.has_launch = length >= full_length + 1 + 8;
+  out.launch = 0;
+  if (out.has_launch) {
+    for (int i = 0; i < 8; ++i) out.launch = (out.launch << 8) | payload[full_length + 1 + i];
+  }
   return true;
 }
 

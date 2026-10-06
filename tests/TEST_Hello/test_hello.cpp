@@ -173,6 +173,53 @@ int main() {
   }
 
   {
+    TEST("a hello without 8 bytes after the features byte has no launch part");
+    auto payload = hello_payload(1, 1, "Office PC", 0);
+    multiclient::Hello hello;
+    hello.has_launch = true;
+    hello.launch = 5;
+    CHECK(multiclient::parse_hello(payload.data(), payload.size(), hello));
+    CHECK(!hello.has_launch);
+    CHECK(hello.launch == 0);
+    payload.push_back(0x01);
+    for (int i = 0; i < 7; ++i) payload.push_back(0xAB);
+    CHECK(multiclient::parse_hello(payload.data(), payload.size(), hello));
+    CHECK(hello.features == 0x01);
+    CHECK(!hello.has_launch);
+  }
+
+  {
+    TEST("the 8 bytes after the features byte are the launch part, big-endian");
+    auto payload = hello_payload(1, 0x0102030405060708ULL, "Office PC", 1);
+    payload.push_back(0x00);
+    const uint8_t launch[8] = {0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18};
+    payload.insert(payload.end(), launch, launch + 8);
+    multiclient::Hello hello;
+    CHECK(multiclient::parse_hello(payload.data(), payload.size(), hello));
+    CHECK(hello.id == 0x0102030405060708ULL);
+    CHECK(hello.link == multiclient::Link::usb);
+    CHECK(hello.features == 0);
+    CHECK(hello.has_launch);
+    CHECK(hello.launch == 0xA1B2C3D4E5F60718ULL);
+
+    // Bytes after the launch part are ignored.
+    payload.push_back(0xEE);
+    payload.push_back(0xEE);
+    multiclient::Hello longer;
+    CHECK(multiclient::parse_hello(payload.data(), payload.size(), longer));
+    CHECK(longer.has_launch);
+    CHECK(longer.launch == 0xA1B2C3D4E5F60718ULL);
+  }
+
+  {
+    TEST("hello ack result 3 is identity already connected");
+    CHECK(multiclient::hello_result_identity_connected == 3);
+    uint8_t ack[multiclient::hello_ack_length];
+    multiclient::build_hello_ack(ack, multiclient::hello_result_identity_connected, multiclient::hello_mode_multi_user, 0);
+    CHECK(ack[1] == 3);
+  }
+
+  {
     TEST("build_hello_ack writes protocol_version, result, mode and features");
     uint8_t ack[multiclient::hello_ack_length];
     const std::size_t len = multiclient::build_hello_ack(ack, multiclient::hello_result_old_controller_present,

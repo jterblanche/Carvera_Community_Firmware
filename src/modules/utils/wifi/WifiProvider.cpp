@@ -41,6 +41,7 @@
 #include "libs/MakeraFrame.h"
 #include "libs/ControlToken.h"
 #include "libs/JobStartWait.h"
+#include "libs/IdentityCheck.h"
 #include "modules/utils/player/PlayerPublicAccess.h"
 #include "port_api.h"
 #include "InterruptIn.h"
@@ -460,6 +461,12 @@ void WifiProvider::receive_wifi_data() {
 				continue;
 			}
 
+			if (packet.type == PTYPE_PRESENCE_REPLY) {
+				multiclient::shared_identity_check().note_answer(multiclient::wifi_seat(client_index), packet.data,
+				                                                 packet.data_length);
+				continue;
+			}
+
 			// Never touches the control token: saying it is ready changes
 			// nothing on the machine but the held start's own bookkeeping.
 			if (packet.type == PTYPE_JOB_START_READY) {
@@ -804,13 +811,23 @@ uint8_t WifiProvider::hello_ack_mode() const {
 	return multiclient::hello_mode_single_user;
 }
 
+void WifiProvider::send_wifi_hello_ack(int client_index, uint8_t result) {
+	uint8_t ack[multiclient::hello_ack_length];
+	const std::size_t ack_len = multiclient::build_hello_ack(ack, result, hello_ack_mode(),
+		multiclient::shared_job_start_wait().hello_ack_features());
+	send_wifi_packet(client_index, PTYPE_HELLO_ACK, ack, ack_len);
+}
+
 // Parses a hello frame and answers it, addressed to the sender only. An
 // already-identified client re-sending hello is re-acked with no state
-// change. A first-time hello whose id already belongs to another,
-// already-identified client is treated as a reconnect: that stale entry is
-// dropped first. A first-time hello while an old (never-identified,
+// change. A first-time hello while an old (never-identified,
 // window-expired) client is already known to be connected is refused, so
-// this client never becomes a peer while that's true.
+// this client never becomes a peer while that's true. A first-time hello
+// whose id another identified client already has is decided by
+// libs/IdentityCheck.h: from the same launch it replaces that entry at
+// once; from a different launch it is held, unanswered, while that client
+// is asked whether it is still there, and answered later by
+// drive_identity_check().
 void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, uint16_t payload_length, uint32_t now_us) {
 	auto &table = multiclient::shared_client_table();
 	multiclient::Client *self = table.wifi_at(client_index);
@@ -820,55 +837,118 @@ void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, u
 	if (!multiclient::parse_hello(payload, payload_length, hello)) return; // malformed, or an unrecognised version: ignored
 
 	if (!self->identified) {
-		// Whether this id already belonged to another, already-identified
-		// client -- WiFi or USB -- found and dropped below. That is a
-		// reconnect, the same controller still there on a new socket, not a
-		// new arrival, so it must not publish "joined" once self picks the
-		// id up: see the matching skip below.
-		bool reconnect = false;
-
-		const int stale = table.find_wifi_by_id(hello.id, client_index);
-		if (stale >= 0) {
-			// Close the stale connection at the driver too, not just our own
-			// bookkeeping -- otherwise it lingers as a zombie in the WiFi
-			// module's own client list until the module's own idle timeout
-			// reaps it, holding one of the module's connection slots for no
-			// reason. Read the address before forgetting it: remove_wifi()
-			// clears the slot.
-			const multiclient::Address stale_address = table.wifi_at(stale)->address;
-			forget_wifi_client(stale);
-			table.remove_wifi(stale);
-			disconnect_wifi_client(stale_address, "reconnected under the same id");
-			reconnect = true;
-		} else if (table.usb_has_id(hello.id)) {
-			table.clear_usb_identity();
-			reconnect = true;
-		}
+		const multiclient::Seat seat = multiclient::wifi_seat(client_index);
+		auto &check = multiclient::shared_identity_check();
+		if (check.holds(seat)) return; // its first hello is still being decided
 
 		if (table.has_old_client(now_us, client_index)) {
-			uint8_t ack[multiclient::hello_ack_length];
-			const std::size_t ack_len = multiclient::build_hello_ack(
-				ack, multiclient::hello_result_old_controller_present, hello_ack_mode(),
-				multiclient::shared_job_start_wait().hello_ack_features());
-			send_wifi_packet(client_index, PTYPE_HELLO_ACK, ack, ack_len);
+			send_wifi_hello_ack(client_index, multiclient::hello_result_old_controller_present);
 			return;
 		}
 
-		multiclient::set_identity(*self, hello.id, hello.name, hello.name_len);
-
-		if (!reconnect) {
-			uint8_t joined_payload[1 + 8 + 1 + multiclient::max_name_length];
-			const std::size_t joined_length = multiclient::build_client_joined_event(
-				self->id, self->name, self->name_len, joined_payload, sizeof(joined_payload));
-			if (joined_length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, joined_payload, joined_length);
+		const multiclient::HelloDecision decision = multiclient::decide_hello(table, seat, hello);
+		if (decision.action == multiclient::HelloAction::replace) {
+			// The same controller back on a new connection, so the old one
+			// is dead. Close it at the driver too, not just in our own
+			// bookkeeping -- otherwise it lingers in the WiFi module's own
+			// client list until the module's idle timeout reaps it.
+			if (decision.other.link == multiclient::Link::usb) {
+				table.clear_usb_identity();
+			} else {
+				retire_wifi_client(decision.other.index, "reconnected under the same id");
+			}
+		} else if (decision.action == multiclient::HelloAction::ask) {
+			if (!check.begin(table, seat, decision.other, hello, true, now_us)) {
+				// Another check is already running; one runs at a time.
+				send_wifi_hello_ack(client_index, multiclient::hello_result_identity_connected);
+				return;
+			}
+			drive_identity_check(now_us);
+			return;
 		}
+		// A reconnect, the same controller still there on a new socket,
+		// is not a new arrival, so it does not publish "joined".
+		admit_wifi_hello(client_index, hello, decision.action == multiclient::HelloAction::replace);
+		return;
 	}
 	self->features = hello.features;
+	self->has_launch = hello.has_launch;
+	self->launch = hello.launch;
+	send_wifi_hello_ack(client_index, multiclient::hello_result_accepted);
+}
 
-	uint8_t ack[multiclient::hello_ack_length];
-	const std::size_t ack_len = multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, hello_ack_mode(),
-		multiclient::shared_job_start_wait().hello_ack_features());
-	send_wifi_packet(client_index, PTYPE_HELLO_ACK, ack, ack_len);
+// Identifies the client at `client_index` with `hello` and accepts its
+// hello. A controller admitted under the id that holds control never keeps
+// it: control is freed and the change published.
+void WifiProvider::admit_wifi_hello(int client_index, const multiclient::Hello& hello, bool reconnect) {
+	multiclient::Client *self = multiclient::shared_client_table().wifi_at(client_index);
+	if (self == nullptr) return;
+
+	if (multiclient::admit_hello(*self, hello, multiclient::shared_control_token())) {
+		uint8_t payload[1 + 8 + 1];  // holder_id 0 + holder_name_len 0: nobody has control
+		const std::size_t length = multiclient::build_control_changed_event(0, nullptr, 0, payload, sizeof(payload));
+		if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+	}
+
+	if (!reconnect) {
+		uint8_t joined_payload[1 + 8 + 1 + multiclient::max_name_length];
+		const std::size_t joined_length = multiclient::build_client_joined_event(
+			self->id, self->name, self->name_len, joined_payload, sizeof(joined_payload));
+		if (joined_length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, joined_payload, joined_length);
+	}
+	send_wifi_hello_ack(client_index, multiclient::hello_result_accepted);
+}
+
+// Removes the WiFi client at `client_index` and closes its connection. Read
+// the address before forgetting it: remove_wifi() clears the slot.
+void WifiProvider::retire_wifi_client(int client_index, const char* reason) {
+	auto &table = multiclient::shared_client_table();
+	const multiclient::Client *client = table.wifi_at(client_index);
+	if (client == nullptr) return;
+	const multiclient::Address address = client->address;
+	forget_wifi_client(client_index);
+	table.remove_wifi(client_index);
+	disconnect_wifi_client(address, reason);
+}
+
+// Carries out the WiFi side of the identity check in progress, if any
+// (libs/IdentityCheck.h): asking or removing an old entry that is a WiFi
+// client, and answering a held hello from one. Called from on_idle() and
+// straight after a check starts.
+void WifiProvider::drive_identity_check(uint32_t now_us) {
+	auto &check = multiclient::shared_identity_check();
+	auto &table = multiclient::shared_client_table();
+	for (;;) {
+		switch (check.next_step(table, multiclient::Link::wifi, now_us)) {
+			case multiclient::CheckStep::ask: {
+				uint8_t question[multiclient::presence_check_length];
+				const std::size_t length = check.build_question(question);
+				send_wifi_packet(check.old().index, PTYPE_PRESENCE_CHECK, question, length);
+				check.asked(now_us);
+				break;
+			}
+			case multiclient::CheckStep::retire:
+				retire_wifi_client(check.old().index, "a controller with the same id connected and this one did not answer");
+				check.retired();
+				break;
+			case multiclient::CheckStep::refuse:
+				send_wifi_hello_ack(check.newcomer().index, multiclient::hello_result_identity_connected);
+				check.end(table);
+				return;
+			case multiclient::CheckStep::admit: {
+				const multiclient::Hello hello = check.hello();
+				const int client_index = check.newcomer().index;
+				check.end(table);
+				admit_wifi_hello(client_index, hello, true);
+				return;
+			}
+			case multiclient::CheckStep::drop:
+				check.end(table);
+				return;
+			default:
+				return;
+		}
+	}
 }
 
 // Answers a client-list request with every identified client in the shared
@@ -1354,6 +1434,7 @@ void WifiProvider::on_idle(void *argument)
 		}
 	} else {
 		publish_status_if_due(us_ticker_read());
+		drive_identity_check(us_ticker_read());
 
 		// Each WiFi client polls independently, so its query/diagnose reply
 		// must go back to that client, not whichever one is handled first.

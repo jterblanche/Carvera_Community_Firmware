@@ -100,6 +100,17 @@ struct Client {
   // The start id of the last job-start wait this client said it is ready
   // for (libs/JobStartWait.h). 0, which no wait uses, until it says so.
   uint16_t job_start_ready = 0;
+
+  // True while this client's hello is held unanswered, because another
+  // client with the same id is being asked whether it is still there
+  // (libs/IdentityCheck.h). Such a client has said hello, so it is never
+  // treated as old while it waits.
+  bool hello_held = false;
+
+  // The launch part from this client's hello (libs/Hello.h), if it sent
+  // one.
+  bool has_launch = false;
+  uint64_t launch = 0;
 };
 
 // How many consecutive temporary send failures mark a client as gone. At
@@ -196,7 +207,8 @@ void set_identity(Client& client, uint64_t id, const char* name, uint8_t name_le
 void record_heartbeat(Client& client, uint32_t now_us);
 
 // True once `client`'s hello window has run out without it identifying.
-// Always false once identified, and false while the window has not started
+// Always false once identified or while its hello is held (see
+// Client::hello_held), and false while the window has not started
 // (an idle USB link) or has not elapsed yet. Called for either a WiFi slot
 // or the USB entry (see has_old_client()).
 //
