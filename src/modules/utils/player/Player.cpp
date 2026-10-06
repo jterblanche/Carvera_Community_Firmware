@@ -36,6 +36,7 @@
 #include "libs/ControlToken.h"
 #include "libs/FileCommandGate.h"
 #include "libs/JobStartWait.h"
+#include "libs/TransferTimeout.h"
 #include "PlayerPublicAccess.h"
 #include "TemperatureControlPublicAccess.h"
 #include "TemperatureControlPool.h"
@@ -3210,7 +3211,7 @@ void Player::download_command( string parameters, StreamOutput *stream )
             }
             else
             {
-                if(us_ticker_read()-starttime > 29000000)
+                if(transfer_timeout::download_stalled(starttime, us_ticker_read()))
                 {
                     sprintf(error_msg, "Error: Machine received cmd timeout!\r\n");
                     SendMessage(PTYPE_FILE_CAN, buf, sizeof(buf), stream);
