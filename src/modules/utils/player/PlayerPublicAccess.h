@@ -4,6 +4,9 @@
 #include <cstdint>
 #include <string>
 
+#include "libs/PublicData.h"
+#include "libs/checksumm.h"
+
 #define player_checksum           CHECKSUM("player")
 #define is_playing_checksum       CHECKSUM("is_playing")
 #define is_suspended_checksum     CHECKSUM("is_suspended")
@@ -29,4 +32,14 @@ struct pad_progress {
     bool is_playing;  // true only while file is actively playing (not paused, not finished)
     unsigned long parsed_lines;
 };
+
+// Whether a file is playing. Player answers is_playing with a pointer to its
+// own bool, so PublicData::get_value() is given a pointer to fill in, not a
+// bool. False when no Player answers.
+inline bool player_is_playing()
+{
+    void *returned = nullptr;
+    if (!PublicData::get_value(player_checksum, is_playing_checksum, &returned) || returned == nullptr) return false;
+    return *static_cast<bool *>(returned);
+}
 #endif

@@ -455,8 +455,7 @@ SerialConsole::GateInputs SerialConsole::gate_inputs_for(const makera::Packet &p
     in.motion.run = (machine_state == RUN);
     in.motion.homing = (machine_state == HOME);
     in.motion.idle = (machine_state == IDLE);
-    bool playing = false;
-    if (PublicData::get_value(player_checksum, is_playing_checksum, &playing)) in.motion.job_playing = playing;
+    in.motion.job_playing = player_is_playing();
     return in;
 }
 
