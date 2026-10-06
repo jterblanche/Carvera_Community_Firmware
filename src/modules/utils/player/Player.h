@@ -36,7 +36,9 @@ class Player : public Module {
 #if !defined(STREAMED_JOB_PLAYBACK)
         void select_file(string argument, bool force_prescan = false);
         void goto_line_number(unsigned long line_number);
-        void play_opened_file();
+        // `new_job` is false when the file continues a job already
+        // playing (a subprogram call or return), true when it starts one.
+        void play_opened_file(bool new_job);
         void end_of_file();
 #endif
         void on_get_public_data(void* argument);
@@ -51,6 +53,7 @@ class Player : public Module {
 #endif
         void close_line_source();
         void play_command( string parameters, StreamOutput* stream );
+        void publish_play_started();
         void progress_command( string parameters, StreamOutput* stream );
         void abort_command( string parameters, StreamOutput* stream );
         void suspend_command( string parameters, StreamOutput* stream , bool pause_outside_play_mode = false);
@@ -150,11 +153,11 @@ class Player : public Module {
         unsigned long last_played_lines;
         unsigned int last_percent_complete;
         unsigned long last_elapsed_secs;
-        // Set from playing_file at the end of every on_second_tick(), so the
-        // next tick can tell a false transition (playback just stopped, for
-        // any reason -- finished, aborted, halted) from "still not
-        // playing". Drives the job-ended event (the 0x68 event, kind 3);
-        // see on_second_tick().
+        // Set by publish_play_started(), and from playing_file at the end
+        // of every on_second_tick(), so the next tick can tell a false
+        // transition (playback just stopped, for any reason -- finished,
+        // aborted, halted) from "still not playing". Drives the job-ended
+        // event (the 0x68 event, kind 3); see on_second_tick().
         bool last_published_playing = false;
         // Set from THEKERNEL->is_halted() at the end of every
         // on_second_tick(), the same way, so the next tick can publish the

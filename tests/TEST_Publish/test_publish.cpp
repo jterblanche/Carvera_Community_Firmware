@@ -326,13 +326,56 @@ int main() {
   }
 
   {
-    TEST("build_play_started_event writes kind and path only");
+    TEST("build_play_started_event writes kind, path, size and checksum_type none when given no digest");
     uint8_t out[300];
-    const std::size_t len = multiclient::build_play_started_event("/sd/gcodes/part.nc", 18, out, sizeof(out));
-    CHECK(len == 1 + 1 + 18);
+    const std::size_t len =
+        multiclient::build_play_started_event("/sd/gcodes/part.nc", 18, 123456, nullptr, out, sizeof(out));
+    CHECK(len == 1 + 1 + 18 + 4 + 1);
     CHECK(out[0] == multiclient::event_kind_play_started);
     CHECK(out[1] == 18);
     CHECK(std::memcmp(out + 2, "/sd/gcodes/part.nc", 18) == 0);
+    CHECK(read_be32(out + 2 + 18) == 123456u);
+    CHECK(out[2 + 18 + 4] == multiclient::event_checksum_none);
+  }
+
+  {
+    TEST("build_play_started_event writes checksum_type md5 and the 16 digest bytes when given one");
+    uint8_t digest[multiclient::md5_digest_bytes];
+    for (std::size_t i = 0; i < sizeof(digest); ++i) digest[i] = static_cast<uint8_t>(0xA0 + i);
+    uint8_t out[300];
+    const std::size_t len =
+        multiclient::build_play_started_event("/sd/gcodes/part.nc", 18, 0x01020304u, digest, out, sizeof(out));
+    CHECK(len == 1 + 1 + 18 + 4 + 1 + multiclient::md5_digest_bytes);
+    CHECK(out[0] == multiclient::event_kind_play_started);
+    CHECK(out[1] == 18);
+    CHECK(std::memcmp(out + 2, "/sd/gcodes/part.nc", 18) == 0);
+    CHECK(out[2 + 18] == 0x01 && out[2 + 18 + 1] == 0x02 && out[2 + 18 + 2] == 0x03 && out[2 + 18 + 3] == 0x04);
+    CHECK(out[2 + 18 + 4] == multiclient::event_checksum_md5);
+    CHECK(std::memcmp(out + 2 + 18 + 4 + 1, digest, sizeof(digest)) == 0);
+  }
+
+  {
+    TEST("build_play_started_event lays out its fields the same way as build_upload_finished_event");
+    uint8_t digest[multiclient::md5_digest_bytes];
+    for (std::size_t i = 0; i < sizeof(digest); ++i) digest[i] = static_cast<uint8_t>(i * 7);
+    uint8_t played[300];
+    uint8_t uploaded[300];
+    const std::size_t played_len =
+        multiclient::build_play_started_event("/sd/gcodes/a b.nc", 17, 987654, digest, played, sizeof(played));
+    const std::size_t uploaded_len =
+        multiclient::build_upload_finished_event("/sd/gcodes/a b.nc", 17, 987654, digest, uploaded, sizeof(uploaded));
+    CHECK(played_len == uploaded_len);
+    CHECK(played[0] == multiclient::event_kind_play_started);
+    CHECK(std::memcmp(played + 1, uploaded + 1, played_len - 1) == 0);
+  }
+
+  {
+    TEST("build_play_started_event with a digest refuses to write past out_capacity");
+    uint8_t digest[multiclient::md5_digest_bytes] = {};
+    uint8_t out[1 + 1 + 3 + 4 + 1 + multiclient::md5_digest_bytes - 1];  // one byte short
+    CHECK(multiclient::build_play_started_event("abc", 3, 1, digest, out, sizeof(out)) == 0);
+    uint8_t exact[1 + 1 + 3 + 4 + 1 + multiclient::md5_digest_bytes];
+    CHECK(multiclient::build_play_started_event("abc", 3, 1, digest, exact, sizeof(exact)) == sizeof(exact));
   }
 
   {
@@ -434,7 +477,7 @@ int main() {
     TEST("every event builder refuses to write past out_capacity");
     uint8_t out[3];
     CHECK(multiclient::build_upload_finished_event("abc", 3, 1, nullptr, out, sizeof(out)) == 0);
-    CHECK(multiclient::build_play_started_event("abc", 3, out, sizeof(out)) == 0);
+    CHECK(multiclient::build_play_started_event("abc", 3, 1, nullptr, out, sizeof(out)) == 0);
     CHECK(multiclient::build_job_ended_event("abc", 3, 0, 0, 0, out, sizeof(out)) == 0);
     uint8_t tiny[1];
     CHECK(multiclient::build_alarm_halt_event(1, tiny, sizeof(tiny)) == 0);
