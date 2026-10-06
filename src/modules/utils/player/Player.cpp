@@ -2133,7 +2133,8 @@ void Player::upload_command( string parameters, StreamOutput *stream )
         }
         THEKERNEL->set_uploading(false);
         // See the same pause in download_command().
-        if (decision == file_command_gate::Decision::refuse_machine_busy) {
+        if (decision == file_command_gate::Decision::refuse_machine_busy ||
+            communication_protocol == PROTOCOL_SMOOTHIE) {
             THEKERNEL->set_cachewait(true);
             safe_delay_ms(1000);
             THEKERNEL->set_cachewait(false);
@@ -2712,8 +2713,12 @@ void Player::download_command( string parameters, StreamOutput *stream )
         THEKERNEL->set_uploading(false);
         // The pause lets the rest of a refused transfer arrive and be
         // discarded. During a job it would also stop the player reading
-        // lines for that second, so it is skipped then.
-        if (decision == file_command_gate::Decision::refuse_machine_busy) {
+        // lines for that second, so it is skipped then on the framed
+        // protocol, where stray file frames are dropped anyway. The Smoothie
+        // protocol keeps it: its XMODEM start bytes would otherwise land in
+        // the next command line.
+        if (decision == file_command_gate::Decision::refuse_machine_busy ||
+            communication_protocol == PROTOCOL_SMOOTHIE) {
             THEKERNEL->set_cachewait(true);
             safe_delay_ms(1000);
             THEKERNEL->set_cachewait(false);
