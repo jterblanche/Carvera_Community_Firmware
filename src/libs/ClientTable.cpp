@@ -22,6 +22,10 @@ bool client_is_old(const Client& client, uint32_t now_us) {
   return elapsed_us >= static_cast<int32_t>(hello_window_us);
 }
 
+void restart_hello_window(Client& client, uint32_t now_us) {
+  if (client.hello_window_started) client.hello_window_start_us = now_us;
+}
+
 bool usb_session_expired(bool hello_window_started, uint32_t now_us, uint32_t last_activity_us) {
   if (!hello_window_started) return false;
   const int32_t elapsed_us = static_cast<int32_t>(now_us - last_activity_us);

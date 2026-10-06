@@ -29,6 +29,20 @@ HelloDecision decide_hello(const ClientTable& table, const Seat& self, const Hel
   return decision;
 }
 
+HelloDecision decide_hello(const ClientTable& table, const Seat& self, const Hello& hello, const IdentityCheck& check) {
+  HelloDecision decision;
+  if (check.active() && check.hello().id == hello.id) {
+    decision.action = HelloAction::busy;
+    return decision;
+  }
+  decision = decide_hello(table, self, hello);
+  // A USB hello only ever finds the id on WiFi, so even its reconnect is a check.
+  const bool needs_check = decision.action == HelloAction::ask ||
+                           (decision.action == HelloAction::replace && self.link == Link::usb);
+  if (needs_check && check.active()) decision.action = HelloAction::busy;
+  return decision;
+}
+
 bool admit_hello(Client& self, const Hello& hello, ControlToken& control) {
   set_identity(self, hello.id, hello.name, hello.name_len);
   self.features = hello.features;

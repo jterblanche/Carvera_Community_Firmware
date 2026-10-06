@@ -846,7 +846,14 @@ void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, u
 			return;
 		}
 
-		const multiclient::HelloDecision decision = multiclient::decide_hello(table, seat, hello);
+		const multiclient::HelloDecision decision = multiclient::decide_hello(table, seat, hello, check);
+		if (decision.action == multiclient::HelloAction::busy) {
+			// Another check is running; one runs at a time. The controller
+			// sends its hello again shortly.
+			multiclient::restart_hello_window(*self, now_us);
+			send_wifi_hello_ack(client_index, multiclient::hello_result_busy);
+			return;
+		}
 		if (decision.action == multiclient::HelloAction::replace) {
 			// The same controller back on a new connection, so the old one
 			// is dead. Close it at the driver too, not just in our own
@@ -859,8 +866,9 @@ void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, u
 			}
 		} else if (decision.action == multiclient::HelloAction::ask) {
 			if (!check.begin(table, seat, decision.other, hello, true, now_us)) {
-				// Another check is already running; one runs at a time.
-				send_wifi_hello_ack(client_index, multiclient::hello_result_identity_connected);
+				// Not expected: decide_hello() answers busy while a check runs.
+				multiclient::restart_hello_window(*self, now_us);
+				send_wifi_hello_ack(client_index, multiclient::hello_result_busy);
 				return;
 			}
 			drive_identity_check(now_us);

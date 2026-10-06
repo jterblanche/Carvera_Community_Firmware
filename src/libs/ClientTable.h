@@ -235,6 +235,11 @@ void record_heartbeat(Client& client, uint32_t now_us);
 // identifying is disconnected, not left to sit.
 bool client_is_old(const Client& client, uint32_t now_us);
 
+// Starts `client`'s hello window over from `now_us`, if it has started: a
+// hello answered "try again shortly" (hello_result_busy) gets the full
+// window again for its retry.
+void restart_hello_window(Client& client, uint32_t now_us);
+
 // True once a USB entry's hello window has started and at least
 // usb_idle_timeout_us has passed since the last byte received on it
 // (`last_activity_us`, tracked by the caller -- SerialConsole, not this

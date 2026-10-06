@@ -18,7 +18,14 @@ constexpr uint8_t hello_result_old_controller_present = 2;
 // Another controller with this hello's id is already connected and answered
 // when asked whether it is still there (libs/IdentityCheck.h). It keeps its
 // connection and control; the controller refused this way does not retry.
+// Sent for nothing else.
 constexpr uint8_t hello_result_identity_connected = 3;
+// The machine is already checking another hello and checks one at a time.
+// Nothing is known about this one yet: the controller sends its hello again
+// on the same connection about a second later, without telling the user.
+// The refusal starts the connection's hello window over, so waiting to
+// retry never makes it count as an old controller.
+constexpr uint8_t hello_result_busy = 4;
 
 // hello ack `mode` values, reporting the machine's configured
 // multi_client.mode (ControlToken.h's Mode).

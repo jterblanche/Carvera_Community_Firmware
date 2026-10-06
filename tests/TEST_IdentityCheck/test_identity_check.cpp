@@ -572,10 +572,177 @@ int main() {
   }
 
   {
+    TEST("with a check running, a hello needing another check on a different id is told to retry");
+    ClientTable table;
+    IdentityCheck check;
+    constexpr uint64_t shop_id = 0x0102030405060708ULL;
+    const int old_a = add_identified(table, 1, make_hello(office_id, true, 1));
+    const int new_a = table.add_wifi(address(2), 0);
+    identify_usb(table, make_hello(shop_id, true, 7, "Shop PC"));
+    const int new_b = table.add_wifi(address(3), 0);
+    CHECK(check.begin(table, multiclient::wifi_seat(new_a), multiclient::wifi_seat(old_a),
+                      make_hello(office_id, true, 2), true, 0));
+
+    // shop_id from a different launch would need its own check.
+    auto decision =
+        multiclient::decide_hello(table, multiclient::wifi_seat(new_b), make_hello(shop_id, true, 8, "Shop PC"), check);
+    CHECK(decision.action == HelloAction::busy);
+    // shop_id from the same launch is a reconnect this WiFi link can finish
+    // itself, so it needs no check and goes ahead.
+    decision =
+        multiclient::decide_hello(table, multiclient::wifi_seat(new_b), make_hello(shop_id, true, 7, "Shop PC"), check);
+    CHECK(decision.action == HelloAction::replace);
+    CHECK(decision.other.link == Link::usb);
+    // An id nobody has is admitted as usual.
+    CHECK(multiclient::decide_hello(table, multiclient::wifi_seat(new_b), make_hello(5, true, 1), check).action ==
+          HelloAction::admit);
+    // Without a check running the same hello would be asked.
+    IdentityCheck idle;
+    CHECK(multiclient::decide_hello(table, multiclient::wifi_seat(new_b), make_hello(shop_id, true, 8, "Shop PC"), idle)
+              .action == HelloAction::ask);
+  }
+
+  {
+    TEST("with a check running, a USB reconnect whose old entry is on WiFi is told to retry");
+    ClientTable table;
+    IdentityCheck check;
+    constexpr uint64_t shop_id = 0x0102030405060708ULL;
+    const int old_a = add_identified(table, 1, make_hello(office_id, true, 1));
+    const int new_a = table.add_wifi(address(2), 0);
+    add_identified(table, 3, make_hello(shop_id, true, 7, "Shop PC"));
+    start_usb(table);
+    CHECK(check.begin(table, multiclient::wifi_seat(new_a), multiclient::wifi_seat(old_a),
+                      make_hello(office_id, true, 2), true, 0));
+    CHECK(multiclient::decide_hello(table, multiclient::usb_seat(), make_hello(shop_id, true, 7, "Shop PC"), check)
+              .action == HelloAction::busy);
+    IdentityCheck idle;
+    CHECK(multiclient::decide_hello(table, multiclient::usb_seat(), make_hello(shop_id, true, 7, "Shop PC"), idle)
+              .action == HelloAction::replace);
+  }
+
+  {
+    TEST("with a check running, any hello with the id being checked is told to retry");
+    ClientTable table;
+    IdentityCheck check;
+    const int old_a = add_identified(table, 1, make_hello(office_id, true, 1));
+    const int new_a = table.add_wifi(address(2), 0);
+    const int other = table.add_wifi(address(3), 0);
+    CHECK(check.begin(table, multiclient::wifi_seat(new_a), multiclient::wifi_seat(old_a),
+                      make_hello(office_id, true, 2), true, 0));
+    // The old entry's own launch: inline replacement would remove the entry
+    // the check is asking, and two entries would end up with one id.
+    CHECK(multiclient::decide_hello(table, multiclient::wifi_seat(other), make_hello(office_id, true, 1), check).action ==
+          HelloAction::busy);
+    // The held newcomer's launch, or another one.
+    CHECK(multiclient::decide_hello(table, multiclient::wifi_seat(other), make_hello(office_id, true, 2), check).action ==
+          HelloAction::busy);
+    CHECK(multiclient::decide_hello(table, multiclient::wifi_seat(other), make_hello(office_id, false, 0), check).action ==
+          HelloAction::busy);
+    // Also from USB.
+    start_usb(table);
+    CHECK(multiclient::decide_hello(table, multiclient::usb_seat(), make_hello(office_id, true, 1), check).action ==
+          HelloAction::busy);
+    // Once the old entry has left and the newcomer is admitted, the same
+    // hello is checked against the newcomer.
+    table.remove_wifi(old_a);
+    CHECK(check.next_step(table, Link::wifi, 10 * ms) == CheckStep::admit);
+    const Hello admitted = check.hello();
+    check.end(table);
+    ControlToken unused;
+    multiclient::admit_hello(*table.wifi_at(new_a), admitted, unused);
+    const auto decision =
+        multiclient::decide_hello(table, multiclient::wifi_seat(other), make_hello(office_id, true, 1), check);
+    CHECK(decision.action == HelloAction::ask);
+    CHECK(decision.other.index == new_a);
+  }
+
+  {
+    TEST("two hellos with the same id: the second retries and is refused once the first is");
+    ClientTable table;
+    IdentityCheck check;
+    const int old_a = add_identified(table, 1, make_hello(office_id, true, 1));
+    const int first = table.add_wifi(address(2), 0);
+    const int second = table.add_wifi(address(3), 0);
+    CHECK(check.begin(table, multiclient::wifi_seat(first), multiclient::wifi_seat(old_a),
+                      make_hello(office_id, true, 2), true, 0));
+    CHECK(multiclient::decide_hello(table, multiclient::wifi_seat(second), make_hello(office_id, true, 3), check).action ==
+          HelloAction::busy);
+    CHECK(check.next_step(table, Link::wifi, 0) == CheckStep::ask);
+    const uint32_t number = question_number(check);
+    check.asked(0);
+    CHECK(answer(check, multiclient::wifi_seat(old_a), number));
+    CHECK(check.next_step(table, Link::wifi, 50 * ms) == CheckStep::refuse);
+    check.end(table);
+    // The retry starts its own check of the same, live, entry.
+    const auto decision =
+        multiclient::decide_hello(table, multiclient::wifi_seat(second), make_hello(office_id, true, 3), check);
+    CHECK(decision.action == HelloAction::ask);
+    CHECK(decision.other.index == old_a);
+    CHECK(check.begin(table, multiclient::wifi_seat(second), decision.other, make_hello(office_id, true, 3), true,
+                      1000 * ms));
+    CHECK(check.next_step(table, Link::wifi, 1000 * ms) == CheckStep::ask);
+    CHECK(question_number(check) != number);
+  }
+
+  {
+    TEST("two checks on different ids run one after the other");
+    ClientTable table;
+    IdentityCheck check;
+    constexpr uint64_t shop_id = 0x0102030405060708ULL;
+    const int old_a = add_identified(table, 1, make_hello(office_id, true, 1));
+    const int new_a = table.add_wifi(address(2), 0);
+    identify_usb(table, make_hello(shop_id, true, 7, "Shop PC"));
+    const int new_b = table.add_wifi(address(3), 0);
+    CHECK(check.begin(table, multiclient::wifi_seat(new_a), multiclient::wifi_seat(old_a),
+                      make_hello(office_id, true, 2), true, 0));
+    CHECK(multiclient::decide_hello(table, multiclient::wifi_seat(new_b), make_hello(shop_id, true, 8, "Shop PC"), check)
+              .action == HelloAction::busy);
+    // The first check times out and is resolved.
+    CHECK(check.next_step(table, Link::wifi, 0) == CheckStep::ask);
+    check.asked(0);
+    CHECK(poll_until(check, table, Link::wifi, 100 * ms, 2100 * ms) == CheckStep::retire);
+    table.remove_wifi(old_a);
+    check.retired();
+    CHECK(check.next_step(table, Link::wifi, 2100 * ms) == CheckStep::admit);
+    check.end(table);
+    // The second hello, sent again, now gets its check.
+    const auto decision =
+        multiclient::decide_hello(table, multiclient::wifi_seat(new_b), make_hello(shop_id, true, 8, "Shop PC"), check);
+    CHECK(decision.action == HelloAction::ask);
+    CHECK(decision.other.link == Link::usb);
+    CHECK(check.begin(table, multiclient::wifi_seat(new_b), decision.other, make_hello(shop_id, true, 8, "Shop PC"),
+                      true, 2200 * ms));
+    CHECK(check.next_step(table, Link::usb, 2200 * ms) == CheckStep::ask);
+  }
+
+  {
+    TEST("a hello told to retry gets a fresh hello window, so it is not treated as old");
+    ClientTable table;
+    const int self = table.add_wifi(address(2), 0);
+    CHECK(!multiclient::client_is_old(*table.wifi_at(self), 4900 * ms));
+    multiclient::restart_hello_window(*table.wifi_at(self), 4900 * ms);
+    CHECK(!multiclient::client_is_old(*table.wifi_at(self), 6000 * ms));
+    CHECK(!table.has_old_client(9800 * ms));
+    CHECK(multiclient::client_is_old(*table.wifi_at(self), 9900 * ms));
+
+    start_usb(table, 0);
+    multiclient::restart_hello_window(*table.usb(), 4000 * ms);
+    CHECK(!multiclient::client_is_old(*table.usb(), 8000 * ms));
+    CHECK(multiclient::client_is_old(*table.usb(), 9000 * ms));
+
+    // A client whose window never started (USB before its first byte) is
+    // left alone.
+    Client quiet;
+    multiclient::restart_hello_window(quiet, 100 * ms);
+    CHECK(!quiet.hello_window_started);
+  }
+
+  {
     TEST("constants");
     CHECK(multiclient::presence_answer_wait_us == 2000000);
     CHECK(multiclient::presence_check_length == 4);
     CHECK(multiclient::hello_result_identity_connected == 3);
+    CHECK(multiclient::hello_result_busy == 4);
     CHECK(&multiclient::shared_identity_check() == &multiclient::shared_identity_check());
   }
 

@@ -22,6 +22,9 @@
 //   removed and the new controller is admitted.
 //
 // Either way the controller admitted under that id starts without control.
+// One check runs at a time. A hello that would need another one, or that
+// carries the id being checked, is answered hello_result_busy and sent
+// again by its controller shortly after.
 // The links (WifiProvider, SerialConsole) do the sending and removing; this
 // file only decides.
 namespace multiclient {
@@ -61,6 +64,7 @@ enum class HelloAction : uint8_t {
   admit,    // nobody else has this id
   replace,  // another entry has it, from the same launch: replace it now
   ask,      // another entry has it, from a different launch: ask it first
+  busy,     // a check is running that this hello must wait for: try again shortly
 };
 
 struct HelloDecision {
@@ -145,6 +149,14 @@ class IdentityCheck {
   uint32_t last_step_us_ = 0;
   Hello hello_;
 };
+
+// decide_hello() above, given the check that may be running. With a check
+// running, the answer is busy for a hello that carries the id being checked
+// (whatever its launch part, since the entry being asked might otherwise be
+// replaced under the check), and for one that would need a check itself: a
+// different launch, or a USB hello whose old entry is on WiFi, which only
+// the WiFi link can remove. Any other hello is decided as usual.
+HelloDecision decide_hello(const ClientTable& table, const Seat& self, const Hello& hello, const IdentityCheck& check);
 
 // One check, shared by the WiFi and USB links.
 IdentityCheck& shared_identity_check();

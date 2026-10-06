@@ -835,7 +835,7 @@ void SerialConsole::handle_hello(const uint8_t* payload, uint16_t payload_length
             return;
         }
 
-        const multiclient::HelloDecision decision = multiclient::decide_hello(table, multiclient::usb_seat(), hello);
+        const multiclient::HelloDecision decision = multiclient::decide_hello(table, multiclient::usb_seat(), hello, check);
         if (decision.action == multiclient::HelloAction::admit) {
             admit_usb_hello(hello, false);
             return;
@@ -843,9 +843,12 @@ void SerialConsole::handle_hello(const uint8_t* payload, uint16_t payload_length
         // The id is on WiFi, whose connection only WifiProvider can close,
         // so even a reconnect waits for its idle loop to remove it.
         const bool ask_first = decision.action == multiclient::HelloAction::ask;
-        if (!check.begin(table, multiclient::usb_seat(), decision.other, hello, ask_first, us_ticker_read())) {
-            // Another check is already running; one runs at a time.
-            send_hello_ack(multiclient::hello_result_identity_connected);
+        if (decision.action == multiclient::HelloAction::busy ||
+            !check.begin(table, multiclient::usb_seat(), decision.other, hello, ask_first, us_ticker_read())) {
+            // Another check is running; one runs at a time. The controller
+            // sends its hello again shortly.
+            multiclient::restart_hello_window(*self, now_us);
+            send_hello_ack(multiclient::hello_result_busy);
             return;
         }
         drive_identity_check(us_ticker_read());
