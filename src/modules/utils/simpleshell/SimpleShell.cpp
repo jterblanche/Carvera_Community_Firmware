@@ -59,6 +59,8 @@
 #include "AutoPushPop.h"
 #include "MainButtonPublicAccess.h"
 #include "system_LPC17xx.h"
+#include "PlayerPublicAccess.h"
+#include "libs/FileCommandGate.h"
 #include "LPC17xx.h"
 #include "MSCFileSystemPublicAccess.h"
 #include "WifiPublicAccess.h"
@@ -101,6 +103,18 @@ Machine machine_model_from_name(const string& name)
 #endif
     return Machine::unknown;
 }
+}
+
+// Refuses `command` with the file-command gate's reply (libs/FileCommandGate.h)
+// if the machine's state calls for it. True if it was refused.
+static bool refuse_file_command(file_command_gate::FileCommand command, StreamOutput *stream)
+{
+    file_command_gate::MachineState state;
+    state.job_playing = player_is_playing();
+    state.motion_queue_idle = THECONVEYOR->is_idle();
+    if (file_command_gate::decide(command, state) == file_command_gate::Decision::run) return false;
+    stream->printf("%s", file_command_gate::job_playing_reply);
+    return true;
 }
 
 // command lookup table
@@ -203,6 +217,7 @@ void SimpleShell::on_gcode_received(void *argument)
             if(!args.empty() && !THEKERNEL->is_grbl_mode())
                 rm_command("/sd/" + args, gcode->stream);
         } else if (gcode->m == 576) { // check SD file integrity against stored MD5 hashes
+            if (refuse_file_command(file_command_gate::FileCommand::md5check, gcode->stream)) return;
             if (gcode->subcode == 2) {
                 md5check_file_command(args, gcode->stream);
             } else {
@@ -698,6 +713,8 @@ void SimpleShell::pwd_command( string parameters, StreamOutput *stream )
 // Output the contents of a file, first parameter is the filename, second is the limit ( in number of lines to output )
 void SimpleShell::cat_command( string parameters, StreamOutput *stream )
 {
+    if (refuse_file_command(file_command_gate::FileCommand::cat, stream)) return;
+
     // Get parameters ( filename and line limit )
     string filename = absolute_from_relative(shift_parameter(parameters));
     int limit = -1;
@@ -2096,6 +2113,8 @@ void SimpleShell::switch_command( string parameters, StreamOutput *stream)
 
 void SimpleShell::md5sum_command( string parameters, StreamOutput *stream )
 {
+	if (refuse_file_command(file_command_gate::FileCommand::md5sum, stream)) return;
+
 	string filename = absolute_from_relative(parameters);
 
 	// Open file
