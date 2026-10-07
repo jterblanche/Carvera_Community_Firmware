@@ -553,6 +553,33 @@ int main() {
   }
 
   {
+    TEST("build_job_start_event while hashing: phase 3, the file's size, no checksum, and no time left");
+    CHECK(multiclient::job_start_phase_waiting == 0);
+    CHECK(multiclient::job_start_phase_starting == 1);
+    CHECK(multiclient::job_start_phase_cancelled == 2);
+    CHECK(multiclient::job_start_phase_hashing == 3);
+    const uint64_t not_ready[] = {0x2122232425262728ULL};
+    multiclient::JobStartEvent event;
+    event.path = "x.nc";
+    event.path_len = 4;
+    event.size = 123456;
+    event.start_id = 9;
+    event.phase = multiclient::job_start_phase_hashing;
+    event.reason = multiclient::job_start_reason_waiting;
+    event.not_ready_ids = not_ready;
+    event.not_ready_count = 1;
+    uint8_t out[multiclient::max_job_start_event_length];
+    const std::size_t len = multiclient::build_job_start_event(event, out, sizeof(out));
+    CHECK(len == 1 + 1 + 4 + 4 + 1 + 2 + 1 + 1 + 1 + 8 + 1 + 8);
+    CHECK(read_be32(out + 6) == 123456u);
+    CHECK(out[10] == multiclient::event_checksum_none);
+    CHECK(out[11] == 0 && out[12] == 9);
+    CHECK(out[13] == 3);
+    CHECK(out[14] == multiclient::job_start_reason_waiting);
+    CHECK(out[15] == 0);
+  }
+
+  {
     TEST("build_job_start_event lists at most one id per client the table can hold");
     uint64_t ids[multiclient::max_job_start_not_ready + 2];
     for (std::size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i) ids[i] = i + 1;

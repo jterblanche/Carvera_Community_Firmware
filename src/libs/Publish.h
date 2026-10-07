@@ -204,13 +204,17 @@ std::size_t build_client_joined_event(uint64_t client_id, const char* name, uint
 std::size_t build_client_left_event(uint64_t client_id, const char* name, uint8_t name_len, uint8_t* out,
                                      std::size_t out_capacity);
 
-// "job start" phases: a start is held while other controllers load the
-// file (waiting, sent when the hold begins and once a second after), then
-// it ends one of two ways, each sent once (starting, just before the job's
-// own play-started; cancelled, and the job does not run).
+// "job start" phases: a held start first hashes the file (hashing, sent
+// when the hold begins and once a second after, with no checksum), then
+// waits while other controllers load it (waiting, sent when hashing ends
+// and once a second after, with the computed checksum), then it ends one
+// of two ways, each sent once (starting, just before the job's own
+// play-started; cancelled, and the job does not run). Starting and
+// cancelled can follow hashing directly.
 constexpr uint8_t job_start_phase_waiting = 0;
 constexpr uint8_t job_start_phase_starting = 1;
 constexpr uint8_t job_start_phase_cancelled = 2;
+constexpr uint8_t job_start_phase_hashing = 3;
 
 // "job start" reasons: why the hold ended, or job_start_reason_waiting
 // while it has not.

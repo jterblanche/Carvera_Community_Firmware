@@ -14,6 +14,7 @@ trap 'rm -rf "$OUT"' EXIT
     "$ROOT/src/libs/ClientTable.cpp" \
     "$ROOT/src/libs/ControlToken.cpp" \
     "$ROOT/src/libs/JobStartWait.cpp" \
+    "$ROOT/src/libs/md5.cpp" \
     "$HERE/test_job_start_wait.cpp" \
     -o "$OUT/test_job_start_wait"
 

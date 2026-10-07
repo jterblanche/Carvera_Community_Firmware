@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -73,6 +74,72 @@ bool send_ready(const JobStartWait& wait, Client& client, uint16_t start_id) {
 
 bool refused(const char* line) { return multiclient::refused_while_start_pending(line, std::strlen(line)); }
 
+// A file in memory for hash_step() to read, `chunk` bytes at most per read.
+// Fails the read at byte `fail_at` when it is set. Counts the reads.
+struct MemoryFile {
+  const uint8_t* data = nullptr;
+  std::size_t size = 0;
+  std::size_t at = 0;
+  std::size_t fail_at = SIZE_MAX;
+  int reads = 0;
+};
+
+long read_memory(void* file, uint8_t* buffer, std::size_t length) {
+  MemoryFile& memory = *static_cast<MemoryFile*>(file);
+  ++memory.reads;
+  if (memory.at >= memory.fail_at) return -1;
+  std::size_t count = memory.size - memory.at;
+  if (count > length) count = length;
+  if (memory.at + count > memory.fail_at) count = memory.fail_at - memory.at;
+  std::memcpy(buffer, memory.data + memory.at, count);
+  memory.at += count;
+  return static_cast<long>(count);
+}
+
+// Hashes `memory` to its end, `chunk` bytes per step, finishing at `now_us`.
+// Returns how many steps it took, or -1 if hashing did not end.
+int hash_all(JobStartWait& wait, MemoryFile& memory, std::size_t chunk, uint32_t now_us) {
+  uint8_t buffer[multiclient::hash_chunk_bytes];
+  for (int steps = 1; steps < 10000000; ++steps) {
+    if (wait.hash_step(read_memory, &memory, buffer, chunk, now_us)) return steps;
+    if (!wait.hashing()) return -1;
+  }
+  return -1;
+}
+
+// Holds a start by `starter` whose file (empty here) is hashed at once, so
+// the limit starts at `now_us`.
+void hold(JobStartWait& wait, const Identity& starter, uint32_t now_us) {
+  wait.begin(starter);
+  MemoryFile empty;
+  hash_all(wait, empty, multiclient::hash_chunk_bytes, now_us);
+}
+
+std::string hex(const uint8_t* digest) {
+  static const char digits[] = "0123456789abcdef";
+  std::string text;
+  for (int i = 0; i < 16; ++i) {
+    text += digits[digest[i] >> 4];
+    text += digits[digest[i] & 0x0f];
+  }
+  return text;
+}
+
+// The MD5 of `size` bytes at `data` as JobStartWait hashes it, `chunk`
+// bytes per step, as hex; "" if it does not produce one.
+std::string held_md5(const void* data, std::size_t size, std::size_t chunk) {
+  JobStartWait wait;
+  wait.configure(30);
+  wait.begin(Identity{});
+  MemoryFile memory;
+  memory.data = static_cast<const uint8_t*>(data);
+  memory.size = size;
+  if (hash_all(wait, memory, chunk, 0) < 0) return "";
+  uint8_t digest[16];
+  if (!wait.copy_checksum(digest) || wait.hashed_size() != size) return "";
+  return hex(digest);
+}
+
 }  // namespace
 
 int main() {
@@ -138,14 +205,14 @@ int main() {
     wait.configure(30);
     const int starter = add_identified(table, 1, 0x100, true);
     CHECK(!wait.pending());
-    wait.begin(identity(table, starter), 0);
+    hold(wait, identity(table, starter), 0);
     CHECK(wait.pending());
     CHECK(wait.start_id() != 0);
     CHECK(wait.starter_id() == 0x100);
     const uint16_t first = wait.start_id();
     wait.end();
     CHECK(!wait.pending());
-    wait.begin(identity(table, starter), 0);
+    hold(wait, identity(table, starter), 0);
     CHECK(wait.start_id() != first);
     wait.end();
   }
@@ -157,7 +224,7 @@ int main() {
     wait.configure(30);
     bool saw_zero = false;
     for (uint32_t i = 0; i < 70000; ++i) {
-      wait.begin(Identity{}, 0);
+      hold(wait, Identity{}, 0);
       if (wait.start_id() == 0) saw_zero = true;
     }
     CHECK(!saw_zero);
@@ -170,7 +237,7 @@ int main() {
     wait.configure(30);
     const int starter = add_identified(table, 1, 0x100, true);
     const int other = add_identified(table, 2, 0x200, true);
-    wait.begin(identity(table, starter), 1000);
+    hold(wait, identity(table, starter), 1000);
     CHECK(wait.check(table, 1000) == StartCheck::keep_waiting);
     CHECK(wait.check(table, 1000 + 29 * second_us) == StartCheck::keep_waiting);
     CHECK(send_ready(wait, *table.wifi_at(other), wait.start_id()));
@@ -184,7 +251,7 @@ int main() {
     wait.configure(30);
     const int starter = add_identified(table, 1, 0x100, true);
     add_identified(table, 2, 0x200, true);
-    wait.begin(identity(table, starter), 5);
+    hold(wait, identity(table, starter), 5);
     CHECK(wait.check(table, 5 + 30 * second_us - 1) == StartCheck::keep_waiting);
     CHECK(wait.check(table, 5 + 30 * second_us) == StartCheck::time_limit);
   }
@@ -197,7 +264,7 @@ int main() {
     const int starter = add_identified(table, 1, 0x100, true);
     add_identified(table, 2, 0x200, true);
     const uint32_t start = 0xFFFFFFFFu - 2 * second_us;
-    wait.begin(identity(table, starter), start);
+    hold(wait, identity(table, starter), start);
     CHECK(wait.check(table, start + 10 * second_us) == StartCheck::keep_waiting);
     CHECK(wait.seconds_left(start + 10 * second_us) == 20);
     CHECK(wait.check(table, start + 30 * second_us) == StartCheck::time_limit);
@@ -208,7 +275,7 @@ int main() {
     ClientTable table;
     JobStartWait wait;
     wait.configure(30);
-    wait.begin(Identity{}, 0);
+    hold(wait, Identity{}, 0);
     CHECK(wait.seconds_left(0) == 30);
     CHECK(wait.seconds_left(1) == 30);
     CHECK(wait.seconds_left(second_us) == 29);
@@ -224,14 +291,14 @@ int main() {
     wait.configure(30);
     const int starter = add_identified(table, 1, 0x100, true);
     add_identified(table, 2, 0x200, true);
-    wait.begin(identity(table, starter), 0);
+    hold(wait, identity(table, starter), 0);
     table.remove_wifi(starter);
     CHECK(wait.check(table, 0) == StartCheck::starter_left);
 
     ClientTable usb_table;
     identify_usb(usb_table, 0x300, true);
     add_identified(usb_table, 2, 0x200, true);
-    wait.begin(multiclient::identity_of(usb_table.usb()), 0);
+    hold(wait, multiclient::identity_of(usb_table.usb()), 0);
     CHECK(wait.check(usb_table, 0) == StartCheck::keep_waiting);
     usb_table.clear_usb_identity();
     CHECK(wait.check(usb_table, 0) == StartCheck::starter_left);
@@ -244,7 +311,7 @@ int main() {
     wait.configure(30);
     const int starter = add_identified(table, 1, 0x100, true);
     add_identified(table, 2, 0x200, true);
-    wait.begin(identity(table, starter), 0);
+    hold(wait, identity(table, starter), 0);
     table.remove_wifi(starter);
     add_identified(table, 9, 0x100, true);
     CHECK(wait.check(table, 0) == StartCheck::keep_waiting);
@@ -257,7 +324,7 @@ int main() {
     wait.configure(30);
     const int starter = add_identified(table, 1, 0x100, true);
     const int other = add_identified(table, 2, 0x200, true);
-    wait.begin(identity(table, starter), 0);
+    hold(wait, identity(table, starter), 0);
     table.remove_wifi(other);
     CHECK(wait.check(table, 0) == StartCheck::all_ready);
   }
@@ -269,7 +336,7 @@ int main() {
     wait.configure(30);
     const int starter = add_identified(table, 1, 0x100, true);
     const int other = add_identified(table, 2, 0x200, true);
-    wait.begin(identity(table, starter), 0);
+    hold(wait, identity(table, starter), 0);
     CHECK(send_ready(wait, *table.wifi_at(other), wait.start_id()));
     const int late = add_identified(table, 3, 0x300, true);
     CHECK(wait.check(table, 0) == StartCheck::keep_waiting);
@@ -285,7 +352,7 @@ int main() {
     const int starter = add_identified(table, 1, 0x100, true);
     const int other = add_identified(table, 2, 0x200, true);
     add_identified(table, 3, 0x300, false);
-    wait.begin(identity(table, starter), 0);
+    hold(wait, identity(table, starter), 0);
     table.set_usb_present(true, 0);
     table.start_usb_hello_window(0);
     CHECK(send_ready(wait, *table.wifi_at(other), wait.start_id()));
@@ -301,7 +368,7 @@ int main() {
     const int other = add_identified(table, 2, 0x200, true);
     Client& client = *table.wifi_at(other);
     CHECK(!send_ready(wait, client, 1));  // nothing is waiting
-    wait.begin(identity(table, starter), 0);
+    hold(wait, identity(table, starter), 0);
     CHECK(!send_ready(wait, client, static_cast<uint16_t>(wait.start_id() + 1)));
     const uint8_t short_payload[1] = {0};
     CHECK(!wait.mark_ready(client, short_payload, sizeof(short_payload)));
@@ -323,10 +390,10 @@ int main() {
     wait.configure(30);
     const int starter = add_identified(table, 1, 0x100, true);
     const int other = add_identified(table, 2, 0x200, true);
-    wait.begin(identity(table, starter), 0);
+    hold(wait, identity(table, starter), 0);
     CHECK(send_ready(wait, *table.wifi_at(other), wait.start_id()));
     wait.end();
-    wait.begin(identity(table, starter), 0);
+    hold(wait, identity(table, starter), 0);
     CHECK(wait.check(table, 0) == StartCheck::keep_waiting);
   }
 
@@ -339,7 +406,7 @@ int main() {
     const int ready = add_identified(table, 2, 0x200, true);
     add_identified(table, 3, 0x300, true);
     identify_usb(table, 0x400, true);
-    wait.begin(identity(table, starter), 0);
+    hold(wait, identity(table, starter), 0);
     CHECK(send_ready(wait, *table.wifi_at(ready), wait.start_id()));
     uint64_t ids[multiclient::max_wifi_clients + 1] = {};
     CHECK(wait.not_ready(table, ids, sizeof(ids) / sizeof(ids[0])) == 2);
@@ -347,6 +414,216 @@ int main() {
     CHECK(ids[1] == 0x400);
     CHECK(wait.not_ready(table, ids, 1) == 1);
     CHECK(ids[0] == 0x300);
+  }
+
+  {
+    TEST("hash_step: the held file's MD5 matches the reference, empty, one chunk and many");
+    CHECK(held_md5("", 0, multiclient::hash_chunk_bytes) == "d41d8cd98f00b204e9800998ecf8427e");
+    CHECK(held_md5("abc", 3, multiclient::hash_chunk_bytes) == "900150983cd24fb0d6963f7d28e17f72");
+    const char fox[] = "The quick brown fox jumps over the lazy dog";
+    CHECK(held_md5(fox, sizeof(fox) - 1, multiclient::hash_chunk_bytes) == "9e107d9d372bb6826bd81d3542a419d6");
+    CHECK(held_md5(fox, sizeof(fox) - 1, 1) == "9e107d9d372bb6826bd81d3542a419d6");
+    CHECK(held_md5(fox, sizeof(fox) - 1, 7) == "9e107d9d372bb6826bd81d3542a419d6");
+
+    uint8_t pattern[1000];
+    for (std::size_t i = 0; i < sizeof(pattern); ++i) pattern[i] = static_cast<uint8_t>((i * 7 + 3) % 251);
+    CHECK(held_md5(pattern, 512, multiclient::hash_chunk_bytes) == "9cef49878f04c5b1d59e97aa72710816");  // exactly two chunks
+    CHECK(held_md5(pattern, sizeof(pattern), multiclient::hash_chunk_bytes) == "c90582fbbeb1275142915b85da61ade9");
+    CHECK(held_md5(pattern, sizeof(pattern), 64) == "c90582fbbeb1275142915b85da61ade9");
+    CHECK(held_md5(pattern, sizeof(pattern), 63) == "c90582fbbeb1275142915b85da61ade9");
+
+    std::string million(1000000, 'a');
+    CHECK(held_md5(million.data(), million.size(), multiclient::hash_chunk_bytes) == "7707d6ae4e027c70eea2a935c2296f21");
+  }
+
+  {
+    TEST("hash_step: one read of at most one chunk per call, ending on the read that finds the end");
+    JobStartWait wait;
+    wait.configure(30);
+    wait.begin(Identity{});
+    uint8_t pattern[1000] = {};
+    MemoryFile memory;
+    memory.data = pattern;
+    memory.size = sizeof(pattern);
+    // 1000 bytes in 256-byte chunks: four reads with data, then one that
+    // finds the end.
+    CHECK(hash_all(wait, memory, multiclient::hash_chunk_bytes, 0) == 5);
+    CHECK(memory.reads == 5);
+    CHECK(wait.hashed_size() == 1000);
+    CHECK(!wait.hashing());
+    CHECK(wait.pending());
+  }
+
+  {
+    TEST("hashing: a held start begins by hashing, and has no checksum until it ends");
+    JobStartWait wait;
+    wait.configure(30);
+    CHECK(!wait.hashing());
+    wait.begin(Identity{});
+    CHECK(wait.pending());
+    CHECK(wait.hashing());
+    uint8_t digest[16];
+    CHECK(!wait.copy_checksum(digest));
+    const char text[] = "abc";
+    MemoryFile memory;
+    memory.data = reinterpret_cast<const uint8_t*>(text);
+    memory.size = 3;
+    uint8_t buffer[multiclient::hash_chunk_bytes];
+    CHECK(!wait.hash_step(read_memory, &memory, buffer, sizeof(buffer), 0));
+    CHECK(wait.hashing());
+    CHECK(!wait.copy_checksum(digest));
+    CHECK(wait.hash_step(read_memory, &memory, buffer, sizeof(buffer), 0));
+    CHECK(!wait.hashing());
+    CHECK(wait.copy_checksum(digest));
+    CHECK(hex(digest) == "900150983cd24fb0d6963f7d28e17f72");
+    CHECK(wait.hashed_size() == 3);
+  }
+
+  {
+    TEST("hashing: the limit does not run while the file is hashed, and starts when hashing ends");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    add_identified(table, 2, 0x200, true);
+    wait.begin(identity(table, starter));
+    CHECK(wait.check(table, 0) == StartCheck::keep_waiting);
+    CHECK(wait.check(table, 100 * second_us) == StartCheck::keep_waiting);
+    CHECK(wait.seconds_left(100 * second_us) == 30);
+    std::string file(5000, 'x');
+    MemoryFile memory;
+    memory.data = reinterpret_cast<const uint8_t*>(file.data());
+    memory.size = file.size();
+    CHECK(hash_all(wait, memory, multiclient::hash_chunk_bytes, 200 * second_us) > 0);
+    CHECK(wait.seconds_left(200 * second_us) == 30);
+    CHECK(wait.check(table, 229 * second_us) == StartCheck::keep_waiting);
+    CHECK(wait.check(table, 230 * second_us) == StartCheck::time_limit);
+  }
+
+  {
+    TEST("hashing: a failed read ends hashing without a checksum, and the limit starts");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    add_identified(table, 2, 0x200, true);
+    wait.begin(identity(table, starter));
+    std::string file(5000, 'x');
+    MemoryFile memory;
+    memory.data = reinterpret_cast<const uint8_t*>(file.data());
+    memory.size = file.size();
+    memory.fail_at = 1000;
+    CHECK(hash_all(wait, memory, multiclient::hash_chunk_bytes, 7 * second_us) > 0);
+    CHECK(!wait.hashing());
+    CHECK(wait.pending());
+    uint8_t digest[16];
+    CHECK(!wait.copy_checksum(digest));
+    CHECK(wait.check(table, 36 * second_us) == StartCheck::keep_waiting);
+    CHECK(wait.check(table, 37 * second_us) == StartCheck::time_limit);
+  }
+
+  {
+    TEST("hashing: a cancel during hashing stops it, and the next start hashes its own file from the start");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    add_identified(table, 2, 0x200, true);
+    wait.begin(identity(table, starter));
+    std::string first(5000, 'x');
+    MemoryFile partial;
+    partial.data = reinterpret_cast<const uint8_t*>(first.data());
+    partial.size = first.size();
+    uint8_t buffer[multiclient::hash_chunk_bytes];
+    CHECK(!wait.hash_step(read_memory, &partial, buffer, sizeof(buffer), 0));
+    CHECK(!wait.hash_step(read_memory, &partial, buffer, sizeof(buffer), 0));
+    wait.end();  // abort, a halt, or the starter leaving
+    CHECK(!wait.pending());
+    CHECK(!wait.hashing());
+    const int reads = partial.reads;
+    CHECK(!wait.hash_step(read_memory, &partial, buffer, sizeof(buffer), 0));
+    CHECK(partial.reads == reads);  // nothing more is read once cancelled
+    uint8_t digest[16];
+    CHECK(!wait.copy_checksum(digest));
+
+    wait.begin(identity(table, starter));
+    CHECK(wait.hashing());
+    CHECK(wait.hashed_size() == 0);
+    const char text[] = "abc";
+    MemoryFile second;
+    second.data = reinterpret_cast<const uint8_t*>(text);
+    second.size = 3;
+    CHECK(hash_all(wait, second, multiclient::hash_chunk_bytes, 0) > 0);
+    CHECK(wait.copy_checksum(digest));
+    CHECK(hex(digest) == "900150983cd24fb0d6963f7d28e17f72");
+    CHECK(wait.hashed_size() == 3);
+  }
+
+  {
+    TEST("hashing: the starter leaving, or nobody left to wait for, ends the hold while hashing");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    const int other = add_identified(table, 2, 0x200, true);
+    wait.begin(identity(table, starter));
+    CHECK(wait.hashing());
+    table.remove_wifi(starter);
+    CHECK(wait.check(table, 0) == StartCheck::starter_left);
+
+    ClientTable second;
+    const int starter2 = add_identified(second, 1, 0x100, true);
+    const int other2 = add_identified(second, 2, 0x200, true);
+    wait.begin(identity(second, starter2));
+    CHECK(wait.check(second, 0) == StartCheck::keep_waiting);
+    second.remove_wifi(other2);
+    CHECK(wait.check(second, 0) == StartCheck::all_ready);
+
+    ClientTable third;
+    const int starter3 = add_identified(third, 1, 0x100, true);
+    const int other3 = add_identified(third, 2, 0x200, true);
+    wait.begin(identity(third, starter3));
+    CHECK(send_ready(wait, *third.wifi_at(other3), wait.start_id()));  // a controller giving up
+    CHECK(wait.hashing());
+    CHECK(wait.check(third, 0) == StartCheck::all_ready);
+    (void)other;
+  }
+
+  {
+    TEST("hashing: nothing is hashed without a held start");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    CHECK(!wait.needs_wait(table, identity(table, starter)));  // nobody to wait for: no hold
+    CHECK(!wait.hashing());
+    const char text[] = "abc";
+    MemoryFile memory;
+    memory.data = reinterpret_cast<const uint8_t*>(text);
+    memory.size = 3;
+    uint8_t buffer[multiclient::hash_chunk_bytes];
+    CHECK(!wait.hash_step(read_memory, &memory, buffer, sizeof(buffer), 0));
+    CHECK(memory.reads == 0);
+    uint8_t digest[16];
+    CHECK(!wait.copy_checksum(digest));
+  }
+
+  {
+    TEST("hashing: the checksum is kept after the hold ends, for play-started, until the next start");
+    JobStartWait wait;
+    wait.configure(30);
+    wait.begin(Identity{});
+    const char text[] = "abc";
+    MemoryFile memory;
+    memory.data = reinterpret_cast<const uint8_t*>(text);
+    memory.size = 3;
+    CHECK(hash_all(wait, memory, multiclient::hash_chunk_bytes, 0) > 0);
+    wait.end();
+    uint8_t digest[16];
+    CHECK(wait.copy_checksum(digest));
+    CHECK(hex(digest) == "900150983cd24fb0d6963f7d28e17f72");
+    wait.begin(Identity{});
+    CHECK(!wait.copy_checksum(digest));
   }
 
   {
