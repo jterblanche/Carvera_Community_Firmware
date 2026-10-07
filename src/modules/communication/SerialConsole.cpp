@@ -17,6 +17,7 @@ using std::string;
 #include "libs/MakeraFrame.h"
 #include "libs/ClientTable.h"
 #include "libs/JobStartWait.h"
+#include "libs/IdentityCheck.h"
 #include "libs/nuts_bolts.h"
 #include "SerialConsole.h"
 #include "libs/RingBuffer.h"
@@ -333,6 +334,8 @@ void SerialConsole::on_idle(void * argument)
             table.clear_usb_identity();
         }
     }
+
+    if (communication_protocol == PROTOCOL_MAKERA) drive_identity_check(now_us);
 
 #if defined(MACHINE_FAMILY_CARVERA)
     if (temp_baud_rate != 0) {
@@ -732,6 +735,11 @@ void SerialConsole::process_makera_byte(uint8_t received)
         return;
     }
 
+    if (packet.type == PTYPE_PRESENCE_REPLY) {
+        multiclient::shared_identity_check().note_answer(multiclient::usb_seat(), packet.data, packet.data_length);
+        return;
+    }
+
     // Never touches the control token: see WifiProvider's matching case.
     if (packet.type == PTYPE_JOB_START_READY) {
         multiclient::Client *self = multiclient::shared_client_table().usb();
@@ -794,14 +802,22 @@ uint8_t SerialConsole::hello_ack_mode() const {
     return multiclient::hello_mode_single_user;
 }
 
+void SerialConsole::send_hello_ack(uint8_t result) {
+    uint8_t ack[multiclient::hello_ack_length];
+    const std::size_t ack_len = multiclient::build_hello_ack(ack, result, hello_ack_mode(),
+                                                             multiclient::shared_job_start_wait().hello_ack_features());
+    PacketMessage(PTYPE_HELLO_ACK, reinterpret_cast<const char*>(ack), static_cast<int>(ack_len));
+}
+
 // Parses a hello frame and answers it. An already-identified USB link
 // re-sending hello is re-acked with no state change. A first-time hello
-// whose id already belongs to an identified WiFi client is treated as a
-// reconnect: that WiFi table entry is dropped (its own per-client parser
-// state is left for WifiProvider to reset the next time that slot is
-// reused, which it already does on every admission). A first-time hello
 // while an old (never-identified, window-expired) client is already known
-// to be connected -- other than this USB link itself -- is refused.
+// to be connected -- other than this USB link itself -- is refused. A
+// first-time hello whose id an identified WiFi client already has is
+// decided by libs/IdentityCheck.h and answered by drive_identity_check():
+// from the same launch, WifiProvider removes that client and closes its
+// connection, and this link is admitted; from a different launch, that
+// client is first asked whether it is still there.
 void SerialConsole::handle_hello(const uint8_t* payload, uint16_t payload_length, uint32_t now_us) {
     auto &table = multiclient::shared_client_table();
     multiclient::Client *self = table.usb();
@@ -811,38 +827,99 @@ void SerialConsole::handle_hello(const uint8_t* payload, uint16_t payload_length
     if (!multiclient::parse_hello(payload, payload_length, hello)) return; // malformed, or an unrecognised version: ignored
 
     if (!self->identified) {
-        // A reconnect under an id already in the table (dropped below) is
-        // the same controller still there, just on USB now instead of
-        // WiFi -- not a new arrival, so it must not publish "joined" once
-        // self picks the id up: see the matching skip below.
-        const int stale = table.find_wifi_by_id(hello.id);
-        const bool reconnect = stale >= 0;
-        if (reconnect) table.remove_wifi(stale);
+        auto &check = multiclient::shared_identity_check();
+        if (check.holds(multiclient::usb_seat())) return; // its first hello is still being decided
 
         if (table.has_old_client(now_us, -1, /*exclude_usb=*/true)) {
-            uint8_t ack[multiclient::hello_ack_length];
-            const std::size_t ack_len = multiclient::build_hello_ack(
-                ack, multiclient::hello_result_old_controller_present, hello_ack_mode(),
-                multiclient::shared_job_start_wait().hello_ack_features());
-            PacketMessage(PTYPE_HELLO_ACK, reinterpret_cast<const char*>(ack), static_cast<int>(ack_len));
+            send_hello_ack(multiclient::hello_result_old_controller_present);
             return;
         }
 
-        multiclient::set_identity(*self, hello.id, hello.name, hello.name_len);
-
-        if (!reconnect) {
-            uint8_t joined_payload[1 + 8 + 1 + multiclient::max_name_length];
-            const std::size_t joined_length = multiclient::build_client_joined_event(
-                self->id, self->name, self->name_len, joined_payload, sizeof(joined_payload));
-            if (joined_length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, joined_payload, joined_length);
+        const multiclient::HelloDecision decision = multiclient::decide_hello(table, multiclient::usb_seat(), hello, check);
+        if (decision.action == multiclient::HelloAction::admit) {
+            admit_usb_hello(hello, false);
+            return;
         }
+        // The id is on WiFi, whose connection only WifiProvider can close,
+        // so even a reconnect waits for its idle loop to remove it.
+        const bool ask_first = decision.action == multiclient::HelloAction::ask;
+        if (decision.action == multiclient::HelloAction::busy ||
+            !check.begin(table, multiclient::usb_seat(), decision.other, hello, ask_first, us_ticker_read())) {
+            // Another check is running; one runs at a time. The controller
+            // sends its hello again shortly.
+            multiclient::restart_hello_window(*self, now_us);
+            send_hello_ack(multiclient::hello_result_busy);
+            return;
+        }
+        drive_identity_check(us_ticker_read());
+        return;
     }
     self->features = hello.features;
+    self->has_launch = hello.has_launch;
+    self->launch = hello.launch;
+    send_hello_ack(multiclient::hello_result_accepted);
+}
 
-    uint8_t ack[multiclient::hello_ack_length];
-    const std::size_t ack_len = multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, hello_ack_mode(),
-                                                             multiclient::shared_job_start_wait().hello_ack_features());
-    PacketMessage(PTYPE_HELLO_ACK, reinterpret_cast<const char*>(ack), static_cast<int>(ack_len));
+// Identifies this USB link with `hello` and accepts its hello. A controller
+// admitted under the id that holds control never keeps it: control is
+// freed and the change published.
+void SerialConsole::admit_usb_hello(const multiclient::Hello& hello, bool reconnect) {
+    multiclient::Client *self = multiclient::shared_client_table().usb();
+    if (self == nullptr) return;
+
+    if (multiclient::admit_hello(*self, hello, multiclient::shared_control_token())) {
+        uint8_t payload[1 + 8 + 1];  // holder_id 0 + holder_name_len 0: nobody has control
+        const std::size_t length = multiclient::build_control_changed_event(0, nullptr, 0, payload, sizeof(payload));
+        if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+    }
+
+    if (!reconnect) {
+        uint8_t joined_payload[1 + 8 + 1 + multiclient::max_name_length];
+        const std::size_t joined_length = multiclient::build_client_joined_event(
+            self->id, self->name, self->name_len, joined_payload, sizeof(joined_payload));
+        if (joined_length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, joined_payload, joined_length);
+    }
+    send_hello_ack(multiclient::hello_result_accepted);
+}
+
+// Carries out the USB side of the identity check in progress, if any
+// (libs/IdentityCheck.h): asking or clearing this link's identity when it
+// is the old entry, and answering this link's held hello. See
+// WifiProvider::drive_identity_check() for the WiFi side. Called from
+// on_idle() and straight after a check starts.
+void SerialConsole::drive_identity_check(uint32_t now_us) {
+    auto &check = multiclient::shared_identity_check();
+    auto &table = multiclient::shared_client_table();
+    for (;;) {
+        switch (check.next_step(table, multiclient::Link::usb, now_us)) {
+            case multiclient::CheckStep::ask: {
+                uint8_t question[multiclient::presence_check_length];
+                const std::size_t length = check.build_question(question);
+                PacketMessage(PTYPE_PRESENCE_CHECK, reinterpret_cast<const char*>(question), static_cast<int>(length));
+                check.asked(now_us);
+                break;
+            }
+            case multiclient::CheckStep::retire:
+                table.clear_usb_identity();
+                check.retired();
+                break;
+            case multiclient::CheckStep::refuse:
+                send_hello_ack(multiclient::hello_result_identity_connected);
+                check.end(table);
+                return;
+            case multiclient::CheckStep::admit: {
+                const multiclient::Hello hello = check.hello();
+                check.end(table);
+                admit_usb_hello(hello, true);
+                return;
+            }
+            case multiclient::CheckStep::drop:
+                check.end(table);
+                return;
+            default:
+                return;
+        }
+    }
 }
 
 // Answers a client-list request with every identified client in the shared

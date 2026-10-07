@@ -100,6 +100,17 @@ struct Client {
   // The start id of the last job-start wait this client said it is ready
   // for (libs/JobStartWait.h). 0, which no wait uses, until it says so.
   uint16_t job_start_ready = 0;
+
+  // True while this client's hello is held unanswered, because another
+  // client with the same id is being asked whether it is still there
+  // (libs/IdentityCheck.h). Such a client has said hello, so it is never
+  // treated as old while it waits.
+  bool hello_held = false;
+
+  // The launch part from this client's hello (libs/Hello.h), if it sent
+  // one.
+  bool has_launch = false;
+  uint64_t launch = 0;
 };
 
 // How many consecutive temporary send failures mark a client as gone. At
@@ -196,7 +207,8 @@ void set_identity(Client& client, uint64_t id, const char* name, uint8_t name_le
 void record_heartbeat(Client& client, uint32_t now_us);
 
 // True once `client`'s hello window has run out without it identifying.
-// Always false once identified, and false while the window has not started
+// Always false once identified or while its hello is held (see
+// Client::hello_held), and false while the window has not started
 // (an idle USB link) or has not elapsed yet. Called for either a WiFi slot
 // or the USB entry (see has_old_client()).
 //
@@ -222,6 +234,11 @@ void record_heartbeat(Client& client, uint32_t now_us);
 // here, since a hello window is 5 s and a client that runs past it without
 // identifying is disconnected, not left to sit.
 bool client_is_old(const Client& client, uint32_t now_us);
+
+// Starts `client`'s hello window over from `now_us`, if it has started: a
+// hello answered "try again shortly" (hello_result_busy) gets the full
+// window again for its retry.
+void restart_hello_window(Client& client, uint32_t now_us);
 
 // True once a USB entry's hello window has started and at least
 // usb_idle_timeout_us has passed since the last byte received on it

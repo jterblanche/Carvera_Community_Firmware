@@ -83,6 +83,14 @@
 // need not wait for it any longer (libs/JobStartWait.h). Payload:
 // start_id(2, big-endian), the id from the job-start event it answers.
 #define PTYPE_JOB_START_READY   0x6C
+
+// Presence check: when a hello arrives carrying the id of a controller that
+// is already connected, from a different launch, the machine asks that
+// connected controller whether it is still there, and it answers with the
+// same number (libs/IdentityCheck.h). Both payloads: number(4, big-endian).
+// Bytes after the number are ignored.
+#define PTYPE_PRESENCE_CHECK    0x6D
+#define PTYPE_PRESENCE_REPLY    0x6E
 #include <stdint.h>
 
 class PublicData {

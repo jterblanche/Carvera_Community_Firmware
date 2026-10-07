@@ -15,6 +15,17 @@ namespace multiclient {
 constexpr uint8_t hello_result_accepted = 0;
 constexpr uint8_t hello_result_cap_reached = 1;
 constexpr uint8_t hello_result_old_controller_present = 2;
+// Another controller with this hello's id is already connected and answered
+// when asked whether it is still there (libs/IdentityCheck.h). It keeps its
+// connection and control; the controller refused this way does not retry.
+// Sent for nothing else.
+constexpr uint8_t hello_result_identity_connected = 3;
+// The machine is already checking another hello and checks one at a time.
+// Nothing is known about this one yet: the controller sends its hello again
+// on the same connection about a second later, without telling the user.
+// The refusal starts the connection's hello window over, so waiting to
+// retry never makes it count as an old controller.
+constexpr uint8_t hello_result_busy = 4;
 
 // hello ack `mode` values, reporting the machine's configured
 // multi_client.mode (ControlToken.h's Mode).
@@ -42,18 +53,25 @@ struct Hello {
   uint8_t name_len = 0;
   Link link = Link::wifi;
   uint8_t features = 0;
+  // The launch part: a number the controller picks once each time it
+  // starts, so the machine can tell the same running controller coming
+  // back on a new link from another one using the same id.
+  bool has_launch = false;
+  uint64_t launch = 0;
 };
 
 // Parses a hello payload: protocol_version(1) + id(8, big-endian) +
-// name_len(1) + name(name_len) + link(1) + features(1, optional). Returns
+// name_len(1) + name(name_len) + link(1) + features(1, optional) +
+// launch(8, big-endian, optional, only after features). Returns
 // false, leaving `out` unspecified, when the payload is too short for its
 // own name_len, when name_len exceeds max_name_length, or when
 // protocol_version is not the one recognised value (1) -- the caller then
 // treats the sender as unidentified, exactly as if nothing had arrived. A
 // payload that ends at the link field, as every controller from before the
-// features byte sends it, parses with features 0. Trailing bytes past the
-// features byte are ignored, so a future version's appended fields don't
-// break this parser.
+// features byte sends it, parses with features 0, and one with fewer than
+// 8 bytes after the features byte parses with no launch part. Trailing
+// bytes past the launch part are ignored, so a future version's appended
+// fields don't break this parser.
 bool parse_hello(const uint8_t* payload, std::size_t length, Hello& out);
 
 // Builds a hello-ack payload into `out` (must have room for
