@@ -474,6 +474,117 @@ int main() {
   }
 
   {
+    TEST("build_job_start_event writes the file fields, then the wait, then the controllers not ready");
+    uint8_t digest[multiclient::md5_digest_bytes];
+    for (std::size_t i = 0; i < sizeof(digest); ++i) digest[i] = static_cast<uint8_t>(0x10 + i);
+    const uint64_t not_ready[] = {0x1112131415161718ULL, 0x2122232425262728ULL};
+    multiclient::JobStartEvent event;
+    event.path = "/sd/gcodes/part.nc";
+    event.path_len = 18;
+    event.size = 0x00ABCDEFu;
+    event.md5_digest = digest;
+    event.start_id = 0x0102;
+    event.phase = multiclient::job_start_phase_waiting;
+    event.reason = multiclient::job_start_reason_waiting;
+    event.seconds_left = 27;
+    event.starter_id = 0xA1A2A3A4A5A6A7A8ULL;
+    event.not_ready_ids = not_ready;
+    event.not_ready_count = 2;
+    uint8_t out[multiclient::max_job_start_event_length];
+    const std::size_t len = multiclient::build_job_start_event(event, out, sizeof(out));
+    const std::size_t file_part = 1 + 1 + 18 + 4 + 1 + multiclient::md5_digest_bytes;
+    CHECK(len == file_part + 2 + 1 + 1 + 1 + 8 + 1 + 2 * 8);
+    CHECK(out[0] == multiclient::event_kind_job_start);
+    CHECK(multiclient::event_kind_job_start == 8);
+    CHECK(out[1] == 18);
+    CHECK(std::memcmp(out + 2, "/sd/gcodes/part.nc", 18) == 0);
+    CHECK(read_be32(out + 20) == 0x00ABCDEFu);
+    CHECK(out[24] == multiclient::event_checksum_md5);
+    CHECK(std::memcmp(out + 25, digest, sizeof(digest)) == 0);
+    const uint8_t* wait = out + file_part;
+    CHECK(wait[0] == 0x01 && wait[1] == 0x02);
+    CHECK(wait[2] == multiclient::job_start_phase_waiting);
+    CHECK(wait[3] == multiclient::job_start_reason_waiting);
+    CHECK(wait[4] == 27);
+    const uint8_t starter[] = {0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8};
+    CHECK(std::memcmp(wait + 5, starter, 8) == 0);
+    CHECK(wait[13] == 2);
+    const uint8_t first[] = {0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18};
+    const uint8_t second[] = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28};
+    CHECK(std::memcmp(wait + 14, first, 8) == 0);
+    CHECK(std::memcmp(wait + 22, second, 8) == 0);
+  }
+
+  {
+    TEST("build_job_start_event starts with the same bytes as play-started, after the kind");
+    uint8_t digest[multiclient::md5_digest_bytes] = {};
+    multiclient::JobStartEvent event;
+    event.path = "/sd/gcodes/a.nc";
+    event.path_len = 15;
+    event.size = 4242;
+    event.md5_digest = digest;
+    event.phase = multiclient::job_start_phase_starting;
+    event.reason = multiclient::job_start_reason_start_now;
+    uint8_t job_start[multiclient::max_job_start_event_length];
+    uint8_t play_started[300];
+    const std::size_t job_start_len = multiclient::build_job_start_event(event, job_start, sizeof(job_start));
+    const std::size_t play_started_len =
+        multiclient::build_play_started_event("/sd/gcodes/a.nc", 15, 4242, digest, play_started, sizeof(play_started));
+    CHECK(job_start_len == play_started_len + 2 + 1 + 1 + 1 + 8 + 1);
+    CHECK(std::memcmp(job_start + 1, play_started + 1, play_started_len - 1) == 0);
+    CHECK(job_start[play_started_len + 2] == multiclient::job_start_phase_starting);
+    CHECK(job_start[play_started_len + 3] == multiclient::job_start_reason_start_now);
+    CHECK(job_start[play_started_len + 13] == 0);  // nobody listed as not ready
+  }
+
+  {
+    TEST("build_job_start_event without a digest writes checksum_type none and no digest bytes");
+    multiclient::JobStartEvent event;
+    event.path = "x.nc";
+    event.path_len = 4;
+    event.phase = multiclient::job_start_phase_cancelled;
+    event.reason = multiclient::job_start_reason_starter_left;
+    uint8_t out[multiclient::max_job_start_event_length];
+    const std::size_t len = multiclient::build_job_start_event(event, out, sizeof(out));
+    CHECK(len == 1 + 1 + 4 + 4 + 1 + 2 + 1 + 1 + 1 + 8 + 1);
+    CHECK(out[1 + 1 + 4 + 4] == multiclient::event_checksum_none);
+    CHECK(out[1 + 1 + 4 + 4 + 1 + 2] == multiclient::job_start_phase_cancelled);
+    CHECK(out[1 + 1 + 4 + 4 + 1 + 3] == multiclient::job_start_reason_starter_left);
+  }
+
+  {
+    TEST("build_job_start_event lists at most one id per client the table can hold");
+    uint64_t ids[multiclient::max_job_start_not_ready + 2];
+    for (std::size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i) ids[i] = i + 1;
+    multiclient::JobStartEvent event;
+    event.path = "x.nc";
+    event.path_len = 4;
+    event.not_ready_ids = ids;
+    event.not_ready_count = static_cast<uint8_t>(sizeof(ids) / sizeof(ids[0]));
+    uint8_t out[multiclient::max_job_start_event_length];
+    const std::size_t len = multiclient::build_job_start_event(event, out, sizeof(out));
+    const std::size_t count_at = 1 + 1 + 4 + 4 + 1 + 2 + 1 + 1 + 1 + 8;
+    CHECK(multiclient::max_job_start_not_ready == multiclient::max_wifi_clients + 1);
+    CHECK(out[count_at] == multiclient::max_job_start_not_ready);
+    CHECK(len == count_at + 1 + 8 * multiclient::max_job_start_not_ready);
+  }
+
+  {
+    TEST("build_job_start_event refuses to write past out_capacity, and its largest payload fits a frame");
+    multiclient::JobStartEvent event;
+    event.path = "abc";
+    event.path_len = 3;
+    const uint64_t id = 7;
+    event.not_ready_ids = &id;
+    event.not_ready_count = 1;
+    const std::size_t full = 1 + 1 + 3 + 4 + 1 + 2 + 1 + 1 + 1 + 8 + 1 + 8;
+    uint8_t out[full];
+    CHECK(multiclient::build_job_start_event(event, out, full - 1) == 0);
+    CHECK(multiclient::build_job_start_event(event, out, full) == full);
+    CHECK(multiclient::max_job_start_event_length <= 535);
+  }
+
+  {
     TEST("every event builder refuses to write past out_capacity");
     uint8_t out[3];
     CHECK(multiclient::build_upload_finished_event("abc", 3, 1, nullptr, out, sizeof(out)) == 0);

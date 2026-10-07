@@ -40,6 +40,7 @@
 #include "libs/MakeraControl.h"
 #include "libs/MakeraFrame.h"
 #include "libs/ControlToken.h"
+#include "libs/JobStartWait.h"
 #include "modules/utils/player/PlayerPublicAccess.h"
 #include "port_api.h"
 #include "InterruptIn.h"
@@ -459,6 +460,14 @@ void WifiProvider::receive_wifi_data() {
 				continue;
 			}
 
+			// Never touches the control token: saying it is ready changes
+			// nothing on the machine but the held start's own bookkeeping.
+			if (packet.type == PTYPE_JOB_START_READY) {
+				multiclient::Client *self = multiclient::shared_client_table().wifi_at(client_index);
+				if (self != nullptr) multiclient::shared_job_start_wait().mark_ready(*self, packet.data, packet.data_length);
+				continue;
+			}
+
 			if (packet.type == PTYPE_RELAY) {
 				handle_wifi_relay(client_index, packet.data, packet.data_length);
 				continue;
@@ -839,7 +848,8 @@ void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, u
 		if (table.has_old_client(now_us, client_index)) {
 			uint8_t ack[multiclient::hello_ack_length];
 			const std::size_t ack_len = multiclient::build_hello_ack(
-				ack, multiclient::hello_result_old_controller_present, hello_ack_mode());
+				ack, multiclient::hello_result_old_controller_present, hello_ack_mode(),
+				multiclient::shared_job_start_wait().hello_ack_features());
 			send_wifi_packet(client_index, PTYPE_HELLO_ACK, ack, ack_len);
 			return;
 		}
@@ -853,10 +863,11 @@ void WifiProvider::handle_wifi_hello(int client_index, const uint8_t* payload, u
 			if (joined_length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, joined_payload, joined_length);
 		}
 	}
+	self->features = hello.features;
 
 	uint8_t ack[multiclient::hello_ack_length];
-	const std::size_t ack_len =
-		multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, hello_ack_mode());
+	const std::size_t ack_len = multiclient::build_hello_ack(ack, multiclient::hello_result_accepted, hello_ack_mode(),
+		multiclient::shared_job_start_wait().hello_ack_features());
 	send_wifi_packet(client_index, PTYPE_HELLO_ACK, ack, ack_len);
 }
 
@@ -1464,6 +1475,17 @@ void WifiProvider::reply_gate_refusal(int client_index, const multiclient::GateR
 // same ControlToken::gate() decision, so the rule itself lives in exactly
 // one place.
 bool WifiProvider::gate_dispatch(int client_index, const makera::Packet &packet) {
+	// Checked before the control gate, so a refused command never moves
+	// control either.
+	if (packet.type == PTYPE_CTRL_MULTI && multiclient::shared_job_start_wait().pending() &&
+	    multiclient::refused_while_start_pending(reinterpret_cast<const char*>(packet.data), packet.data_length)) {
+		const int saved_reply_client = active_reply_client;
+		active_reply_client = client_index;
+		printf("%s", multiclient::job_start_pending_reply);
+		active_reply_client = saved_reply_client;
+		return false;
+	}
+
 	const GateInputs in = gate_inputs_for(client_index, packet);
 
 	const multiclient::GateResult result = multiclient::shared_control_token().gate(

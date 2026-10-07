@@ -80,6 +80,30 @@ int main() {
   }
 
   {
+    TEST("decide: a job start waiting: upload is refused for the wait, everything else runs");
+    MachineState s = state(false, true);
+    s.job_start_pending = true;
+    for (FileCommand command : all_commands) {
+      const Decision expected =
+          command == FileCommand::upload ? Decision::refuse_job_start_pending : Decision::run;
+      CHECK(decide(command, s) == expected);
+    }
+  }
+
+  {
+    TEST("decide: a job start waiting with moves queued: upload names the wait, download gets the busy reply");
+    MachineState s = state(false, false);
+    s.job_start_pending = true;
+    CHECK(decide(FileCommand::upload, s) == Decision::refuse_job_start_pending);
+    CHECK(decide(FileCommand::download, s) == Decision::refuse_machine_busy);
+  }
+
+  {
+    TEST("decide: a default MachineState has no job start waiting");
+    CHECK(!MachineState{}.job_start_pending);
+  }
+
+  {
     TEST("job_playing_reply: one line in the control gate's refusal form");
     const char* reply = file_command_gate::job_playing_reply;
     const std::size_t length = std::strlen(reply);

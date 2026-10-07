@@ -37,7 +37,8 @@ class Player : public Module {
         void select_file(string argument, bool force_prescan = false);
         void goto_line_number(unsigned long line_number);
         // `new_job` is false when the file continues a job already
-        // playing (a subprogram call or return), true when it starts one.
+        // playing (a subprogram call or return), true when it starts one,
+        // which may then be held for other controllers (hold_start()).
         void play_opened_file(bool new_job);
         void end_of_file();
 #endif
@@ -54,6 +55,16 @@ class Player : public Module {
         void close_line_source();
         void play_command( string parameters, StreamOutput* stream );
         void publish_play_started();
+        void start_now_command( StreamOutput* stream );
+#if !defined(STREAMED_JOB_PLAYBACK)
+        void begin_playing( StreamOutput* stream, bool verbose );
+        void start_opened_file(bool new_job);
+        bool hold_start( StreamOutput* stream, bool from_play_command, bool verbose );
+        void start_held_job(uint8_t reason);
+        void cancel_held_start(uint8_t reason);
+        void check_held_start();
+        void publish_job_start(uint8_t phase, uint8_t reason);
+#endif
         void progress_command( string parameters, StreamOutput* stream );
         void abort_command( string parameters, StreamOutput* stream );
         void suspend_command( string parameters, StreamOutput* stream , bool pause_outside_play_mode = false);
@@ -192,5 +203,9 @@ class Player : public Module {
             bool inner_playing:1;
             bool laser_clustering:1;
             bool spindle_suspend_restore_enable:1;
+            // How to start a held job (hold_start()): through
+            // begin_playing(), with -v, or through start_opened_file().
+            bool held_from_play_command:1;
+            bool held_verbose:1;
         };
 };

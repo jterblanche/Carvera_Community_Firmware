@@ -30,6 +30,9 @@ struct MachineState {
   bool job_playing = false;
   // The motion queue is empty (Conveyor::is_idle()).
   bool motion_queue_idle = true;
+  // A job start is held, waiting for other controllers to load the file
+  // (libs/JobStartWait.h).
+  bool job_start_pending = false;
 };
 
 enum class Decision : uint8_t {
@@ -39,6 +42,11 @@ enum class Decision : uint8_t {
   // download or upload with moves still in the queue: the machine-busy reply
   // those two commands have always sent.
   refuse_machine_busy,
+  // upload while a job start is held: reply with
+  // multiclient::job_start_pending_reply. An upload could replace the file
+  // the other controllers are loading. The other file commands only read,
+  // and a waiting controller needs download to fetch the job, so they run.
+  refuse_job_start_pending,
 };
 
 Decision decide(FileCommand command, const MachineState& state);

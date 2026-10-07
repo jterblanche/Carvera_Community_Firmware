@@ -120,6 +120,28 @@ std::size_t build_play_started_event(const char* path, uint8_t path_len, uint32_
   return build_file_event(event_kind_play_started, path, path_len, size, md5_digest, out, out_capacity);
 }
 
+std::size_t build_job_start_event(const JobStartEvent& event, uint8_t* out, std::size_t out_capacity) {
+  std::size_t offset = build_file_event(event_kind_job_start, event.path, event.path_len, event.size,
+                                        event.md5_digest, out, out_capacity);
+  if (offset == 0) return 0;
+  const std::size_t count = event.not_ready_count > max_job_start_not_ready ? max_job_start_not_ready
+                                                                              : event.not_ready_count;
+  if (offset + 2 + 1 + 1 + 1 + 8 + 1 + 8 * count > out_capacity) return 0;
+  out[offset++] = static_cast<uint8_t>(event.start_id >> 8);
+  out[offset++] = static_cast<uint8_t>(event.start_id);
+  out[offset++] = event.phase;
+  out[offset++] = event.reason;
+  out[offset++] = event.seconds_left;
+  for (int i = 0; i < 8; ++i) out[offset + i] = static_cast<uint8_t>(event.starter_id >> (8 * (7 - i)));
+  offset += 8;
+  out[offset++] = static_cast<uint8_t>(count);
+  for (std::size_t n = 0; n < count; ++n) {
+    for (int i = 0; i < 8; ++i) out[offset + i] = static_cast<uint8_t>(event.not_ready_ids[n] >> (8 * (7 - i)));
+    offset += 8;
+  }
+  return offset;
+}
+
 std::size_t build_job_ended_event(const char* path, uint8_t path_len, uint8_t percent_complete,
                                    uint32_t played_lines, uint32_t elapsed_secs, uint8_t* out,
                                    std::size_t out_capacity) {

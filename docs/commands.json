@@ -825,7 +825,7 @@
     },
     "M32": {
       "type": "mcode",
-      "description": "Select a file and start playing it. For macros prefer M98.",
+      "description": "Select a file and start playing it. For macros prefer M98. Like play, the start is held while other controllers load the file when the job-start wait applies (see play). Refused while a job start is held.",
       "parameters": {
         "filename": {
           "required": true,
@@ -3883,7 +3883,7 @@
     },
     "play": {
       "type": "shell",
-      "description": "Play a G-code file. The machine must be homed.",
+      "description": "Play a G-code file. The machine must be homed. When other identified controllers that take part in the job-start wait are connected, the start is held until each has loaded the file, for at most multi_client.start_wait_s seconds (default 30, 0 turns the wait off), and then the job starts; start-now starts it at once and abort cancels it. While it is held, every G-code, M-code and tool line, $H, $J, play, buffer, goto, suspend, resume and upload are refused with \"error:Refused -- a job is about to start\". With no such controller connected the job starts at once.",
       "parameters": {
         "file": {
           "required": true,
@@ -3909,7 +3909,7 @@
     },
     "abort": {
       "type": "shell",
-      "description": "Stop file playback and clear the queue.",
+      "description": "Stop file playback and clear the queue. While a job start is held, cancels it instead: the file is closed and the commands buffered for it are dropped.",
       "parameters": {}
     },
     "suspend": {
@@ -3933,6 +3933,11 @@
         }
       }
     },
+    "start-now": {
+      "type": "shell",
+      "description": "Start a held job at once, without waiting any longer for other controllers to load the file (see play). Replies \"No job start is waiting\" when no start is held.",
+      "parameters": {}
+    },
     "buffer": {
       "type": "shell",
       "description": "Queue a G-code line into the player buffer.",
@@ -3946,7 +3951,7 @@
     },
     "upload": {
       "type": "shell",
-      "description": "Receive a stream and save it as the named file. Refused while a job is playing or paused.",
+      "description": "Receive a stream and save it as the named file. Refused while a job is playing or paused, or while a job start is held.",
       "parameters": {
         "filename": {
           "required": true,

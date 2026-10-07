@@ -434,7 +434,7 @@ void SimpleShell::on_console_line_received( void *argument )
 
         } else if (cmd == "play" || cmd == "progress" || cmd == "abort" || cmd == "suspend"
         		|| cmd == "resume" || cmd == "buffer" || cmd == "upload" || cmd == "download"
-        		|| cmd == "goto") {
+        		|| cmd == "goto" || cmd == "start-now") {
             // these are handled by Player module
 
         } else if (cmd == "laser" || cmd == "laserabort") {
