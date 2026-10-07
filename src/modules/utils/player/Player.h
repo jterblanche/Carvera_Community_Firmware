@@ -64,6 +64,7 @@ class Player : public Module {
         void cancel_held_start(uint8_t reason);
         void check_held_start();
         void publish_job_start(uint8_t phase, uint8_t reason);
+        void hash_held_file();
 #endif
         void progress_command( string parameters, StreamOutput* stream );
         void abort_command( string parameters, StreamOutput* stream );
@@ -191,6 +192,9 @@ class Player : public Module {
         bool last_spindle_ccw;
 #if !defined(STREAMED_JOB_PLAYBACK)
         bool skip_ocodes_prescan = false;
+        // Where the held file was positioned when its start was held; it is
+        // read from the beginning to hash it, then put back here.
+        long held_position = 0;
 #endif
 
         struct {
@@ -207,5 +211,8 @@ class Player : public Module {
             // begin_playing(), with -v, or through start_opened_file().
             bool held_from_play_command:1;
             bool held_verbose:1;
+            // Set while a held job is being started (start_held_job()), so
+            // its play-started carries the MD5 the hold computed.
+            bool starting_held_job:1;
         };
 };

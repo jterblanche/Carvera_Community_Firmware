@@ -47,12 +47,39 @@ bool JobStartWait::needs_wait(const ClientTable& table, const Identity& starter)
   return usb != nullptr && usb->identified && (usb->features & hello_feature_job_start_wait) && usb->id != starter.id;
 }
 
-void JobStartWait::begin(const Identity& starter, uint32_t now_us) {
+void JobStartWait::begin(const Identity& starter) {
   ++start_id_;
   if (start_id_ == 0) start_id_ = 1;
   starter_id_ = starter.id;
-  started_us_ = now_us;
+  started_us_ = 0;
   pending_ = true;
+  hashing_ = true;
+  hash_complete_ = false;
+  hashed_size_ = 0;
+  md5_ = MD5();
+}
+
+bool JobStartWait::hash_step(HashRead read, void* file, uint8_t* buffer, std::size_t length, uint32_t now_us) {
+  if (!hashing() || read == nullptr || buffer == nullptr || length == 0) return false;
+  const long count = read(file, buffer, length);
+  if (count > 0) {
+    md5_.update(buffer, static_cast<MD5::size_type>(count));
+    hashed_size_ += static_cast<uint32_t>(count);
+    return false;
+  }
+  if (count == 0) {
+    md5_.finalize();
+    hash_complete_ = true;
+  }
+  hashing_ = false;
+  started_us_ = now_us;
+  return true;
+}
+
+bool JobStartWait::copy_checksum(uint8_t* digest) const {
+  if (!hash_complete_ || digest == nullptr) return false;
+  md5_.bindigest(digest, 16);
+  return true;
 }
 
 bool JobStartWait::awaited(const Client* client) const {
@@ -64,11 +91,12 @@ StartCheck JobStartWait::check(const ClientTable& table, uint32_t now_us) const 
   if (!connected(table, starter_id_)) return StartCheck::starter_left;
   uint64_t ids[max_wifi_clients + 1];
   if (not_ready(table, ids, max_wifi_clients + 1) == 0) return StartCheck::all_ready;
-  if (seconds_left(now_us) == 0) return StartCheck::time_limit;
+  if (!hashing() && seconds_left(now_us) == 0) return StartCheck::time_limit;
   return StartCheck::keep_waiting;
 }
 
 uint8_t JobStartWait::seconds_left(uint32_t now_us) const {
+  if (hashing()) return limit_s_;
   // Unsigned difference of two raw readings: correct across one wrap of the
   // counter, and the limit (at most 255 s) is far below a wrap's ~71 min.
   const uint32_t elapsed_us = now_us - started_us_;

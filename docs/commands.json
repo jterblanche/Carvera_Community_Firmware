@@ -3883,7 +3883,7 @@
     },
     "play": {
       "type": "shell",
-      "description": "Play a G-code file. The machine must be homed. When other identified controllers that take part in the job-start wait are connected, the start is held until each has loaded the file, for at most multi_client.start_wait_s seconds (default 30, 0 turns the wait off), and then the job starts; start-now starts it at once and abort cancels it. While it is held, every G-code, M-code and tool line, $H, $J, play, buffer, goto, suspend, resume and upload are refused with \"error:Refused -- a job is about to start\". With no such controller connected the job starts at once.",
+      "description": "Play a G-code file. The machine must be homed. When other identified controllers that take part in the job-start wait are connected, the start is held: the machine first computes the file's MD5, then waits until each has loaded the file, for at most multi_client.start_wait_s seconds (default 30, 0 turns the wait off), and then the job starts; start-now starts it at once and abort cancels it. While it is held, every G-code, M-code and tool line, $H, $J, play, buffer, goto, suspend, resume and upload are refused with \"error:Refused -- a job is about to start\". With no such controller connected the job starts at once.",
       "parameters": {
         "file": {
           "required": true,
