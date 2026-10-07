@@ -34,6 +34,7 @@
 #include "PublicData.h"
 #include "libs/Publish.h"
 #include "libs/ControlToken.h"
+#include "libs/FileCommandGate.h"
 #include "PlayerPublicAccess.h"
 #include "TemperatureControlPublicAccess.h"
 #include "TemperatureControlPool.h"
@@ -2060,6 +2061,16 @@ _exit:
 // needed here too, for the .md5 sidecar upload_command() reads on success.
 static bool md5_digest_usable(const char *s);
 
+// The machine as the file-command gate (libs/FileCommandGate.h) sees it
+// right now, for upload_command() and download_command().
+static file_command_gate::MachineState file_command_state(bool job_playing)
+{
+    file_command_gate::MachineState state;
+    state.job_playing = job_playing;
+    state.motion_queue_idle = THECONVEYOR->is_idle();
+    return state;
+}
+
 void Player::upload_command( string parameters, StreamOutput *stream )
 {
     uint32_t u32filesize = 0;
@@ -2106,19 +2117,28 @@ void Player::upload_command( string parameters, StreamOutput *stream )
     }
     THEKERNEL->set_uploading(true);
 
-    if (!THECONVEYOR->is_idle()) {
+    const file_command_gate::Decision decision =
+        file_command_gate::decide(file_command_gate::FileCommand::upload, file_command_state(this->playing_file));
+    if (decision != file_command_gate::Decision::run) {
         if (communication_protocol == PROTOCOL_SMOOTHIE) {
             stream->_putc(EOT);
         } else {
             SendMessage(PTYPE_FILE_CAN, buf, sizeof(buf), stream);
         }
+        if (decision == file_command_gate::Decision::refuse_job_playing) {
+            stream->printf("%s", file_command_gate::job_playing_reply);
+        }
         if (stream->type() == 0) {
         	set_serial_rx_irq(true);
         }
         THEKERNEL->set_uploading(false);
-	    THEKERNEL->set_cachewait(true);
-	    safe_delay_ms(1000);
-	    THEKERNEL->set_cachewait(false);
+        // See the same pause in download_command().
+        if (decision == file_command_gate::Decision::refuse_machine_busy ||
+            communication_protocol == PROTOCOL_SMOOTHIE) {
+            THEKERNEL->set_cachewait(true);
+            safe_delay_ms(1000);
+            THEKERNEL->set_cachewait(false);
+        }
         return;
     }
 	
@@ -2673,21 +2693,37 @@ void Player::download_command( string parameters, StreamOutput *stream )
     }
     THEKERNEL->set_uploading(true);
 
-    if (!THECONVEYOR->is_idle()) {
+    const file_command_gate::Decision decision =
+        file_command_gate::decide(file_command_gate::FileCommand::download, file_command_state(this->playing_file));
+    if (decision != file_command_gate::Decision::run) {
         if (communication_protocol == PROTOCOL_SMOOTHIE) {
             cancel_transfer(stream);
         } else {
             SendMessage(PTYPE_FILE_CAN, buf, sizeof(buf), stream);
-		    stream->printf("error: Machine is busy.\r\n");
+            if (decision == file_command_gate::Decision::refuse_machine_busy) {
+                stream->printf("error: Machine is busy.\r\n");
+            }
+        }
+        if (decision == file_command_gate::Decision::refuse_job_playing) {
+            stream->printf("%s", file_command_gate::job_playing_reply);
         }
         if (stream->type() == 0) {
         	set_serial_rx_irq(true);
         }
         THEKERNEL->set_uploading(false);
-	    THEKERNEL->set_cachewait(true);
-	    safe_delay_ms(1000);
-	    THEKERNEL->set_cachewait(false);
-        
+        // The pause lets the rest of a refused transfer arrive and be
+        // discarded. During a job it would also stop the player reading
+        // lines for that second, so it is skipped then on the framed
+        // protocol, where stray file frames are dropped anyway. The Smoothie
+        // protocol keeps it: its XMODEM start bytes would otherwise land in
+        // the next command line.
+        if (decision == file_command_gate::Decision::refuse_machine_busy ||
+            communication_protocol == PROTOCOL_SMOOTHIE) {
+            THEKERNEL->set_cachewait(true);
+            safe_delay_ms(1000);
+            THEKERNEL->set_cachewait(false);
+        }
+
         return;
     }
     char md5[64]; //Smoothie need to replace with md5buf
