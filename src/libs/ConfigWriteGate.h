@@ -14,10 +14,16 @@ namespace config_write_gate {
 // to sleep or woken without carrying settings changes through this check.
 // Every other state -- a job running or paused, homing, a jog, probe or
 // move in progress, or a tool change under way -- refuses the write.
+//
+// `playing` is whether the player has a job playing (or paused), which
+// refuses the write whatever the state says. Kernel::get_state() reads Idle
+// whenever the motion queue is empty and the spindle is off, which happens
+// between moves of a playing job, for example straight after a tool change.
 struct MachineState {
   bool idle = false;
   bool alarm = false;
   bool sleeping = false;
+  bool playing = false;
 };
 
 // True if a settings write should be refused right now.
