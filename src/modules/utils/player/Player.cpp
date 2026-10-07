@@ -34,6 +34,9 @@
 #include "PublicData.h"
 #include "libs/Publish.h"
 #include "libs/ControlToken.h"
+#include "libs/FileCommandGate.h"
+#include "libs/JobStartWait.h"
+#include "libs/TransferTimeout.h"
 #include "PlayerPublicAccess.h"
 #include "TemperatureControlPublicAccess.h"
 #include "TemperatureControlPool.h"
@@ -58,6 +61,8 @@
 #define leave_heaters_on_suspend_checksum CHECKSUM("leave_heaters_on_suspend")
 #define spindle_suspend_restore_enable_checksum CHECKSUM("spindle_suspend_restore_enable")
 #define laser_module_clustering_checksum 	  CHECKSUM("laser_module_clustering")
+#define multi_client_checksum             CHECKSUM("multi_client")
+#define start_wait_s_checksum             CHECKSUM("start_wait_s")
 
 #if !defined(NO_SD_CARD)
 extern SDFAT mounter;
@@ -120,6 +125,7 @@ Player::Player()
     this->elapsed_secs = 0;
     this->reply_stream = nullptr;
     this->inner_playing = false;
+    this->starting_held_job = false;
     this->slope = 0.0;
     this->has_last_progress = false;
     this->last_played_lines = 0;
@@ -190,10 +196,24 @@ void Player::on_module_loaded()
     this->spindle_suspend_restore_enable = THEKERNEL->config->value(spindle_suspend_restore_enable_checksum)->as_bool(true);
 
     this->laser_clustering = THEKERNEL->config->value(laser_module_clustering_checksum)->as_bool(false);
+
+#if !defined(STREAMED_JOB_PLAYBACK)
+    // How long a start may be held for other controllers to load the job
+    // (libs/JobStartWait.h); 0 turns the wait off. Never set on the Z1,
+    // whose jobs are streamed from a controller rather than played from the
+    // card, so the wait stays off there.
+    multiclient::shared_job_start_wait().configure(
+        THEKERNEL->config->value(multi_client_checksum, start_wait_s_checksum)->as_int(multiclient::default_start_wait_s));
+#endif
 }
 
 void Player::on_halt(void* argument)
 {
+#if !defined(STREAMED_JOB_PLAYBACK)
+    if (argument == nullptr && multiclient::shared_job_start_wait().pending()) {
+        this->cancel_held_start(multiclient::job_start_reason_halted);
+    }
+#endif
     this->clear_buffered_queue();
 
     if(argument == nullptr && this->playing_file ) {
@@ -210,28 +230,70 @@ void Player::on_halt(void* argument)
 	}
 }
 
+#if !defined(STREAMED_JOB_PLAYBACK)
+static bool read_md5_sidecar(const string& md5_path, uint8_t *digest);
+#endif
+
+// Publishes the play-started event (the 0x68 event, kind 2) for the file
+// now playing, with its size and MD5, and remembers the file as the one
+// last announced, which a controller without control may download.
+// play_command() and play_opened_file() call it the moment a job starts,
+// before the first line runs, so every controller learns which file is
+// playing before the machine moves. A job whose start was held carries the
+// size and MD5 the hold computed from the file (none if it was started
+// before hashing finished); any other job carries the MD5 from the .md5
+// sidecar file beside it.
+void Player::publish_play_started()
+{
+    uint8_t payload[2 + multiclient::max_event_path_length + 4 + 1 + multiclient::md5_digest_bytes];
+    const uint8_t path_len = multiclient::event_path_length(this->filename.c_str(), this->filename.size());
+    uint8_t digest[multiclient::md5_digest_bytes];
+    bool have_digest = false;
+    uint32_t size = this->file_size > 0 ? static_cast<uint32_t>(this->file_size) : 0;
+#if !defined(STREAMED_JOB_PLAYBACK)
+    if (this->starting_held_job) {
+        const multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
+        have_digest = wait.copy_checksum(digest);
+        if (have_digest) size = wait.hashed_size();
+    } else {
+        have_digest = read_md5_sidecar(change_to_md5_path(this->filename), digest);
+    }
+#endif
+    const size_t length = multiclient::build_play_started_event(
+        this->filename.c_str(), path_len, size, have_digest ? digest : NULL, payload, sizeof(payload));
+    if (length != 0) {
+        THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+        multiclient::remember_announced_file(this->filename.c_str(), path_len);
+    }
+    this->last_published_playing = true;
+}
+
 void Player::on_second_tick(void *)
 {
-    // Publishes play-started (kind 2) and job-ended (kind 3) on a
-    // transition of playing_file, rather than hooking every place that
-    // sets it -- play_command() (the non-streamed build) and
-    // handle_link_packet()'s PTYPE_PLAY_VIEW case (the streamed build,
-    // STREAMED_JOB_PLAYBACK, the default -- see build/common.mk) both flip
-    // it, and one check here covers both without duplicating the hook.
-    // job-ended likewise covers every place that clears it (finished, user
+#if !defined(STREAMED_JOB_PLAYBACK)
+    // Repeats a held start's announcement once a second, with the time
+    // left, so a controller that missed one is not left out until the
+    // limit. Not while a file transfer runs: the controller receiving a
+    // file reads only the transfer's own frames until it ends.
+    const multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
+    if (wait.pending() && !THEKERNEL->is_uploading()) {
+        this->publish_job_start(wait.hashing() ? multiclient::job_start_phase_hashing : multiclient::job_start_phase_waiting,
+                                multiclient::job_start_reason_waiting);
+    }
+#endif
+
+    // Publishes play-started (kind 2) here only for a start that did not
+    // publish it itself: handle_link_packet()'s PTYPE_PLAY_VIEW case in the
+    // streamed build (STREAMED_JOB_PLAYBACK, the Z1 -- see build/common.mk).
+    // Publishes job-ended (kind 3) on a transition of playing_file to
+    // false, rather than hooking every place that clears it (finished, user
     // abort, halt-triggered abort): whatever stopped playback already ran
     // save_last_progress() (directly, or via abort_command()) before
     // clearing playing_file, so last_filename/last_percent_complete/
     // last_played_lines/last_elapsed_secs already hold the right final
     // snapshot by the time this runs.
     if (!this->last_published_playing && this->playing_file) {
-        uint8_t payload[2 + multiclient::max_event_path_length];
-        const uint8_t path_len = multiclient::event_path_length(this->filename.c_str(), this->filename.size());
-        const size_t length = multiclient::build_play_started_event(this->filename.c_str(), path_len, payload, sizeof(payload));
-        if (length != 0) {
-            THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
-            multiclient::remember_announced_file(this->filename.c_str(), path_len);
-        }
+        this->publish_play_started();
     }
     if (this->last_published_playing && !this->playing_file) {
         uint8_t payload[2 + multiclient::max_event_path_length + 1 + 4 + 4];
@@ -386,18 +448,182 @@ void Player::end_of_file()
 
     this->select_file(std::get<0>(queueItem));
     this->goto_line_number(std::get<1>(queueItem));
-    this->play_opened_file();
+    this->play_opened_file(false);
 }
 
-void Player::play_opened_file()
+void Player::play_opened_file(bool new_job)
 {
     if (this->line_source.file() != NULL) {
-        this->playing_file = true;
-        // this would be a problem if the stream goes away before the file has finished,
-        // so we attach it to the kernel stream, however network connections from pronterface
-        // do not connect to the kernel streams so won't see this FIXME
-        this->reply_stream = THEKERNEL->streams;
+        if (new_job && this->hold_start(THEKERNEL->streams, false, false)) return;
+        this->start_opened_file(new_job);
     }
+}
+
+void Player::start_opened_file(bool new_job)
+{
+    this->playing_file = true;
+    // this would be a problem if the stream goes away before the file has finished,
+    // so we attach it to the kernel stream, however network connections from pronterface
+    // do not connect to the kernel streams so won't see this FIXME
+    this->reply_stream = THEKERNEL->streams;
+    if (new_job) this->publish_play_started();
+}
+
+// Holds a job that is about to start while other controllers that take
+// part in the job-start wait are connected (libs/JobStartWait.h): announces
+// it to them and leaves the file open but not playing. on_main_loop() then
+// hashes the file, announces its MD5, and starts it once they are ready or
+// the limit runs out, unless start-now starts it first or abort, a halt or
+// the starter leaving cancels it. The controller starting the job is the
+// one holding control: a start passes the control gate as a user action,
+// which gives its sender control in either mode. `from_play_command` and
+// `verbose` say how to start it later.
+// True if the start is held; false if it goes ahead now, as it always has.
+bool Player::hold_start(StreamOutput *stream, bool from_play_command, bool verbose)
+{
+    multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
+    const multiclient::Identity &starter = multiclient::shared_control_token().holder();
+    if (!wait.needs_wait(multiclient::shared_client_table(), starter)) return false;
+
+    if (from_play_command) {
+        // The announcement carries the size, which play_command() only
+        // reads once the job starts; select_file() has already read it.
+        if (fwfs::fseek(this->line_source.file(), 0, SEEK_END) == 0) {
+            this->file_size = fwfs::ftell(this->line_source.file());
+        } else {
+            this->file_size = 0;
+        }
+        fwfs::fseek(this->line_source.file(), 0, SEEK_SET);
+    }
+
+    // The file is hashed from its beginning, then put back where it was:
+    // play_opened_file() may start it part-way through.
+    this->held_position = fwfs::ftell(this->line_source.file());
+    if (this->held_position < 0) this->held_position = 0;
+    fwfs::fseek(this->line_source.file(), 0, SEEK_SET);
+
+    wait.begin(starter);
+    this->held_from_play_command = from_play_command;
+    this->held_verbose = verbose;
+    // A controller without control may download the announced file, so
+    // the waiting controllers can fetch it.
+    multiclient::remember_announced_file(this->filename.c_str(),
+                                         multiclient::event_path_length(this->filename.c_str(), this->filename.size()));
+    this->publish_job_start(multiclient::job_start_phase_hashing, multiclient::job_start_reason_waiting);
+    stream->printf("Checking %s, then waiting up to %u s for other controllers to load it. Send start-now to start at once, or abort to cancel\r\n",
+                   this->filename.c_str(), static_cast<unsigned>(wait.limit_s()));
+    return true;
+}
+
+// Reads the held file for hash_held_file(): JobStartWait's HashRead.
+static long read_held_file(void *file, uint8_t *buffer, size_t length)
+{
+    FILE *fd = static_cast<FILE *>(file);
+    if (fd == NULL) return -1;
+    const size_t count = fwfs::fread(buffer, 1, length, fd);
+    if (count == 0 && !fwfs::feof(fd)) return -1;
+    return static_cast<long>(count);
+}
+
+// Called from on_main_loop() while a held start's file is being hashed:
+// hashes it for up to hash_slice_us, then returns so the rest of the main
+// loop runs. Once the whole file is hashed, puts the file back where it
+// was and announces the MD5; the limit starts then.
+void Player::hash_held_file()
+{
+    multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
+    FILE *fd = this->line_source.file();
+    uint8_t buffer[multiclient::hash_chunk_bytes];
+    const uint32_t began = us_ticker_read();
+    do {
+        if (wait.hash_step(read_held_file, fd, buffer, sizeof(buffer), us_ticker_read())) {
+            fwfs::fseek(fd, this->held_position, SEEK_SET);
+            this->publish_job_start(multiclient::job_start_phase_waiting, multiclient::job_start_reason_waiting);
+            return;
+        }
+    } while (us_ticker_read() - began < multiclient::hash_slice_us);
+}
+
+// Ends the wait for a held start and starts the job, the way the command
+// that asked for it would have. `reason` goes in the job-start event.
+void Player::start_held_job(uint8_t reason)
+{
+    multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
+    // Started before hashing finished: put the file back where it was.
+    if (wait.hashing()) fwfs::fseek(this->line_source.file(), this->held_position, SEEK_SET);
+    this->publish_job_start(multiclient::job_start_phase_starting, reason);
+    wait.end();
+    this->starting_held_job = true;
+    if (this->held_from_play_command) {
+        this->begin_playing(THEKERNEL->streams, this->held_verbose);
+    } else {
+        this->start_opened_file(true);
+    }
+    this->starting_held_job = false;
+}
+
+// Ends the wait for a held start without starting the job: the file is
+// closed and the commands buffered for it are dropped, so none of them runs
+// with a later job. `reason` goes in the job-start event.
+void Player::cancel_held_start(uint8_t reason)
+{
+    this->publish_job_start(multiclient::job_start_phase_cancelled, reason);
+    multiclient::shared_job_start_wait().end();
+    this->close_line_source();
+    this->clear_buffered_queue();
+    this->clear_macro_file_queue();
+    this->ocode_handler.reset();
+    this->filename = "";
+    this->file_size = 0;
+    THEKERNEL->streams->printf("Job start cancelled\r\n");
+}
+
+// Called from on_main_loop() while a start is held: starts or cancels it
+// once the wait says so.
+void Player::check_held_start()
+{
+    switch (multiclient::shared_job_start_wait().check(multiclient::shared_client_table(), us_ticker_read())) {
+        case multiclient::StartCheck::keep_waiting:
+            break;
+        case multiclient::StartCheck::all_ready:
+            this->start_held_job(multiclient::job_start_reason_all_ready);
+            break;
+        case multiclient::StartCheck::time_limit:
+            this->start_held_job(multiclient::job_start_reason_time_limit);
+            break;
+        case multiclient::StartCheck::starter_left:
+            this->cancel_held_start(multiclient::job_start_reason_starter_left);
+            break;
+    }
+}
+
+// Publishes the job-start event (the 0x68 event, kind 8) for the held
+// start: the file, as play-started describes it, with the size and MD5
+// hashed from the file once hashing has finished (no MD5 before then, or
+// if a read failed; the .md5 sidecar file is never used), then the wait's
+// own state and the controllers it is still waiting for.
+void Player::publish_job_start(uint8_t phase, uint8_t reason)
+{
+    const multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
+    uint8_t digest[multiclient::md5_digest_bytes];
+    uint64_t not_ready[multiclient::max_job_start_not_ready];
+    multiclient::JobStartEvent event;
+    event.path = this->filename.c_str();
+    event.path_len = multiclient::event_path_length(this->filename.c_str(), this->filename.size());
+    const bool have_digest = wait.copy_checksum(digest);
+    event.size = have_digest ? wait.hashed_size() : (this->file_size > 0 ? static_cast<uint32_t>(this->file_size) : 0);
+    event.md5_digest = have_digest ? digest : NULL;
+    event.start_id = wait.start_id();
+    event.phase = phase;
+    event.reason = reason;
+    event.seconds_left = phase == multiclient::job_start_phase_waiting ? wait.seconds_left(us_ticker_read()) : 0;
+    event.starter_id = wait.starter_id();
+    event.not_ready_ids = not_ready;
+    event.not_ready_count =
+        wait.not_ready(multiclient::shared_client_table(), not_ready, multiclient::max_job_start_not_ready);
+    uint8_t payload[multiclient::max_job_start_event_length];
+    const size_t length = multiclient::build_job_start_event(event, payload, sizeof(payload));
+    if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
 }
 #endif
 // extract any options found on line, terminates args at the space before the first option (-v)
@@ -473,7 +699,7 @@ void Player::on_gcode_received(void *argument)
                 gcode->stream->printf("ERROR: File playback is not supported on this machine\r\n");
             }
 #else
-            this->play_opened_file();
+            this->play_opened_file(!this->playing_file);
 #endif
 
         } else if (gcode->m == 25) { // pause print
@@ -526,12 +752,14 @@ void Player::on_gcode_received(void *argument)
         } else if (gcode->m == 32) { // select file and start print
             
             
+            const bool new_job = !this->playing_file;
+
             //empty macro queue
             this->clear_macro_file_queue();
 
             this->select_file(args, true);
 
-            this->play_opened_file();           
+            this->play_opened_file(new_job);
 
         } else if (gcode->m == 97) {
             if (gcode->has_letter('P')) {
@@ -617,8 +845,9 @@ void Player::on_gcode_received(void *argument)
             }
             
             //open file and play
+            const bool new_job = !this->playing_file;
             this->select_file(new_filepath);
-            this->play_opened_file();
+            this->play_opened_file(new_job);
 
         } else if (gcode->m == 99) { // return from macro to main program
             this->end_of_file();
@@ -676,6 +905,8 @@ void Player::on_console_line_received( void *argument )
     	this->goto_command( possible_command, new_message.stream );
     }else if (cmd == "buffer") {
     	this->buffer_command( possible_command, new_message.stream );
+    }else if (cmd == "start-now") {
+        this->start_now_command( new_message.stream );
     }else if (cmd == "upload") {
 #if defined(NO_SD_CARD)
         new_message.stream->printf("ERROR: local file transfers are not available on this machine\r\n");
@@ -718,6 +949,10 @@ void Player::play_command( string parameters, StreamOutput *stream )
     if (!THEROBOT->is_homed_all_axes()) {
 		return;
 	}
+    if (multiclient::shared_job_start_wait().pending()) {
+        stream->printf("%s", multiclient::job_start_pending_reply);
+        return;
+    }
     // extract any options from the line and terminate the line there
     string options= extract_options(parameters);
 #if defined(STREAMED_JOB_PLAYBACK)
@@ -774,12 +1009,23 @@ void Player::play_command( string parameters, StreamOutput *stream )
 
     if(THEKERNEL->is_halted()) return;
 
+    const bool verbose = options.find_first_of("Vv") != string::npos;
+    if (this->hold_start(stream, true, verbose)) return;
+    this->begin_playing(stream, verbose);
+#endif
+}
+
+#if !defined(STREAMED_JOB_PLAYBACK)
+// The end of play_command(): starts playing the file it opened, now, or
+// once a held start ends (start_held_job()).
+void Player::begin_playing(StreamOutput *stream, bool verbose)
+{
     stream->printf("Playing %s\r\n", this->filename.c_str());
 
     this->playing_file = true;
 
     // Output to the current stream if we were passed the -v ( verbose ) option
-    if( options.find_first_of("Vv") == string::npos ) {
+    if( !verbose ) {
         this->current_stream = nullptr;
     } else {
         // we send to the kernels stream as it cannot go away
@@ -804,13 +1050,27 @@ void Player::play_command( string parameters, StreamOutput *stream )
     this->goto_line = 0;
     this->has_last_progress = false;  // new job started, stop reporting previous job's last progress
 
+    this->publish_play_started();
+
     // force into absolute mode
     THEROBOT->absolute_mode = true;
     THEROBOT->e_absolute_mode = true;
 
     // reset current position;
     THEROBOT->reset_position_from_current_actuator_position();
+}
 #endif
+
+// Starts a held job at once (start-now), or says nothing is held.
+void Player::start_now_command(StreamOutput *stream)
+{
+#if !defined(STREAMED_JOB_PLAYBACK)
+    if (multiclient::shared_job_start_wait().pending()) {
+        this->start_held_job(multiclient::job_start_reason_start_now);
+        return;
+    }
+#endif
+    stream->printf("No job start is waiting\r\n");
 }
 
 #if defined(STREAMED_JOB_PLAYBACK)
@@ -1127,6 +1387,13 @@ void Player::abort_command( string parameters, StreamOutput *stream )
         return;
     }
 
+#if !defined(STREAMED_JOB_PLAYBACK)
+    if (multiclient::shared_job_start_wait().pending()) {
+        this->cancel_held_start(multiclient::job_start_reason_aborted);
+        return;
+    }
+#endif
+
     if(!playing_file && !line_source.is_open()
 #if defined(STREAMED_JOB_PLAYBACK)
         && !this->streamed_session_active()
@@ -1287,6 +1554,14 @@ void Player::on_main_loop(void *argument)
         }
 
     }
+
+#if !defined(STREAMED_JOB_PLAYBACK)
+    if (multiclient::shared_job_start_wait().pending()) {
+        this->check_held_start();
+        if (multiclient::shared_job_start_wait().hashing()) this->hash_held_file();
+        return;
+    }
+#endif
 
 #if defined(STREAMED_JOB_PLAYBACK)
     this->maintain_streamed_source();
@@ -2056,9 +2331,16 @@ _exit:
 	return 0;
 }
 
-// Forward declaration: defined below, alongside fill_md5_from_path(), but
-// needed here too, for the .md5 sidecar upload_command() reads on success.
-static bool md5_digest_usable(const char *s);
+// The machine as the file-command gate (libs/FileCommandGate.h) sees it
+// right now, for upload_command() and download_command().
+static file_command_gate::MachineState file_command_state(bool job_playing)
+{
+    file_command_gate::MachineState state;
+    state.job_playing = job_playing;
+    state.motion_queue_idle = THECONVEYOR->is_idle();
+    state.job_start_pending = multiclient::shared_job_start_wait().pending();
+    return state;
+}
 
 void Player::upload_command( string parameters, StreamOutput *stream )
 {
@@ -2106,19 +2388,30 @@ void Player::upload_command( string parameters, StreamOutput *stream )
     }
     THEKERNEL->set_uploading(true);
 
-    if (!THECONVEYOR->is_idle()) {
+    const file_command_gate::Decision decision =
+        file_command_gate::decide(file_command_gate::FileCommand::upload, file_command_state(this->playing_file));
+    if (decision != file_command_gate::Decision::run) {
         if (communication_protocol == PROTOCOL_SMOOTHIE) {
             stream->_putc(EOT);
         } else {
             SendMessage(PTYPE_FILE_CAN, buf, sizeof(buf), stream);
         }
+        if (decision == file_command_gate::Decision::refuse_job_playing) {
+            stream->printf("%s", file_command_gate::job_playing_reply);
+        } else if (decision == file_command_gate::Decision::refuse_job_start_pending) {
+            stream->printf("%s", multiclient::job_start_pending_reply);
+        }
         if (stream->type() == 0) {
         	set_serial_rx_irq(true);
         }
         THEKERNEL->set_uploading(false);
-	    THEKERNEL->set_cachewait(true);
-	    safe_delay_ms(1000);
-	    THEKERNEL->set_cachewait(false);
+        // See the same pause in download_command().
+        if (decision == file_command_gate::Decision::refuse_machine_busy ||
+            communication_protocol == PROTOCOL_SMOOTHIE) {
+            THEKERNEL->set_cachewait(true);
+            safe_delay_ms(1000);
+            THEKERNEL->set_cachewait(false);
+        }
         return;
     }
 	
@@ -2553,19 +2846,8 @@ upload_success:
 		const uint8_t path_len = multiclient::event_path_length(desfilename.c_str(), desfilename.size());
 		uint8_t payload[2 + multiclient::max_event_path_length + 4 + 1 + multiclient::md5_digest_bytes];
 
-		char md5_hex[32];
-		bool have_digest = false;
-		FILE *fd_md5_read = fwfs::fopen(md5_filename.c_str(), "rb");
-		if (fd_md5_read != NULL) {
-			have_digest = fwfs::fread(md5_hex, sizeof(char), sizeof(md5_hex), fd_md5_read) == sizeof(md5_hex)
-			           && md5_digest_usable(md5_hex);
-			fwfs::fclose(fd_md5_read);
-		}
-
 		uint8_t digest[multiclient::md5_digest_bytes];
-		if (have_digest) {
-			multiclient::decode_md5_hex(md5_hex, digest);
-		}
+		const bool have_digest = read_md5_sidecar(md5_filename, digest);
 
 		const size_t length = multiclient::build_upload_finished_event(
 			desfilename.c_str(), path_len, u32filesize, have_digest ? digest : NULL, payload, sizeof(payload));
@@ -2592,6 +2874,26 @@ static bool md5_digest_usable(const char *s)
         }
     }
     return true;
+}
+
+// Reads the 32 hex characters at the start of the .md5 sidecar file at
+// `md5_path` and, if they are a usable digest (md5_digest_usable()), decodes
+// them into the 16 raw bytes at `digest`. True if it did. Never hashes the
+// file the sidecar belongs to.
+static bool read_md5_sidecar(const string& md5_path, uint8_t *digest)
+{
+    char md5_hex[32];
+    bool usable = false;
+    FILE *fd = fwfs::fopen(md5_path.c_str(), "rb");
+    if (fd != NULL) {
+        usable = fwfs::fread(md5_hex, sizeof(char), sizeof(md5_hex), fd) == sizeof(md5_hex)
+              && md5_digest_usable(md5_hex);
+        fwfs::fclose(fd);
+    }
+    if (usable) {
+        multiclient::decode_md5_hex(md5_hex, digest);
+    }
+    return usable;
 }
 
 static bool fill_md5_from_path(const char *path, char *out, size_t out_size)
@@ -2673,21 +2975,37 @@ void Player::download_command( string parameters, StreamOutput *stream )
     }
     THEKERNEL->set_uploading(true);
 
-    if (!THECONVEYOR->is_idle()) {
+    const file_command_gate::Decision decision =
+        file_command_gate::decide(file_command_gate::FileCommand::download, file_command_state(this->playing_file));
+    if (decision != file_command_gate::Decision::run) {
         if (communication_protocol == PROTOCOL_SMOOTHIE) {
             cancel_transfer(stream);
         } else {
             SendMessage(PTYPE_FILE_CAN, buf, sizeof(buf), stream);
-		    stream->printf("error: Machine is busy.\r\n");
+            if (decision == file_command_gate::Decision::refuse_machine_busy) {
+                stream->printf("error: Machine is busy.\r\n");
+            }
+        }
+        if (decision == file_command_gate::Decision::refuse_job_playing) {
+            stream->printf("%s", file_command_gate::job_playing_reply);
         }
         if (stream->type() == 0) {
         	set_serial_rx_irq(true);
         }
         THEKERNEL->set_uploading(false);
-	    THEKERNEL->set_cachewait(true);
-	    safe_delay_ms(1000);
-	    THEKERNEL->set_cachewait(false);
-        
+        // The pause lets the rest of a refused transfer arrive and be
+        // discarded. During a job it would also stop the player reading
+        // lines for that second, so it is skipped then on the framed
+        // protocol, where stray file frames are dropped anyway. The Smoothie
+        // protocol keeps it: its XMODEM start bytes would otherwise land in
+        // the next command line.
+        if (decision == file_command_gate::Decision::refuse_machine_busy ||
+            communication_protocol == PROTOCOL_SMOOTHIE) {
+            THEKERNEL->set_cachewait(true);
+            safe_delay_ms(1000);
+            THEKERNEL->set_cachewait(false);
+        }
+
         return;
     }
     char md5[64]; //Smoothie need to replace with md5buf
@@ -2950,7 +3268,7 @@ void Player::download_command( string parameters, StreamOutput *stream )
             }
             else
             {
-                if(us_ticker_read()-starttime > 29000000)
+                if(transfer_timeout::download_stalled(starttime, us_ticker_read()))
                 {
                     sprintf(error_msg, "Error: Machine received cmd timeout!\r\n");
                     SendMessage(PTYPE_FILE_CAN, buf, sizeof(buf), stream);

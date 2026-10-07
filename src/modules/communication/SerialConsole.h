@@ -87,6 +87,9 @@ class SerialConsole : public Module, public StreamOutput {
         void reset_file_parser();
         int check_file_packet(char **buf);
         void handle_hello(const uint8_t* payload, uint16_t payload_length, uint32_t now_us);
+        void send_hello_ack(uint8_t result);
+        void admit_usb_hello(const multiclient::Hello& hello, bool reconnect);
+        void drive_identity_check(uint32_t now_us);
         void handle_client_list_request();
         // The multi_client.mode byte a hello ack reports. See
         // WifiProvider::hello_ack_mode() for the same on the WiFi side.

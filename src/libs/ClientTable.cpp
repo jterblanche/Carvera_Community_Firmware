@@ -16,10 +16,14 @@ void set_identity(Client& client, uint64_t id, const char* name, uint8_t name_le
 void record_heartbeat(Client& client, uint32_t now_us) { client.last_heartbeat_us = now_us; }
 
 bool client_is_old(const Client& client, uint32_t now_us) {
-  if (client.identified) return false;
+  if (client.identified || client.hello_held) return false;
   if (!client.hello_window_started) return false;
   const int32_t elapsed_us = static_cast<int32_t>(now_us - client.hello_window_start_us);
   return elapsed_us >= static_cast<int32_t>(hello_window_us);
+}
+
+void restart_hello_window(Client& client, uint32_t now_us) {
+  if (client.hello_window_started) client.hello_window_start_us = now_us;
 }
 
 bool usb_session_expired(bool hello_window_started, uint32_t now_us, uint32_t last_activity_us) {

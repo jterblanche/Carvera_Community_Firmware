@@ -116,6 +116,10 @@ private:
     // Handles a decoded hello/client-list-request frame. Both reply inline,
     // addressed to that one client (see receive_wifi_data()).
     void handle_wifi_hello(int client_index, const uint8_t* payload, uint16_t payload_length, uint32_t now_us);
+    void send_wifi_hello_ack(int client_index, uint8_t result);
+    void admit_wifi_hello(int client_index, const multiclient::Hello& hello, bool reconnect);
+    void retire_wifi_client(int client_index, const char* reason);
+    void drive_identity_check(uint32_t now_us);
     void handle_wifi_client_list_request(int client_index);
     // The multi_client.mode byte a hello ack reports (Hello.h's
     // hello_mode_single_user/hello_mode_multi_user), from the configured

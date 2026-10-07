@@ -36,7 +36,10 @@ class Player : public Module {
 #if !defined(STREAMED_JOB_PLAYBACK)
         void select_file(string argument, bool force_prescan = false);
         void goto_line_number(unsigned long line_number);
-        void play_opened_file();
+        // `new_job` is false when the file continues a job already
+        // playing (a subprogram call or return), true when it starts one,
+        // which may then be held for other controllers (hold_start()).
+        void play_opened_file(bool new_job);
         void end_of_file();
 #endif
         void on_get_public_data(void* argument);
@@ -51,6 +54,18 @@ class Player : public Module {
 #endif
         void close_line_source();
         void play_command( string parameters, StreamOutput* stream );
+        void publish_play_started();
+        void start_now_command( StreamOutput* stream );
+#if !defined(STREAMED_JOB_PLAYBACK)
+        void begin_playing( StreamOutput* stream, bool verbose );
+        void start_opened_file(bool new_job);
+        bool hold_start( StreamOutput* stream, bool from_play_command, bool verbose );
+        void start_held_job(uint8_t reason);
+        void cancel_held_start(uint8_t reason);
+        void check_held_start();
+        void publish_job_start(uint8_t phase, uint8_t reason);
+        void hash_held_file();
+#endif
         void progress_command( string parameters, StreamOutput* stream );
         void abort_command( string parameters, StreamOutput* stream );
         void suspend_command( string parameters, StreamOutput* stream , bool pause_outside_play_mode = false);
@@ -150,11 +165,11 @@ class Player : public Module {
         unsigned long last_played_lines;
         unsigned int last_percent_complete;
         unsigned long last_elapsed_secs;
-        // Set from playing_file at the end of every on_second_tick(), so the
-        // next tick can tell a false transition (playback just stopped, for
-        // any reason -- finished, aborted, halted) from "still not
-        // playing". Drives the job-ended event (the 0x68 event, kind 3);
-        // see on_second_tick().
+        // Set by publish_play_started(), and from playing_file at the end
+        // of every on_second_tick(), so the next tick can tell a false
+        // transition (playback just stopped, for any reason -- finished,
+        // aborted, halted) from "still not playing". Drives the job-ended
+        // event (the 0x68 event, kind 3); see on_second_tick().
         bool last_published_playing = false;
         // Set from THEKERNEL->is_halted() at the end of every
         // on_second_tick(), the same way, so the next tick can publish the
@@ -177,6 +192,9 @@ class Player : public Module {
         bool last_spindle_ccw;
 #if !defined(STREAMED_JOB_PLAYBACK)
         bool skip_ocodes_prescan = false;
+        // Where the held file was positioned when its start was held; it is
+        // read from the beginning to hash it, then put back here.
+        long held_position = 0;
 #endif
 
         struct {
@@ -189,5 +207,12 @@ class Player : public Module {
             bool inner_playing:1;
             bool laser_clustering:1;
             bool spindle_suspend_restore_enable:1;
+            // How to start a held job (hold_start()): through
+            // begin_playing(), with -v, or through start_opened_file().
+            bool held_from_play_command:1;
+            bool held_verbose:1;
+            // Set while a held job is being started (start_held_job()), so
+            // its play-started carries the MD5 the hold computed.
+            bool starting_held_job:1;
         };
 };
