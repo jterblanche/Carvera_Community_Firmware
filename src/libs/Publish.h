@@ -100,9 +100,10 @@ constexpr uint8_t event_kind_control_changed = 5;
 constexpr uint8_t event_kind_client_joined = 6;
 constexpr uint8_t event_kind_client_left = 7;
 
-// event_kind_upload_finished's checksum_type: event_checksum_none when the
-// upload path found no usable digest to publish, event_checksum_md5 when it
-// did (16 raw bytes follow the checksum_type byte).
+// The checksum_type of event_kind_upload_finished and
+// event_kind_play_started: event_checksum_none when the machine found no
+// usable digest to publish, event_checksum_md5 when it did (16 raw bytes
+// follow the checksum_type byte).
 constexpr uint8_t event_checksum_none = 0;
 constexpr uint8_t event_checksum_md5 = 1;
 
@@ -138,8 +139,19 @@ uint8_t event_path_length(const char* path, std::size_t length);
 std::size_t build_upload_finished_event(const char* path, uint8_t path_len, uint32_t size,
                                          const uint8_t* md5_digest, uint8_t* out, std::size_t out_capacity);
 
-// "play started": kind(1) + path_len(1) + path.
-std::size_t build_play_started_event(const char* path, uint8_t path_len, uint8_t* out, std::size_t out_capacity);
+// "play started": kind(1) + path_len(1) + path + size(4, BE) +
+// checksum_type(1) + checksum(0 or md5_digest_bytes B) -- the same fields,
+// in the same order, as build_upload_finished_event() above, so a
+// controller can compare the playing file with a copy it already holds.
+// `size` is the file's size in bytes. `md5_digest` is 16 raw bytes decoded
+// from the .md5 sidecar file stored beside the played file, or nullptr when
+// there is no usable one; the file itself is never hashed for this. The
+// sidecar is written by an upload, so a file put on the card any other way
+// has none, and one changed without its sidecar being rewritten can carry a
+// digest that no longer matches it: compare the size as well. Returns the
+// payload length, or 0 if it would not fit.
+std::size_t build_play_started_event(const char* path, uint8_t path_len, uint32_t size, const uint8_t* md5_digest,
+                                      uint8_t* out, std::size_t out_capacity);
 
 // "job ended": kind(1) + path_len(1) + path + percent_complete(1) +
 // played_lines(4, BE) + elapsed_secs(4, BE) -- the same final-progress

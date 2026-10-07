@@ -211,28 +211,49 @@ void Player::on_halt(void* argument)
 	}
 }
 
+#if !defined(STREAMED_JOB_PLAYBACK)
+static bool read_md5_sidecar(const string& md5_path, uint8_t *digest);
+#endif
+
+// Publishes the play-started event (the 0x68 event, kind 2) for the file
+// now playing, with its size and the MD5 from the .md5 sidecar file beside
+// it, and remembers the file as the one last announced, which a controller
+// without control may download. play_command() and play_opened_file() call
+// it the moment a job starts, before the first line runs, so every
+// controller learns which file is playing before the machine moves.
+void Player::publish_play_started()
+{
+    uint8_t payload[2 + multiclient::max_event_path_length + 4 + 1 + multiclient::md5_digest_bytes];
+    const uint8_t path_len = multiclient::event_path_length(this->filename.c_str(), this->filename.size());
+    uint8_t digest[multiclient::md5_digest_bytes];
+    bool have_digest = false;
+#if !defined(STREAMED_JOB_PLAYBACK)
+    have_digest = read_md5_sidecar(change_to_md5_path(this->filename), digest);
+#endif
+    const uint32_t size = this->file_size > 0 ? static_cast<uint32_t>(this->file_size) : 0;
+    const size_t length = multiclient::build_play_started_event(
+        this->filename.c_str(), path_len, size, have_digest ? digest : NULL, payload, sizeof(payload));
+    if (length != 0) {
+        THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+        multiclient::remember_announced_file(this->filename.c_str(), path_len);
+    }
+    this->last_published_playing = true;
+}
+
 void Player::on_second_tick(void *)
 {
-    // Publishes play-started (kind 2) and job-ended (kind 3) on a
-    // transition of playing_file, rather than hooking every place that
-    // sets it -- play_command() (the non-streamed build) and
-    // handle_link_packet()'s PTYPE_PLAY_VIEW case (the streamed build,
-    // STREAMED_JOB_PLAYBACK, the default -- see build/common.mk) both flip
-    // it, and one check here covers both without duplicating the hook.
-    // job-ended likewise covers every place that clears it (finished, user
+    // Publishes play-started (kind 2) here only for a start that did not
+    // publish it itself: handle_link_packet()'s PTYPE_PLAY_VIEW case in the
+    // streamed build (STREAMED_JOB_PLAYBACK, the Z1 -- see build/common.mk).
+    // Publishes job-ended (kind 3) on a transition of playing_file to
+    // false, rather than hooking every place that clears it (finished, user
     // abort, halt-triggered abort): whatever stopped playback already ran
     // save_last_progress() (directly, or via abort_command()) before
     // clearing playing_file, so last_filename/last_percent_complete/
     // last_played_lines/last_elapsed_secs already hold the right final
     // snapshot by the time this runs.
     if (!this->last_published_playing && this->playing_file) {
-        uint8_t payload[2 + multiclient::max_event_path_length];
-        const uint8_t path_len = multiclient::event_path_length(this->filename.c_str(), this->filename.size());
-        const size_t length = multiclient::build_play_started_event(this->filename.c_str(), path_len, payload, sizeof(payload));
-        if (length != 0) {
-            THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
-            multiclient::remember_announced_file(this->filename.c_str(), path_len);
-        }
+        this->publish_play_started();
     }
     if (this->last_published_playing && !this->playing_file) {
         uint8_t payload[2 + multiclient::max_event_path_length + 1 + 4 + 4];
@@ -387,10 +408,10 @@ void Player::end_of_file()
 
     this->select_file(std::get<0>(queueItem));
     this->goto_line_number(std::get<1>(queueItem));
-    this->play_opened_file();
+    this->play_opened_file(false);
 }
 
-void Player::play_opened_file()
+void Player::play_opened_file(bool new_job)
 {
     if (this->line_source.file() != NULL) {
         this->playing_file = true;
@@ -398,6 +419,7 @@ void Player::play_opened_file()
         // so we attach it to the kernel stream, however network connections from pronterface
         // do not connect to the kernel streams so won't see this FIXME
         this->reply_stream = THEKERNEL->streams;
+        if (new_job) this->publish_play_started();
     }
 }
 #endif
@@ -474,7 +496,7 @@ void Player::on_gcode_received(void *argument)
                 gcode->stream->printf("ERROR: File playback is not supported on this machine\r\n");
             }
 #else
-            this->play_opened_file();
+            this->play_opened_file(!this->playing_file);
 #endif
 
         } else if (gcode->m == 25) { // pause print
@@ -527,12 +549,14 @@ void Player::on_gcode_received(void *argument)
         } else if (gcode->m == 32) { // select file and start print
             
             
+            const bool new_job = !this->playing_file;
+
             //empty macro queue
             this->clear_macro_file_queue();
 
             this->select_file(args, true);
 
-            this->play_opened_file();           
+            this->play_opened_file(new_job);
 
         } else if (gcode->m == 97) {
             if (gcode->has_letter('P')) {
@@ -618,8 +642,9 @@ void Player::on_gcode_received(void *argument)
             }
             
             //open file and play
+            const bool new_job = !this->playing_file;
             this->select_file(new_filepath);
-            this->play_opened_file();
+            this->play_opened_file(new_job);
 
         } else if (gcode->m == 99) { // return from macro to main program
             this->end_of_file();
@@ -804,6 +829,8 @@ void Player::play_command( string parameters, StreamOutput *stream )
     this->playing_lines = 0;
     this->goto_line = 0;
     this->has_last_progress = false;  // new job started, stop reporting previous job's last progress
+
+    this->publish_play_started();
 
     // force into absolute mode
     THEROBOT->absolute_mode = true;
@@ -2057,10 +2084,6 @@ _exit:
 	return 0;
 }
 
-// Forward declaration: defined below, alongside fill_md5_from_path(), but
-// needed here too, for the .md5 sidecar upload_command() reads on success.
-static bool md5_digest_usable(const char *s);
-
 // The machine as the file-command gate (libs/FileCommandGate.h) sees it
 // right now, for upload_command() and download_command().
 static file_command_gate::MachineState file_command_state(bool job_playing)
@@ -2573,19 +2596,8 @@ upload_success:
 		const uint8_t path_len = multiclient::event_path_length(desfilename.c_str(), desfilename.size());
 		uint8_t payload[2 + multiclient::max_event_path_length + 4 + 1 + multiclient::md5_digest_bytes];
 
-		char md5_hex[32];
-		bool have_digest = false;
-		FILE *fd_md5_read = fwfs::fopen(md5_filename.c_str(), "rb");
-		if (fd_md5_read != NULL) {
-			have_digest = fwfs::fread(md5_hex, sizeof(char), sizeof(md5_hex), fd_md5_read) == sizeof(md5_hex)
-			           && md5_digest_usable(md5_hex);
-			fwfs::fclose(fd_md5_read);
-		}
-
 		uint8_t digest[multiclient::md5_digest_bytes];
-		if (have_digest) {
-			multiclient::decode_md5_hex(md5_hex, digest);
-		}
+		const bool have_digest = read_md5_sidecar(md5_filename, digest);
 
 		const size_t length = multiclient::build_upload_finished_event(
 			desfilename.c_str(), path_len, u32filesize, have_digest ? digest : NULL, payload, sizeof(payload));
@@ -2612,6 +2624,26 @@ static bool md5_digest_usable(const char *s)
         }
     }
     return true;
+}
+
+// Reads the 32 hex characters at the start of the .md5 sidecar file at
+// `md5_path` and, if they are a usable digest (md5_digest_usable()), decodes
+// them into the 16 raw bytes at `digest`. True if it did. Never hashes the
+// file the sidecar belongs to.
+static bool read_md5_sidecar(const string& md5_path, uint8_t *digest)
+{
+    char md5_hex[32];
+    bool usable = false;
+    FILE *fd = fwfs::fopen(md5_path.c_str(), "rb");
+    if (fd != NULL) {
+        usable = fwfs::fread(md5_hex, sizeof(char), sizeof(md5_hex), fd) == sizeof(md5_hex)
+              && md5_digest_usable(md5_hex);
+        fwfs::fclose(fd);
+    }
+    if (usable) {
+        multiclient::decode_md5_hex(md5_hex, digest);
+    }
+    return usable;
 }
 
 static bool fill_md5_from_path(const char *path, char *out, size_t out_size)

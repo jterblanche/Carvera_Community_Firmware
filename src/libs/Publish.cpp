@@ -89,11 +89,13 @@ std::size_t append_kind_and_path(uint8_t kind, const char* path, uint8_t path_le
   if (path_len != 0) std::memcpy(out + 2, path, path_len);
   return 2 + path_len;
 }
-}  // namespace
 
-std::size_t build_upload_finished_event(const char* path, uint8_t path_len, uint32_t size,
-                                         const uint8_t* md5_digest, uint8_t* out, std::size_t out_capacity) {
-  std::size_t offset = append_kind_and_path(event_kind_upload_finished, path, path_len, out, out_capacity);
+// Appends kind(1) + path_len(1) + path + size(4, BE) + checksum_type(1) +
+// checksum(0 or 16 B) to `out` at offset 0: the upload-finished and
+// play-started layout. Returns the payload length, or 0 if it did not fit.
+std::size_t build_file_event(uint8_t kind, const char* path, uint8_t path_len, uint32_t size,
+                             const uint8_t* md5_digest, uint8_t* out, std::size_t out_capacity) {
+  std::size_t offset = append_kind_and_path(kind, path, path_len, out, out_capacity);
   if (offset == 0) return 0;
   const std::size_t checksum_length = md5_digest != nullptr ? md5_digest_bytes : 0;
   if (offset + 4 + 1 + checksum_length > out_capacity) return 0;
@@ -106,9 +108,16 @@ std::size_t build_upload_finished_event(const char* path, uint8_t path_len, uint
   }
   return offset;
 }
+}  // namespace
 
-std::size_t build_play_started_event(const char* path, uint8_t path_len, uint8_t* out, std::size_t out_capacity) {
-  return append_kind_and_path(event_kind_play_started, path, path_len, out, out_capacity);
+std::size_t build_upload_finished_event(const char* path, uint8_t path_len, uint32_t size,
+                                         const uint8_t* md5_digest, uint8_t* out, std::size_t out_capacity) {
+  return build_file_event(event_kind_upload_finished, path, path_len, size, md5_digest, out, out_capacity);
+}
+
+std::size_t build_play_started_event(const char* path, uint8_t path_len, uint32_t size, const uint8_t* md5_digest,
+                                      uint8_t* out, std::size_t out_capacity) {
+  return build_file_event(event_kind_play_started, path, path_len, size, md5_digest, out, out_capacity);
 }
 
 std::size_t build_job_ended_event(const char* path, uint8_t path_len, uint8_t percent_complete,
