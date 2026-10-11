@@ -75,6 +75,7 @@ std::size_t build_client_list_reply(const ClientTable& table, const ControlToken
                                      std::size_t out_capacity) {
   std::size_t offset = 1;  // reserve the count byte
   uint8_t count = 0;
+  const Client* listed[max_wifi_clients + 1];
   const bool has_holder = control.has_holder();
   const uint64_t holder_id = control.holder().id;
 
@@ -85,7 +86,7 @@ std::size_t build_client_list_reply(const ClientTable& table, const ControlToken
     const std::size_t next = append_client_entry(*client, has_control, out, offset, out_capacity);
     if (next == offset) break;  // out of room
     offset = next;
-    ++count;
+    listed[count++] = client;
   }
 
   const Client* usb = table.usb();
@@ -94,7 +95,20 @@ std::size_t build_client_list_reply(const ClientTable& table, const ControlToken
     const std::size_t next = append_client_entry(*usb, has_control, out, offset, out_capacity);
     if (next != offset) {
       offset = next;
-      ++count;
+      listed[count++] = usb;
+    }
+  }
+
+  // Each listed client's IPv4 address, in entry order, after the last entry.
+  // The USB entry's is all zero.
+  if (offset + client_address_length * count <= out_capacity) {
+    for (uint8_t i = 0; i < count; ++i) {
+      if (listed[i]->link == Link::usb) {
+        std::memset(out + offset, 0, client_address_length);
+      } else {
+        std::memcpy(out + offset, listed[i]->address.ip, client_address_length);
+      }
+      offset += client_address_length;
     }
   }
 

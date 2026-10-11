@@ -34,7 +34,10 @@ listed, in WiFi-then-USB order; an empty table producing a reply with a
 zero count and no entries; and `has_control`: false for every entry when
 nobody holds control, true only for the entry matching the current holder
 among several clients, true for the USB entry when the USB client holds
-control, and following control as it moves from one client to another.
+control, and following control as it moves from one client to another;
+the IPv4 addresses after the last entry, one per entry in entry order,
+0.0.0.0 for USB, left out when they do not fit; and the longest possible
+reply filling exactly `max_client_list_reply_length`.
 
 Also: which clients must identify first (none while nobody present has
 identified, however many unidentified clients there are; an unidentified

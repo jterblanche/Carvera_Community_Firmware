@@ -80,10 +80,14 @@ bool parse_hello(const uint8_t* payload, std::size_t length, Hello& out);
 // features byte reads the first three and ignores the fourth.
 std::size_t build_hello_ack(uint8_t* out, uint8_t result, uint8_t mode, uint8_t features);
 
+// Length of one client's address in the client-list reply: an IPv4 address.
+constexpr std::size_t client_address_length = 4;
+
 // Longest possible client-list-reply payload: count(1) + up to
 // (max_wifi_clients + 1) entries of at most 8+1+max_name_length+1+1 bytes
-// each.
-constexpr std::size_t max_client_list_reply_length = 1 + (max_wifi_clients + 1) * (8 + 1 + max_name_length + 1 + 1);
+// each, then one address per entry.
+constexpr std::size_t max_client_list_reply_length =
+    1 + (max_wifi_clients + 1) * (8 + 1 + max_name_length + 1 + 1 + client_address_length);
 
 // Builds a client-list-reply payload listing every identified client in
 // `table` (WiFi then USB) into `out` (capacity `out_capacity`, which should
@@ -91,7 +95,13 @@ constexpr std::size_t max_client_list_reply_length = 1 + (max_wifi_clients + 1) 
 // unidentified client is not listed -- it has no id or name to report.
 // `has_control` is true for the one entry whose id matches `control`'s
 // current holder, and false for every other entry -- including every entry
-// when `control` has no holder at all. Returns the payload length.
+// when `control` has no holder at all.
+//
+// After the last entry come the listed clients' IPv4 addresses, 4 bytes
+// each in entry order, 0.0.0.0 for the USB entry, so a controller can tell
+// apart two clients with the same name. A controller that reads only the
+// entries ignores them. They are left out if they do not fit in
+// `out_capacity`. Returns the payload length.
 std::size_t build_client_list_reply(const ClientTable& table, const ControlToken& control, uint8_t* out,
                                      std::size_t out_capacity);
 
