@@ -36,6 +36,7 @@
 #include "libs/ControlToken.h"
 #include "libs/FileCommandGate.h"
 #include "libs/JobStartWait.h"
+#include "libs/DownloadRetry.h"
 #include "libs/TransferTimeout.h"
 #include "PlayerPublicAccess.h"
 #include "TemperatureControlPublicAccess.h"
@@ -3186,7 +3187,7 @@ void Player::download_command( string parameters, StreamOutput *stream )
                 if( cmd == PTYPE_FILE_RETRY)
                 {
                     cmd = lastcmd;
-                    beretry = true;
+                    beretry = download_retry::repeats_data_packet(lastcmd);
                 }		
                 switch (cmd) {
                     case PTYPE_FILE_MD5:         
