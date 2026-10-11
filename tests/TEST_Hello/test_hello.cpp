@@ -300,6 +300,13 @@ int main() {
     CHECK(out[offset++] == 1);  // usb
     CHECK(out[offset++] == 0);  // has_control: nobody holds it
 
+    // Then one address per entry, in entry order: Alice's, then 0.0.0.0
+    // for the USB entry.
+    CHECK(out[offset] == 1 && out[offset + 1] == 1 && out[offset + 2] == 1 && out[offset + 3] == 1);
+    offset += multiclient::client_address_length;
+    CHECK(out[offset] == 0 && out[offset + 1] == 0 && out[offset + 2] == 0 && out[offset + 3] == 0);
+    offset += multiclient::client_address_length;
+
     CHECK(offset == len);
   }
 
@@ -337,7 +344,7 @@ int main() {
     CHECK(out[offset++] == 1);  // Carol: the holder
     offset += 8 + 1 + 3 + 1;  // Bob's (USB) entry up to has_control
     CHECK(out[offset++] == 0);  // Bob: not the holder
-    CHECK(offset == len);
+    CHECK(offset + 3 * multiclient::client_address_length == len);  // then the three addresses
   }
 
   {
@@ -359,7 +366,7 @@ int main() {
     offset += 8 + 1 + 3;  // id + name_len + name
     CHECK(out[offset++] == 1);  // usb
     CHECK(out[offset++] == 1);  // has_control
-    CHECK(offset == len);
+    CHECK(offset + multiclient::client_address_length == len);  // then the address
   }
 
   {
@@ -389,7 +396,7 @@ int main() {
       CHECK(out[offset++] == 1);  // Alice: the holder
       offset += 8 + 1 + 5 + 1;  // Carol's entry up to has_control
       CHECK(out[offset++] == 0);  // Carol: not the holder
-      CHECK(offset == len);
+      CHECK(offset + 2 * multiclient::client_address_length == len);  // then the two addresses
     }
 
     // Control moves to Carol.
@@ -403,8 +410,61 @@ int main() {
       CHECK(out[offset++] == 0);  // Alice: no longer the holder
       offset += 8 + 1 + 5 + 1;  // Carol's entry up to has_control
       CHECK(out[offset++] == 1);  // Carol: now the holder
-      CHECK(offset == len);
+      CHECK(offset + 2 * multiclient::client_address_length == len);  // then the two addresses
     }
+  }
+
+  {
+    TEST("client-list reply ends with each WiFi client's address, two with the same name included");
+    multiclient::ClientTable table;
+    multiclient::ControlToken control;
+    const int a = table.add_wifi(address(23), 0);
+    const int b = table.add_wifi(address(57), 0);
+    multiclient::set_identity(*table.wifi_at(a), 0xAAULL, "PC", 2);
+    multiclient::set_identity(*table.wifi_at(b), 0xBBULL, "PC", 2);
+
+    uint8_t out[multiclient::max_client_list_reply_length];
+    const std::size_t len = multiclient::build_client_list_reply(table, control, out, sizeof(out));
+    CHECK(out[0] == 2);
+
+    const std::size_t entries_end = 1 + 2 * (8 + 1 + 2 + 1 + 1);
+    CHECK(len == entries_end + 2 * multiclient::client_address_length);
+    const uint8_t first[4] = {192, 168, 1, 23};
+    const uint8_t second[4] = {192, 168, 1, 57};
+    CHECK(std::memcmp(out + entries_end, first, 4) == 0);
+    CHECK(std::memcmp(out + entries_end + 4, second, 4) == 0);
+  }
+
+  {
+    TEST("client-list reply leaves the addresses out when they do not fit");
+    multiclient::ClientTable table;
+    multiclient::ControlToken control;
+    const int a = table.add_wifi(address(23), 0);
+    multiclient::set_identity(*table.wifi_at(a), 0xAAULL, "PC", 2);
+
+    const std::size_t entries_end = 1 + 8 + 1 + 2 + 1 + 1;
+    uint8_t out[multiclient::max_client_list_reply_length];
+    const std::size_t len = multiclient::build_client_list_reply(table, control, out, entries_end + 3);
+    CHECK(out[0] == 1);
+    CHECK(len == entries_end);
+  }
+
+  {
+    TEST("the longest reply fits in max_client_list_reply_length, addresses included");
+    multiclient::ClientTable table;
+    multiclient::ControlToken control;
+    const char name[] = "0123456789012345678901234567890";  // max_name_length characters
+    for (uint8_t i = 0; i < multiclient::max_wifi_clients; ++i) {
+      const int index = table.add_wifi(address(static_cast<uint8_t>(10 + i)), 0);
+      multiclient::set_identity(*table.wifi_at(index), 0x10ULL + i, name, multiclient::max_name_length);
+    }
+    table.set_usb_present(true, 0);
+    multiclient::set_identity(*table.usb(), 0xBBULL, name, multiclient::max_name_length);
+
+    uint8_t out[multiclient::max_client_list_reply_length];
+    const std::size_t len = multiclient::build_client_list_reply(table, control, out, sizeof(out));
+    CHECK(out[0] == multiclient::max_wifi_clients + 1);
+    CHECK(len == multiclient::max_client_list_reply_length);
   }
 
   {
