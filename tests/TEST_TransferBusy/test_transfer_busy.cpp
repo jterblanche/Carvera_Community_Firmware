@@ -8,6 +8,7 @@
 #include "libs/CRC16.h"
 #include "libs/MakeraFrame.h"
 #include "libs/PublicData.h"
+#include "libs/Publish.h"
 #include "libs/TransferBusy.h"
 
 namespace {
@@ -240,6 +241,87 @@ int main() {
     CHECK(limiter.should_reply(address(10, 1000), false, 3));
     CHECK(!limiter.should_reply(address(99, 1000), false, 4));
     CHECK(!limiter.should_reply(address(12, 1000), false, 5));
+  }
+
+  {
+    TEST("the transfer notice is one event frame: kind 9, then the direction");
+    for (const uint8_t direction : {multiclient::transfer_download, multiclient::transfer_upload}) {
+      uint8_t frame[multiclient::transfer_notice_frame_size];
+      const std::size_t length = multiclient::build_transfer_notice_frame(direction, frame, sizeof(frame));
+      CHECK(length == sizeof(frame));
+      CHECK(length == 11);
+
+      makera::Packet packet;
+      makera::FrameDecoder decoder(packet);
+      makera::DecodeResult result = makera::DecodeResult::incomplete;
+      std::size_t used = 0;
+      while (used < length && result == makera::DecodeResult::incomplete) result = decoder.decode_byte(frame[used++], 0);
+      CHECK(result == makera::DecodeResult::complete);
+      CHECK(used == length);
+      CHECK(packet.type == PTYPE_EVENT);
+      CHECK(packet.data_length == 2);
+      CHECK(packet.data[0] == multiclient::event_kind_transfer);
+      CHECK(packet.data[0] == 9);
+      CHECK(packet.data[1] == direction);
+      CHECK(std::vector<uint8_t>(frame, frame + length) == make_frame(PTYPE_EVENT, {9, direction}));
+    }
+    CHECK(multiclient::transfer_download == 0);
+    CHECK(multiclient::transfer_upload == 1);
+  }
+
+  {
+    TEST("the transfer notice is not built into a buffer too small for it");
+    uint8_t frame[multiclient::transfer_notice_frame_size];
+    CHECK(multiclient::build_transfer_notice_frame(0, frame, sizeof(frame) - 1) == 0);
+    CHECK(multiclient::build_transfer_notice_frame(0, nullptr, sizeof(frame)) == 0);
+  }
+
+  {
+    TEST("a transfer notice is due at once, then once a second");
+    const uint32_t second = 1000000;
+    CHECK(multiclient::transfer_notice_interval_us == second);
+    multiclient::TransferNotice notice;
+    notice.begin(multiclient::transfer_upload, 5 * second);
+    CHECK(notice.direction() == multiclient::transfer_upload);
+    CHECK(notice.due(5 * second));
+    CHECK(!notice.due(5 * second));
+    CHECK(!notice.due(5 * second + second - 1));
+    CHECK(notice.due(6 * second));
+    CHECK(!notice.due(6 * second + 10000));
+    // Measured from the notice actually sent, not from a fixed schedule.
+    CHECK(notice.due(7 * second + 300000));
+    CHECK(!notice.due(8 * second));
+    CHECK(notice.due(8 * second + 300000));
+  }
+
+  {
+    TEST("a new transfer starts its notices over, with its own direction");
+    const uint32_t second = 1000000;
+    multiclient::TransferNotice notice;
+    notice.begin(multiclient::transfer_upload, 10 * second);
+    CHECK(notice.due(10 * second));
+    notice.begin(multiclient::transfer_download, 10 * second + 1);
+    CHECK(notice.direction() == multiclient::transfer_download);
+    CHECK(notice.due(10 * second + 1));
+  }
+
+  {
+    TEST("transfer notices keep their pace across a wrap of the microsecond counter");
+    const uint32_t second = 1000000;
+    const uint32_t before_wrap = UINT32_MAX - second / 2;
+    multiclient::TransferNotice notice;
+    notice.begin(multiclient::transfer_download, before_wrap);
+    CHECK(notice.due(before_wrap));
+    CHECK(!notice.due(before_wrap + second / 2));  // wrapped, half a second later
+    CHECK(notice.due(before_wrap + second));
+    CHECK(!notice.due(before_wrap + second + 1));
+  }
+
+  {
+    TEST("a transfer starting at counter zero sends its first notice at once");
+    multiclient::TransferNotice notice;
+    notice.begin(multiclient::transfer_download, 0);
+    CHECK(notice.due(0));
   }
 
   std::printf("\n%d checks, %d failures\n", checks, failures);

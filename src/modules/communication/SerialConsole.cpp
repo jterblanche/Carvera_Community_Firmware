@@ -1023,6 +1023,18 @@ void SerialConsole::publish_relay(uint64_t source_id, const uint8_t* payload, si
     StreamOutput::PacketMessage(PTYPE_RELAY, reinterpret_cast<const char*>(frame), static_cast<int>(frame_length));
 }
 
+// Reached through THEKERNEL->streams->send_transfer_notice()
+// (libs/StreamOutputPool.h). Sends the notice to this USB link's own client,
+// if it is identified and is not the one running the transfer. Written out
+// with puts(), not PacketMessage(), which builds its frame in the buffer an
+// upload writes the file through.
+void SerialConsole::send_transfer_notice(const StreamOutput* transfer_stream, const uint8_t* frame, size_t length) {
+    if (communication_protocol != PROTOCOL_MAKERA || transfer_stream == this) return;
+    const multiclient::Client *usb = multiclient::shared_client_table().usb();
+    if (usb == nullptr || !usb->identified) return;
+    puts(reinterpret_cast<const char*>(frame), static_cast<int>(length));
+}
+
 int SerialConsole::receive_packet(makera::Packet& packet, uint32_t timeout_ms)
 {
     makera_frame_decoder.reset();

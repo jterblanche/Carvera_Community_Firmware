@@ -795,6 +795,23 @@ void WifiProvider::publish_relay(uint64_t source_id, const uint8_t* payload, siz
 	send_framed_to_identified_wifi_clients_except(source_id, PTYPE_RELAY, frame, frame_length);
 }
 
+// Reached through THEKERNEL->streams->send_transfer_notice()
+// (libs/StreamOutputPool.h), between the frames of a file transfer. Sends
+// the notice to every identified WiFi client except the one running the
+// transfer, which during a WiFi transfer is active_reply_client, as for
+// gets(). `frame` is already whole, so fbuff, which an upload writes the
+// file through, is not touched.
+void WifiProvider::send_transfer_notice(const StreamOutput* transfer_stream, const uint8_t* frame, size_t length) {
+	if (communication_protocol != PROTOCOL_MAKERA || !wifi_init_ok) return;
+	const int transferring = transfer_stream == this ? active_reply_client : -1;
+	for (size_t i = 0; i < multiclient::max_wifi_clients; ++i) {
+		const multiclient::Client *client = multiclient::shared_client_table().wifi_at(static_cast<int>(i));
+		if (client != nullptr && client->identified && static_cast<int>(i) != transferring) {
+			send_to_wifi_client(static_cast<int>(i), frame, length);
+		}
+	}
+}
+
 // Sends a framed reply addressed to `client_index` regardless of whatever
 // active_reply_client currently holds -- this can run nested inside another
 // client's dispatch (see receive_wifi_data()), so the previous value is

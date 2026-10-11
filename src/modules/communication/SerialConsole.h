@@ -48,6 +48,7 @@ class SerialConsole : public Module, public StreamOutput {
         void PacketMessage(char cmd, const char* s, int size) override;
         void publish_multiclient(char cmd, const uint8_t* payload, size_t length);
         void publish_relay(uint64_t source_id, const uint8_t* payload, size_t length);
+        void send_transfer_notice(const StreamOutput* transfer_stream, const uint8_t* frame, size_t length) override;
         void reset();
         char getc_result;
 

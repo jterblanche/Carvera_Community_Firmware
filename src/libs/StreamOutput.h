@@ -68,6 +68,15 @@ class StreamOutput {
             (void)source_id; (void)payload; (void)length;
         }
 
+        // Sends `frame`, one whole frame, to this stream's own identified
+        // clients other than the one running the file transfer on
+        // `transfer_stream`. Only Player calls it, while a transfer runs
+        // (libs/TransferBusy.h); a stream with no notion of "identified
+        // clients" leaves the default no-op.
+        virtual void send_transfer_notice(const StreamOutput *transfer_stream, const uint8_t *frame, std::size_t length) {
+            (void)transfer_stream; (void)frame; (void)length;
+        }
+
         static NullStreamOutput NullStream;
 
         // Virtual because printf()/printfcmd() above call it to frame their
