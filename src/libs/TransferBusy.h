@@ -60,4 +60,42 @@ class BusyReplyLimiter {
   std::size_t oldest_ = 0;
 };
 
+// While a file transfer runs, the machine does nothing else: no status, no
+// replies, nothing read from USB. So that the other connected controllers
+// do not take that silence for a lost link, and the WiFi module does not
+// close a connection that carries no traffic, every identified controller
+// except the one transferring is sent a transfer notice once a second: a
+// 0x68 event, kind event_kind_transfer (libs/Publish.h), whose one byte of
+// data after the kind says which way the file is going.
+constexpr uint8_t transfer_download = 0;  // a controller is reading a file from the machine
+constexpr uint8_t transfer_upload = 1;    // a controller is sending a file to the machine
+constexpr uint32_t transfer_notice_interval_us = 1000000;
+constexpr std::size_t transfer_notice_frame_size = 2 + makera::frame_overhead;
+
+// Writes the transfer notice for `direction` into `out` as one whole frame.
+// Returns its length, or 0 if `capacity` is too small.
+std::size_t build_transfer_notice_frame(uint8_t direction, uint8_t* out, std::size_t capacity);
+
+// When the next transfer notice is due. begin() makes the first one due at
+// once; after that, due() says yes once every transfer_notice_interval_us.
+// Both take raw us_ticker_read() readings.
+class TransferNotice {
+ public:
+  void begin(uint8_t direction, uint32_t now_us) {
+    direction_ = direction;
+    last_us_ = now_us - transfer_notice_interval_us;
+  }
+  // True if a notice is due at `now_us`, which then counts as sent.
+  bool due(uint32_t now_us) {
+    if (static_cast<uint32_t>(now_us - last_us_) < transfer_notice_interval_us) return false;
+    last_us_ = now_us;
+    return true;
+  }
+  uint8_t direction() const { return direction_; }
+
+ private:
+  uint8_t direction_ = transfer_download;
+  uint32_t last_us_ = 0;
+};
+
 }  // namespace multiclient

@@ -34,3 +34,10 @@ automatic traffic gets nothing more, while other frames are answered no more
 often than every 250 ms, correctly across a wrap of the microsecond counter.
 Clients are tracked separately, clearing starts over, and a client beyond the
 tracked number reuses the oldest entry.
+
+The transfer notice the other identified controllers are sent during a
+transfer decodes as one 0x68 event frame of 11 bytes, kind 9 followed by the
+direction (0 download, 1 upload), and is not built into a buffer too small
+for it. A notice is due at once when a transfer begins, then once a second
+measured from the last one sent, a new transfer starts over with its own
+direction, and the pace holds across a wrap of the microsecond counter.

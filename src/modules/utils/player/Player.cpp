@@ -36,6 +36,7 @@
 #include "libs/ControlToken.h"
 #include "libs/FileCommandGate.h"
 #include "libs/JobStartWait.h"
+#include "libs/TransferBusy.h"
 #include "libs/TransferTimeout.h"
 #include "PlayerPublicAccess.h"
 #include "TemperatureControlPublicAccess.h"
@@ -2167,6 +2168,30 @@ void Player::resume_command(string parameters, StreamOutput *stream )
 }
 
 #if !defined(STREAMED_JOB_PLAYBACK)
+// While a file transfer runs, nothing else is served, so the other
+// identified controllers are sent a transfer notice once a second
+// (libs/TransferBusy.h). These record which transfer it is about.
+static multiclient::TransferNotice transfer_notice;
+static const StreamOutput *transfer_notice_stream = NULL;
+
+static void begin_transfer_notices(const StreamOutput *stream, uint8_t direction)
+{
+    transfer_notice_stream = stream;
+    transfer_notice.begin(direction, us_ticker_read());
+}
+
+// Called often from the transfer loops: sends the notice when one is due.
+// Does nothing outside a transfer, or on the Smoothie protocol, which has
+// no identified controllers.
+static void send_transfer_notice_if_due()
+{
+    if (communication_protocol != PROTOCOL_MAKERA || !THEKERNEL->is_uploading()) return;
+    if (!transfer_notice.due(us_ticker_read())) return;
+    uint8_t frame[multiclient::transfer_notice_frame_size];
+    const size_t length = multiclient::build_transfer_notice_frame(transfer_notice.direction(), frame, sizeof(frame));
+    if (length != 0) THEKERNEL->streams->send_transfer_notice(transfer_notice_stream, frame, length);
+}
+
 int Player::check_crc(int crc, unsigned char *data, unsigned int len)
 {
     if (crc) {
@@ -2462,6 +2487,7 @@ void Player::upload_command( string parameters, StreamOutput *stream )
     if (communication_protocol == PROTOCOL_MAKERA) {
         starttime = us_ticker_read();
         stream->reset();
+        begin_transfer_notices(stream, multiclient::transfer_upload);
     }
 
     // Makera mode: if the WiFi client uploading disconnects partway through,
@@ -2577,6 +2603,7 @@ void Player::upload_command( string parameters, StreamOutput *stream )
                 goto upload_error; /* too many retry error */
             }
         } else { //Makera protocol
+            send_transfer_notice_if_due();
             cmdType = inbytes(stream, &recv_buff, 0, TIMEOUT_MS);
             if (cmdType > 0) 
             {
@@ -2914,6 +2941,7 @@ static bool fill_md5_from_path(const char *path, char *out, size_t out_size)
             md5.update(buf, n);
         }
         THEKERNEL->call_event(ON_IDLE);
+        send_transfer_notice_if_due();
     } while (!fwfs::feof(fd));
     fwfs::fclose(fd);
     strcpy(out, md5.finalize().hexdigest().c_str());
@@ -3007,6 +3035,9 @@ void Player::download_command( string parameters, StreamOutput *stream )
         }
 
         return;
+    }
+    if (communication_protocol == PROTOCOL_MAKERA) {
+        begin_transfer_notices(stream, multiclient::transfer_download);
     }
     char md5[64]; //Smoothie need to replace with md5buf
     if (communication_protocol == PROTOCOL_SMOOTHIE) {
@@ -3180,6 +3211,7 @@ void Player::download_command( string parameters, StreamOutput *stream )
                 goto download_error;
             }
         } else{
+            send_transfer_notice_if_due();
             cmd = inbytes(stream, &recv_buff, 0, TIMEOUT_MS);
             if (cmd > 0) {			
                 starttime = us_ticker_read();

@@ -4,6 +4,7 @@
 
 #include "CRC16.h"
 #include "MakeraControl.h"
+#include "Publish.h"
 #include "PublicData.h"
 
 namespace multiclient {
@@ -19,6 +20,19 @@ std::size_t build_busy_reply_frame(uint8_t* out, std::size_t capacity) {
   makera::write_be16(out + 5 + text_length, crc16::ccitt(out + 2, length));
   makera::write_be16(out + 7 + text_length, makera::footer);
   return busy_reply_frame_size;
+}
+
+std::size_t build_transfer_notice_frame(uint8_t direction, uint8_t* out, std::size_t capacity) {
+  if (out == nullptr || capacity < transfer_notice_frame_size) return 0;
+  const uint16_t length = 2 + 3;  // type, kind, direction, CRC
+  makera::write_be16(out, makera::header);
+  makera::write_be16(out + 2, length);
+  out[4] = PTYPE_EVENT;
+  out[5] = event_kind_transfer;
+  out[6] = direction;
+  makera::write_be16(out + 7, crc16::ccitt(out + 2, length));
+  makera::write_be16(out + 9, makera::footer);
+  return transfer_notice_frame_size;
 }
 
 bool needs_busy_reply(const uint8_t* data, std::size_t length) {

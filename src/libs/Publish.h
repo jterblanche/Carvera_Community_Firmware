@@ -100,6 +100,9 @@ constexpr uint8_t event_kind_control_changed = 5;
 constexpr uint8_t event_kind_client_joined = 6;
 constexpr uint8_t event_kind_client_left = 7;
 constexpr uint8_t event_kind_job_start = 8;
+// Sent once a second, while a file transfer runs, to every identified
+// controller except the one transferring (libs/TransferBusy.h).
+constexpr uint8_t event_kind_transfer = 9;
 
 // The checksum_type of event_kind_upload_finished and
 // event_kind_play_started: event_checksum_none when the machine found no

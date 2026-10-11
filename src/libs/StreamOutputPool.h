@@ -78,6 +78,16 @@ public:
         }
     }
 
+    // Reaches every registered stream's own send_transfer_notice()
+    // override. See StreamOutput::send_transfer_notice().
+    void send_transfer_notice(const StreamOutput* transfer_stream, const uint8_t* frame, size_t length)
+    {
+        for(set<StreamOutput*>::iterator i = this->streams.begin(); i != this->streams.end(); i++)
+        {
+            (*i)->send_transfer_notice(transfer_stream, frame, length);
+        }
+    }
+
     void append_stream(StreamOutput* stream)
     {
         this->streams.insert(stream);
