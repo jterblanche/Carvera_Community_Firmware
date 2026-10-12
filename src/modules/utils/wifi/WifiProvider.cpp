@@ -1118,9 +1118,9 @@ void WifiProvider::publish_client_left_if_identified(const multiclient::Client& 
 void WifiProvider::reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_clients[]) {
 	auto &table = multiclient::shared_client_table();
 
-	// First, reap anyone a send has already proved is gone. send_to_wifi_client()
-	// only flags them, because it runs while a caller is walking this same
-	// table. Doing the removal here keeps every removal in one place, and
+	// First, reap anyone sends have already shown is gone. send_to_wifi_client()
+	// only records the failures, because it runs while a caller is walking this
+	// same table. Doing the removal here keeps every removal in one place, and
 	// means a client whose socket died is dropped on the next tick rather
 	// than being published to at 5 Hz forever.
 	//
@@ -1129,7 +1129,7 @@ void WifiProvider::reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_
 	// relying on it.
 	for (int i = 0; i < static_cast<int>(multiclient::max_wifi_clients); ++i) {
 		multiclient::Client *client = table.wifi_at(i);
-		if (client == nullptr || !client->send_failed) continue;
+		if (client == nullptr || !multiclient::sends_show_client_gone(*client)) continue;
 		disconnect_wifi_client(client->address, "the machine could no longer send to it", false);
 		publish_client_left_if_identified(*client);
 		table.remove_wifi(i);
