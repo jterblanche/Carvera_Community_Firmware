@@ -645,6 +645,52 @@ void WifiProvider::refuse_as_busy(const multiclient::Address& sender, const u8* 
 	M8266WIFI_SPI_Send_Data_to_TcpClient(frame, static_cast<u16>(frame_length), tcp_link_no, ip_str, sender.port, &status);
 }
 
+// Called by gets() for the same discarded read, before refuse_as_busy().
+// While a job start is held (libs/JobStartWait.h), a job-start ready message
+// or an abort in the read is taken rather than lost to the transfer: the
+// ready is recorded at once, and an abort the control gate would let through
+// cancels the held start before it can be started once the transfer ends.
+// The bytes go through the sender's own frame decoder, which the transfer
+// does not use. Nothing is sent to anyone here. Returns true if something
+// was taken, and the sender then gets no busy reply for this read.
+bool WifiProvider::take_held_start_frames(const multiclient::Address& sender, const u8* data, u16 length) {
+	multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
+	if (!wait.pending()) return false;
+	multiclient::ClientTable &table = multiclient::shared_client_table();
+	const int client_index = table.find_wifi(sender);
+	if (client_index < 0) return false;
+	multiclient::Client *client = table.wifi_at(client_index);
+	makera::ResyncingDecoder &decoder = wifi_streams[client_index].decoder;
+	const uint32_t now_us = us_ticker_read();
+	bool taken = false;
+	for (u16 i = 0; i < length; ++i) {
+		if (decoder.decode_byte(data[i], now_us) != makera::ResyncResult::complete) continue;
+		const makera::Packet &packet = decoder.packet();
+		if (multiclient::must_identify_first(table, client) &&
+		    !multiclient::taken_before_identifying(packet.type, packet.data, packet.data_length)) continue;
+		switch (multiclient::held_start_frame(packet.type, packet.data, packet.data_length)) {
+			case multiclient::TransferFrame::ready:
+				if (wait.mark_ready(*client, packet.data, packet.data_length)) taken = true;
+				break;
+			case multiclient::TransferFrame::cancel: {
+				// peek(), not gate(): control does not move during a
+				// transfer, and nothing is published until it ends.
+				const GateInputs in = gate_inputs_for(client_index, packet);
+				const multiclient::GateResult result = multiclient::shared_control_token().peek(
+					in.sender, in.traffic, in.motion, multi_client_mode, in.action, multi_client_passive_rights);
+				if (!result.refused) {
+					wait.request_cancel();
+					taken = true;
+				}
+				break;
+			}
+			case multiclient::TransferFrame::other:
+				break;
+		}
+	}
+	return taken;
+}
+
 void WifiProvider::broadcast_to_wifi_clients(const u8* data, size_t length) {
 	for (size_t i = 0; i < multiclient::max_wifi_clients; ++i) {
 		if (multiclient::shared_client_table().wifi_at(static_cast<int>(i)) != nullptr) {
@@ -2031,7 +2077,7 @@ int WifiProvider::gets(char** buf, int size)
 				memcpy(sender.ip, remote_ip, sizeof(sender.ip));
 				sender.port = remote_port;
 				if (!multiclient::is_transfer_owner(multiclient::shared_client_table(), active_reply_client, sender)) {
-					refuse_as_busy(sender, WifiData, received);
+					if (!take_held_start_frames(sender, WifiData, received)) refuse_as_busy(sender, WifiData, received);
 					return 0;
 				}
 			}

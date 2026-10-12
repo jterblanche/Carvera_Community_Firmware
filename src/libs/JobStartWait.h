@@ -47,7 +47,17 @@ enum class StartCheck : uint8_t {
   keep_waiting,  // someone awaited is not ready and the limit has not run out
   all_ready,     // every awaited controller is ready, or none is left
   time_limit,    // the limit ran out first
+  time_limit_in_transfer,  // the limit had already run out when a file transfer ended
   starter_left,  // the controller that started the job is no longer connected
+  cancelled,     // an abort arrived during a file transfer (request_cancel())
+};
+
+// What a frame another controller sends during a file transfer is to a held
+// start (see held_start_frame()).
+enum class TransferFrame : uint8_t {
+  other,   // discarded, as anything else sent during a transfer
+  ready,   // a job-start ready message
+  cancel,  // an abort command
 };
 
 class JobStartWait {
@@ -96,14 +106,37 @@ class JobStartWait {
   uint16_t start_id() const { return start_id_; }
   uint64_t starter_id() const { return starter_id_; }
 
-  // Whether the held start should end now, and why. The starter's leaving
-  // comes first, then every awaited controller being ready, then the
-  // limit, which never runs out while the file is being hashed. A
-  // controller is awaited while it is connected, identified and takes
+  // Whether the held start should end now, and why. An abort taken during
+  // a file transfer comes first, then the starter's leaving, then every
+  // awaited controller being ready, then the limit, which never runs out
+  // while the file is being hashed. For two second ticks after a file
+  // transfer, the start waits whatever else is true (see transfer_ended()).
+  // A controller is awaited while it is connected, identified and takes
   // part, is not the starter, and has not said it is ready for this start;
   // one that connects during the wait is awaited too, without extending
   // the limit.
   StartCheck check(const ClientTable& table, uint32_t now_us) const;
+
+  // A file transfer stops the main loop until it ends, so nothing is
+  // decided while it runs, and what the links received meanwhile (a
+  // controller that disconnected, an abort or ready message from USB, or
+  // from WiFi during a USB transfer) has not been handled yet when it ends.
+  // Called when a transfer ends, at `now_us`: while a start is held, it is
+  // not started until second_tick() has been called twice more, so that
+  // every link has handled what arrived and the WiFi client list has been
+  // brought up to date first. A cancel is not held back. Also records
+  // whether the limit had already run out (time_limit_in_transfer).
+  void transfer_ended(uint32_t now_us);
+  // Called once a second while no transfer runs.
+  void second_tick();
+  // True while a held start waits after a file transfer.
+  bool settling() const { return pending_ && settle_ticks_ != 0; }
+
+  // Records an abort taken during a file transfer from a controller the
+  // control gate lets abort: the next check() cancels the held start.
+  void request_cancel() {
+    if (pending_) cancel_requested_ = true;
+  }
 
   // Whole seconds left before the limit, rounded up; 0 once it has run out.
   // The whole limit while the file is being hashed.
@@ -131,6 +164,10 @@ class JobStartWait {
   uint32_t started_us_ = 0;
   uint32_t hashed_size_ = 0;
   MD5 md5_;
+  // Last, where they fill the padding at the end of the object.
+  uint8_t settle_ticks_ = 0;
+  bool cancel_requested_ = false;
+  bool limit_ran_out_in_transfer_ = false;
 };
 
 // The one wait the player and both transports share.
@@ -145,5 +182,13 @@ JobStartWait& shared_job_start_wait();
 // including start-now and abort, reads, and the download a waiting
 // controller needs.
 bool refused_while_start_pending(const char* line, std::size_t length);
+
+// While a WiFi file transfer runs, what another controller sends is
+// discarded (libs/TransferBusy.h). While a start is held, two kinds of frame
+// are kept instead, so the held start does not miss them: a job-start ready
+// message (PTYPE_JOB_START_READY) and an abort (a PTYPE_CTRL_MULTI command
+// line whose first word is abort). `type`, `data` and `length` are the
+// frame's type and payload.
+TransferFrame held_start_frame(uint8_t type, const uint8_t* data, std::size_t length);
 
 }  // namespace multiclient

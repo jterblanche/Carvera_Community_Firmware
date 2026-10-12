@@ -277,8 +277,9 @@ void Player::on_second_tick(void *)
     // left, so a controller that missed one is not left out until the
     // limit. Not while a file transfer runs: the controller receiving a
     // file reads only the transfer's own frames until it ends.
-    const multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
+    multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
     if (wait.pending() && !THEKERNEL->is_uploading()) {
+        wait.second_tick();
         this->publish_job_start(wait.hashing() ? multiclient::job_start_phase_hashing : multiclient::job_start_phase_waiting,
                                 multiclient::job_start_reason_waiting);
     }
@@ -593,8 +594,17 @@ void Player::check_held_start()
         case multiclient::StartCheck::time_limit:
             this->start_held_job(multiclient::job_start_reason_time_limit);
             break;
+        case multiclient::StartCheck::time_limit_in_transfer:
+            // The limit ran out while a file transfer kept the machine
+            // busy, so the start comes later than the limit. It starts,
+            // as when the limit runs out with no transfer.
+            this->start_held_job(multiclient::job_start_reason_time_limit);
+            break;
         case multiclient::StartCheck::starter_left:
             this->cancel_held_start(multiclient::job_start_reason_starter_left);
+            break;
+        case multiclient::StartCheck::cancelled:
+            this->cancel_held_start(multiclient::job_start_reason_aborted);
             break;
     }
 }
@@ -3331,6 +3341,7 @@ download_error:
     THEKERNEL->set_cachewait(true);
     safe_delay_ms(1000);
     THEKERNEL->set_cachewait(false);
+    multiclient::shared_job_start_wait().transfer_ended(us_ticker_read());
 	stream->printf(error_msg);
 	return;
 download_success:
@@ -3345,6 +3356,7 @@ download_success:
     	set_serial_rx_irq(true);
     }
     THEKERNEL->set_uploading(false);
+    multiclient::shared_job_start_wait().transfer_ended(us_ticker_read());
 	stream->printf("Info: download success: %s.\r\n", filename.c_str());
 	return;
 }
