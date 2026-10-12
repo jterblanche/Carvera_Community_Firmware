@@ -527,13 +527,13 @@ void WifiProvider::receive_wifi_data() {
 
 			command_waiting = true;
 			command_waiting_client = client_index;
-			const bool file_transfer_start = packet.type == PTYPE_FILE_START ||
-				(packet.type == PTYPE_AUTO_COMMAND && packet.data[0] == 1);
-			if (file_transfer_start) return; // the rest of this read is file data for Player::gets(), not a frame
 			if (static_cast<uint16_t>(i + 1) < count) {
 				// More bytes already sat in WifiData past this frame's end --
 				// the next call to this function replays them before asking
 				// the driver for anything new, rather than dropping them.
+				// After a file-transfer start they are the start of the
+				// transfer itself (the controller sends its FILE_MD5 straight
+				// after FILE_START), and gets() reads them first instead.
 				pending_wifi_client = client_index;
 				pending_wifi_offset = static_cast<uint16_t>(i + 1);
 				pending_wifi_count = count;
@@ -1199,7 +1199,14 @@ void WifiProvider::reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_
 }
 
 bool WifiProvider::ready() {
-	return M8266WIFI_SPI_Has_DataReceived();
+	return M8266WIFI_SPI_Has_DataReceived() || transfer_bytes_pending();
+}
+
+// True while bytes the transfer's own client sent straight after its
+// file-transfer start, read in the same chunk as that start, wait in
+// WifiData for gets() (see receive_wifi_data()).
+bool WifiProvider::transfer_bytes_pending() const {
+	return pending_wifi_client >= 0 && pending_wifi_client == active_reply_client;
 }
 
 // Asked by Player's upload loop while it waits for the next packet. The
@@ -1998,7 +2005,11 @@ int WifiProvider::gets(char** buf, int size)
 		uint16_t expectedLength = 0;
 		uint16_t checksum;
 		
-		if(this->ptrData == 0)
+		if (this->ptrData == 0 && transfer_bytes_pending()) {
+			this->ptrData = pending_wifi_offset;
+			received = pending_wifi_count;
+			pending_wifi_client = -1;
+		} else if(this->ptrData == 0)
 		{
 			u8 remote_ip[4];
 			u16 remote_port = 0;
