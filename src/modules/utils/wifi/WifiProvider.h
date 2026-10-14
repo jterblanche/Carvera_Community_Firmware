@@ -98,6 +98,7 @@ private:
     };
     SendOutcome send_to_wifi_client(int client_index, const u8* data, size_t length);
     void refuse_as_busy(const multiclient::Address& sender, const u8* data, u16 length);
+    bool take_held_start_frames(const multiclient::Address& sender, const u8* data, u16 length);
     void broadcast_to_wifi_clients(const u8* data, size_t length);
     void broadcast_to_identified_wifi_clients(const u8* data, size_t length);
     // Same as broadcast_to_identified_wifi_clients(), skipping whichever

@@ -8,6 +8,7 @@
 #include "libs/ControlToken.h"
 #include "libs/Hello.h"
 #include "libs/JobStartWait.h"
+#include "libs/PublicData.h"
 
 namespace {
 
@@ -73,6 +74,10 @@ bool send_ready(const JobStartWait& wait, Client& client, uint16_t start_id) {
 }
 
 bool refused(const char* line) { return multiclient::refused_while_start_pending(line, std::strlen(line)); }
+
+multiclient::TransferFrame command_frame(const char* line) {
+  return multiclient::held_start_frame(PTYPE_CTRL_MULTI, reinterpret_cast<const uint8_t*>(line), std::strlen(line));
+}
 
 // A file in memory for hash_step() to read, `chunk` bytes at most per read.
 // Fails the read at byte `fail_at` when it is set. Counts the reads.
@@ -662,6 +667,188 @@ int main() {
     CHECK(!refused("   "));
     CHECK(!multiclient::refused_while_start_pending(nullptr, 0));
     CHECK(!multiclient::refused_while_start_pending("G0", 0));
+  }
+
+  {
+    TEST("held_start_frame: a ready message and an abort are kept during a transfer, nothing else");
+    using multiclient::TransferFrame;
+    const uint8_t ready[2] = {0, 1};
+    CHECK(multiclient::held_start_frame(PTYPE_JOB_START_READY, ready, sizeof(ready)) == TransferFrame::ready);
+    CHECK(command_frame("abort") == TransferFrame::cancel);
+    CHECK(command_frame("abort\n") == TransferFrame::cancel);
+    CHECK(command_frame("abort\r\n") == TransferFrame::cancel);
+    CHECK(command_frame("  abort 1") == TransferFrame::cancel);
+    CHECK(command_frame("aborted") == TransferFrame::other);
+    CHECK(command_frame("start-now") == TransferFrame::other);
+    CHECK(command_frame("G0 X10") == TransferFrame::other);
+    CHECK(command_frame("") == TransferFrame::other);
+    CHECK(multiclient::held_start_frame(PTYPE_CTRL_MULTI, nullptr, 5) == TransferFrame::other);
+    const uint8_t abort_bytes[] = {'a', 'b', 'o', 'r', 't'};
+    CHECK(multiclient::held_start_frame(PTYPE_CTRL_SINGLE, abort_bytes, sizeof(abort_bytes)) == TransferFrame::other);
+    CHECK(multiclient::held_start_frame(PTYPE_HEARTBEAT, nullptr, 0) == TransferFrame::other);
+  }
+
+  {
+    TEST("cancel during a transfer: the start is cancelled when the transfer ends, even past the limit");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    add_identified(table, 2, 0x200, true);
+    hold(wait, identity(table, starter), 0);
+    wait.request_cancel();  // the starter's abort, taken while another controller downloads
+    wait.transfer_ended(57 * second_us);
+    CHECK(wait.settling());
+    CHECK(wait.check(table, 57 * second_us) == StartCheck::cancelled);
+    wait.second_tick();
+    wait.second_tick();
+    CHECK(wait.check(table, 59 * second_us) == StartCheck::cancelled);
+  }
+
+  {
+    TEST("cancel during a transfer: comes before the starter leaving and every controller being ready");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    const int other = add_identified(table, 2, 0x200, true);
+    hold(wait, identity(table, starter), 0);
+    CHECK(send_ready(wait, *table.wifi_at(other), wait.start_id()));
+    wait.request_cancel();
+    table.remove_wifi(starter);
+    CHECK(wait.check(table, 0) == StartCheck::cancelled);
+  }
+
+  {
+    TEST("cancel request: ignored with no start held, and never carried into the next start");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    add_identified(table, 2, 0x200, true);
+    wait.request_cancel();
+    hold(wait, identity(table, starter), 0);
+    CHECK(wait.check(table, 0) == StartCheck::keep_waiting);
+    wait.request_cancel();
+    wait.end();
+    hold(wait, identity(table, starter), 0);
+    CHECK(wait.check(table, 0) == StartCheck::keep_waiting);
+  }
+
+  {
+    TEST("starter gone during a transfer: nothing starts until the client list is brought up to date");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    add_identified(table, 2, 0x200, true);
+    hold(wait, identity(table, starter), 0);
+    // The starter disconnects during a transfer that ends past the limit;
+    // the table still lists it until the WiFi second tick reconciles it.
+    wait.transfer_ended(61 * second_us);
+    CHECK(wait.check(table, 61 * second_us) == StartCheck::keep_waiting);
+    wait.second_tick();
+    CHECK(wait.check(table, 61 * second_us + 1000) == StartCheck::keep_waiting);
+    table.remove_wifi(starter);
+    CHECK(wait.check(table, 61 * second_us + 2000) == StartCheck::starter_left);
+    wait.second_tick();
+    CHECK(wait.check(table, 62 * second_us) == StartCheck::starter_left);
+  }
+
+  {
+    TEST("starter gone during a transfer: a starter leaving is never held back by the wait after it");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    add_identified(table, 2, 0x200, true);
+    hold(wait, identity(table, starter), 0);
+    table.remove_wifi(starter);
+    wait.transfer_ended(5 * second_us);
+    CHECK(wait.settling());
+    CHECK(wait.check(table, 5 * second_us) == StartCheck::starter_left);
+  }
+
+  {
+    TEST("ready during a transfer: kept, and the start follows two second ticks after the transfer");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    const int other = add_identified(table, 2, 0x200, true);
+    const int third = add_identified(table, 3, 0x300, true);
+    hold(wait, identity(table, starter), 0);
+    // One watcher downloads; the other says ready while it does.
+    CHECK(send_ready(wait, *table.wifi_at(third), wait.start_id()));
+    wait.transfer_ended(20 * second_us);
+    CHECK(send_ready(wait, *table.wifi_at(other), wait.start_id()));
+    CHECK(wait.check(table, 20 * second_us) == StartCheck::keep_waiting);
+    wait.second_tick();
+    CHECK(wait.check(table, 20 * second_us + 500) == StartCheck::keep_waiting);
+    wait.second_tick();
+    CHECK(!wait.settling());
+    CHECK(wait.check(table, 21 * second_us) == StartCheck::all_ready);
+  }
+
+  {
+    TEST("time limit and transfers: time_limit_in_transfer only when the limit ran out before the transfer ended");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    add_identified(table, 2, 0x200, true);
+
+    hold(wait, identity(table, starter), 0);
+    wait.transfer_ended(57 * second_us);
+    wait.second_tick();
+    CHECK(wait.check(table, 58 * second_us) == StartCheck::keep_waiting);
+    wait.second_tick();
+    CHECK(wait.check(table, 58 * second_us) == StartCheck::time_limit_in_transfer);
+    wait.end();
+
+    // A transfer that ended before the limit: the limit then runs out as usual.
+    hold(wait, identity(table, starter), 0);
+    CHECK(wait.check(table, 0) == StartCheck::keep_waiting);
+    wait.transfer_ended(10 * second_us);
+    wait.second_tick();
+    wait.second_tick();
+    CHECK(wait.check(table, 12 * second_us) == StartCheck::keep_waiting);
+    CHECK(wait.check(table, 30 * second_us) == StartCheck::time_limit);
+    wait.end();
+
+    // The limit does not run while the file is hashed, so a transfer that
+    // ends during hashing never finds it run out.
+    wait.begin(identity(table, starter));
+    wait.transfer_ended(100 * second_us);
+    wait.second_tick();
+    wait.second_tick();
+    CHECK(wait.check(table, 100 * second_us) == StartCheck::keep_waiting);
+    MemoryFile empty;
+    hash_all(wait, empty, multiclient::hash_chunk_bytes, 100 * second_us);
+    CHECK(wait.check(table, 130 * second_us) == StartCheck::time_limit);
+  }
+
+  {
+    TEST("transfers and ticks change nothing with no start held, and a new start does not wait");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    const int other = add_identified(table, 2, 0x200, true);
+    wait.transfer_ended(0);
+    CHECK(!wait.settling());
+    wait.second_tick();
+    hold(wait, identity(table, starter), 0);
+    CHECK(!wait.settling());
+    wait.transfer_ended(40 * second_us);
+    CHECK(wait.settling());
+    wait.end();
+    CHECK(!wait.settling());
+    hold(wait, identity(table, starter), 0);
+    CHECK(!wait.settling());
+    CHECK(send_ready(wait, *table.wifi_at(other), wait.start_id()));
+    CHECK(wait.check(table, 0) == StartCheck::all_ready);
+    CHECK(wait.check(table, 30 * second_us) == StartCheck::all_ready);
   }
 
   {
