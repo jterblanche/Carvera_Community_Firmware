@@ -190,6 +190,9 @@ class JobStartWait {
   bool hashing_ = false;
   bool hash_complete_ = false;
   uint16_t start_id_ = 0;
+  // Here, where they fill the padding before starter_id_.
+  bool timed_out_ = false;
+  bool keep_waiting_requested_ = false;
   uint64_t starter_id_ = 0;
   uint32_t started_us_ = 0;
   uint32_t hashed_size_ = 0;
@@ -198,8 +201,6 @@ class JobStartWait {
   uint8_t settle_ticks_ = 0;
   bool cancel_requested_ = false;
   bool limit_ran_out_in_transfer_ = false;
-  bool timed_out_ = false;
-  bool keep_waiting_requested_ = false;
 };
 
 // The one wait the player and both transports share.
