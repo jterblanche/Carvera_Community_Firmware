@@ -56,6 +56,7 @@ class Player : public Module {
         void play_command( string parameters, StreamOutput* stream );
         void publish_play_started();
         void start_now_command( StreamOutput* stream );
+        void keep_waiting_command( StreamOutput* stream );
 #if !defined(STREAMED_JOB_PLAYBACK)
         void begin_playing( StreamOutput* stream, bool verbose );
         void start_opened_file(bool new_job);
@@ -64,6 +65,7 @@ class Player : public Module {
         void cancel_held_start(uint8_t reason);
         void check_held_start();
         void publish_job_start(uint8_t phase, uint8_t reason);
+        void publish_held_start();
         void hash_held_file();
 #endif
         void progress_command( string parameters, StreamOutput* stream );
