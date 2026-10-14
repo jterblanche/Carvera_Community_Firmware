@@ -160,6 +160,7 @@ int main() {
     CHECK(hello.link == multiclient::Link::usb);
     CHECK(hello.features == multiclient::hello_feature_job_start_wait);
     CHECK(multiclient::hello_feature_job_start_wait == 0x01);
+    CHECK(multiclient::hello_feature_keep_waiting == 0x02);
   }
 
   {

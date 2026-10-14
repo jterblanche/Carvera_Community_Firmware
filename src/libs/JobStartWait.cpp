@@ -32,6 +32,14 @@ bool connected(const ClientTable& table, uint64_t id) {
   return table.find_wifi_by_id(id) >= 0 || table.usb_has_id(id);
 }
 
+// The features byte from the hello of the connected client with `id`, 0 if
+// there is none.
+uint8_t features_of(const ClientTable& table, uint64_t id) {
+  const Client* client = table.wifi_at(table.find_wifi_by_id(id));
+  if (client == nullptr && table.usb_has_id(id)) client = table.usb();
+  return client != nullptr ? client->features : 0;
+}
+
 }  // namespace
 
 void JobStartWait::configure(int limit_s) {
@@ -40,7 +48,9 @@ void JobStartWait::configure(int limit_s) {
   limit_s_ = static_cast<uint8_t>(limit_s);
 }
 
-uint8_t JobStartWait::hello_ack_features() const { return enabled() ? hello_feature_job_start_wait : 0; }
+uint8_t JobStartWait::hello_ack_features() const {
+  return enabled() ? hello_feature_job_start_wait | hello_feature_keep_waiting : 0;
+}
 
 bool JobStartWait::needs_wait(const ClientTable& table, const Identity& starter) const {
   if (!enabled() || !starter.identified) return false;
@@ -65,6 +75,8 @@ void JobStartWait::begin(const Identity& starter) {
   hash_complete_ = false;
   cancel_requested_ = false;
   limit_ran_out_in_transfer_ = false;
+  timed_out_ = false;
+  keep_waiting_requested_ = false;
   settle_ticks_ = 0;
   hashed_size_ = 0;
   md5_ = MD5();
@@ -104,15 +116,35 @@ StartCheck JobStartWait::check(const ClientTable& table, uint32_t now_us) const 
   if (settling()) return StartCheck::keep_waiting;
   uint64_t ids[max_wifi_clients + 1];
   if (not_ready(table, ids, max_wifi_clients + 1) == 0) return StartCheck::all_ready;
+  if (timed_out_) return StartCheck::keep_waiting;
   if (!hashing() && seconds_left(now_us) == 0) {
+    if (features_of(table, starter_id_) & hello_feature_keep_waiting) return StartCheck::timed_out;
     return limit_ran_out_in_transfer_ ? StartCheck::time_limit_in_transfer : StartCheck::time_limit;
   }
   return StartCheck::keep_waiting;
 }
 
+bool JobStartWait::keep_waiting(uint64_t sender_id, uint32_t now_us) {
+  if (!pending_ || sender_id != starter_id_) return false;
+  if (!hashing()) started_us_ = now_us;
+  timed_out_ = false;
+  limit_ran_out_in_transfer_ = false;
+  return true;
+}
+
+bool JobStartWait::request_keep_waiting(uint64_t sender_id) {
+  if (!pending_ || sender_id != starter_id_) return false;
+  keep_waiting_requested_ = true;
+  return true;
+}
+
 void JobStartWait::transfer_ended(uint32_t now_us) {
   if (!pending_) return;
   settle_ticks_ = settle_ticks_after_transfer;
+  if (keep_waiting_requested_) {
+    keep_waiting_requested_ = false;
+    keep_waiting(starter_id_, now_us);
+  }
   if (!hashing() && seconds_left(now_us) == 0) limit_ran_out_in_transfer_ = true;
 }
 
@@ -174,7 +206,9 @@ TransferFrame held_start_frame(uint8_t type, const uint8_t* data, std::size_t le
   const char* line = reinterpret_cast<const char*>(data);
   std::size_t at = 0;
   while (at < length && (line[at] == ' ' || line[at] == '\t')) ++at;
-  return first_word_is(line, length, at, "abort") ? TransferFrame::cancel : TransferFrame::other;
+  if (first_word_is(line, length, at, "abort")) return TransferFrame::cancel;
+  if (first_word_is(line, length, at, "keep-waiting")) return TransferFrame::keep_waiting;
+  return TransferFrame::other;
 }
 
 }  // namespace multiclient

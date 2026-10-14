@@ -13,8 +13,12 @@
 // until each of them says it has loaded the file, or the configured limit
 // runs out, or the controller that started it sends start-now. The
 // controller that started it can cancel with abort, and its leaving
-// cancels the start. A controller that does not take part (an older one,
-// or one that never identified) is never waited for, and with none of the
+// cancels the start. If that controller's hello carried
+// hello_feature_keep_waiting, the limit running out does not start the
+// job: the start stays held until that controller chooses (start-now,
+// keep-waiting or abort), or until every awaited controller is ready. A
+// controller that does not take part (an older one, or one that never
+// identified) is never waited for, and with none of the
 // others connected a start runs at once, exactly as it always has. A held
 // start first hashes the file itself (hash_step()), a little on each pass
 // of the main loop, so the controllers are told an MD5 that matches the
@@ -47,6 +51,7 @@ enum class StartCheck : uint8_t {
   keep_waiting,  // someone awaited is not ready and the limit has not run out
   all_ready,     // every awaited controller is ready, or none is left
   time_limit,    // the limit ran out first
+  timed_out,     // the limit ran out first, and the starter chooses what happens next
   time_limit_in_transfer,  // the limit had already run out when a file transfer ended
   starter_left,  // the controller that started the job is no longer connected
   cancelled,     // an abort arrived during a file transfer (request_cancel())
@@ -55,9 +60,10 @@ enum class StartCheck : uint8_t {
 // What a frame another controller sends during a file transfer is to a held
 // start (see held_start_frame()).
 enum class TransferFrame : uint8_t {
-  other,   // discarded, as anything else sent during a transfer
-  ready,   // a job-start ready message
-  cancel,  // an abort command
+  other,         // discarded, as anything else sent during a transfer
+  ready,         // a job-start ready message
+  cancel,        // an abort command
+  keep_waiting,  // a keep-waiting command
 };
 
 class JobStartWait {
@@ -69,8 +75,8 @@ class JobStartWait {
   uint8_t limit_s() const { return limit_s_; }
   bool enabled() const { return limit_s_ != 0; }
 
-  // The features byte for a hello ack: hello_feature_job_start_wait while
-  // the wait is on.
+  // The features byte for a hello ack: hello_feature_job_start_wait and
+  // hello_feature_keep_waiting while the wait is on.
   uint8_t hello_ack_features() const;
 
   // True if a job started by `starter` must wait: the wait is on, `starter`
@@ -109,8 +115,12 @@ class JobStartWait {
   // Whether the held start should end now, and why. An abort taken during
   // a file transfer comes first, then the starter's leaving, then every
   // awaited controller being ready, then the limit, which never runs out
-  // while the file is being hashed. For two second ticks after a file
-  // transfer, the start waits whatever else is true (see transfer_ended()).
+  // while the file is being hashed. Once the limit has run out, the answer
+  // is timed_out rather than time_limit or time_limit_in_transfer if the
+  // starter's hello carried hello_feature_keep_waiting, and after
+  // mark_timed_out() the limit is not looked at again until keep_waiting().
+  // For two second ticks after a file transfer, the start waits whatever
+  // else is true (see transfer_ended()).
   // A controller is awaited while it is connected, identified and takes
   // part, is not the starter, and has not said it is ready for this start;
   // one that connects during the wait is awaited too, without extending
@@ -124,8 +134,10 @@ class JobStartWait {
   // Called when a transfer ends, at `now_us`: while a start is held, it is
   // not started until second_tick() has been called twice more, so that
   // every link has handled what arrived and the WiFi client list has been
-  // brought up to date first. A cancel is not held back. Also records
-  // whether the limit had already run out (time_limit_in_transfer).
+  // brought up to date first. A cancel is not held back. A keep-waiting
+  // taken during the transfer (request_keep_waiting()) restarts the limit
+  // here. Also records whether the limit had then already run out
+  // (time_limit_in_transfer).
   void transfer_ended(uint32_t now_us);
   // Called once a second while no transfer runs.
   void second_tick();
@@ -137,6 +149,24 @@ class JobStartWait {
   void request_cancel() {
     if (pending_) cancel_requested_ = true;
   }
+
+  // Called once check() has answered timed_out: the start is now held for
+  // the starter's choice, and check() stops answering timed_out.
+  void mark_timed_out() {
+    if (pending_) timed_out_ = true;
+  }
+  // True while a held start waits for the starter's choice.
+  bool timed_out() const { return pending_ && timed_out_; }
+
+  // keep-waiting from the controller with id `sender_id`, at `now_us`:
+  // taken only from the starter while a start is held. Restarts the limit
+  // in full (while hashing, the limit has not started and still starts when
+  // hashing ends) and ends timed_out(). Returns true if it was taken.
+  bool keep_waiting(uint64_t sender_id, uint32_t now_us);
+  // The same keep-waiting, taken during a file transfer: recorded, and
+  // applied when the transfer ends (transfer_ended()). Returns true if it
+  // was taken.
+  bool request_keep_waiting(uint64_t sender_id);
 
   // Whole seconds left before the limit, rounded up; 0 once it has run out.
   // The whole limit while the file is being hashed.
@@ -168,6 +198,8 @@ class JobStartWait {
   uint8_t settle_ticks_ = 0;
   bool cancel_requested_ = false;
   bool limit_ran_out_in_transfer_ = false;
+  bool timed_out_ = false;
+  bool keep_waiting_requested_ = false;
 };
 
 // The one wait the player and both transports share.
@@ -179,16 +211,16 @@ JobStartWait& shared_job_start_wait();
 // first character after any spaces is an upper-case letter), homing and
 // jogging ($H, $J), and the console commands that act on a job: play,
 // buffer, goto, suspend and resume. Everything else runs as usual,
-// including start-now and abort, reads, and the download a waiting
-// controller needs.
+// including start-now, keep-waiting and abort, reads, and the download a
+// waiting controller needs.
 bool refused_while_start_pending(const char* line, std::size_t length);
 
 // While a WiFi file transfer runs, what another controller sends is
-// discarded (libs/TransferBusy.h). While a start is held, two kinds of frame
-// are kept instead, so the held start does not miss them: a job-start ready
-// message (PTYPE_JOB_START_READY) and an abort (a PTYPE_CTRL_MULTI command
-// line whose first word is abort). `type`, `data` and `length` are the
-// frame's type and payload.
+// discarded (libs/TransferBusy.h). While a start is held, three kinds of
+// frame are kept instead, so the held start does not miss them: a job-start
+// ready message (PTYPE_JOB_START_READY), and an abort or a keep-waiting (a
+// PTYPE_CTRL_MULTI command line whose first word is abort or keep-waiting).
+// `type`, `data` and `length` are the frame's type and payload.
 TransferFrame held_start_frame(uint8_t type, const uint8_t* data, std::size_t length);
 
 }  // namespace multiclient
