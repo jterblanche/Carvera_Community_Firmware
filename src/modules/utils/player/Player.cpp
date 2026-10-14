@@ -955,6 +955,14 @@ void Player::play_command( string parameters, StreamOutput *stream )
         stream->printf("%s", multiclient::job_start_pending_reply);
         return;
     }
+    if (this->playing_file || THEKERNEL->is_suspending() || THEKERNEL->is_waiting()
+#if defined(STREAMED_JOB_PLAYBACK)
+        || this->streamed_session_active()
+#endif
+    ) {
+        stream->printf("Currently printing, abort print first\r\n");
+        return;
+    }
     // extract any options from the line and terminate the line there
     string options= extract_options(parameters);
 #if defined(STREAMED_JOB_PLAYBACK)
@@ -968,15 +976,6 @@ void Player::play_command( string parameters, StreamOutput *stream )
     // Get filename which is the entire parameter line upto any options found or entire line
     this->filename = absolute_from_relative(shift_parameter(parameters));
     this->last_filename = this->filename;
-
-    if (this->playing_file || THEKERNEL->is_suspending() || THEKERNEL->is_waiting()
-#if defined(STREAMED_JOB_PLAYBACK)
-        || this->streamed_session_active()
-#endif
-    ) {
-        stream->printf("Currently printing, abort print first\r\n");
-        return;
-    }
 
 #if defined(STREAMED_JOB_PLAYBACK)
     this->start_streamed_playback(stream, options);
