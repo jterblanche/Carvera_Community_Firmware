@@ -85,7 +85,10 @@ void note_send_result(Client& client, bool sent_everything, uint8_t errcode) {
     return;
   }
   if (client.consecutive_send_failures < 0xFF) ++client.consecutive_send_failures;
-  if (client.consecutive_send_failures >= max_consecutive_send_failures) client.send_failed = true;
+}
+
+bool sends_show_client_gone(const Client& client) {
+  return client.send_failed || client.consecutive_send_failures >= max_consecutive_send_failures;
 }
 
 bool ClientTable::remove_wifi(int index) {
@@ -229,7 +232,7 @@ bool is_transfer_owner(const ClientTable& table, int client_index, const Address
 bool transfer_owner_connected(const ClientTable& table, int owner_index,
                               const Address* connected, std::size_t count) {
   const Client* owner = table.wifi_at(owner_index);
-  if (owner == nullptr || owner->send_failed) return false;
+  if (owner == nullptr || sends_show_client_gone(*owner)) return false;
   for (std::size_t i = 0; i < count; ++i) {
     if (same_address(owner->address, connected[i])) return true;
   }
