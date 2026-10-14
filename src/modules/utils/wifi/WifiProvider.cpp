@@ -527,13 +527,13 @@ void WifiProvider::receive_wifi_data() {
 
 			command_waiting = true;
 			command_waiting_client = client_index;
-			const bool file_transfer_start = packet.type == PTYPE_FILE_START ||
-				(packet.type == PTYPE_AUTO_COMMAND && packet.data[0] == 1);
-			if (file_transfer_start) return; // the rest of this read is file data for Player::gets(), not a frame
 			if (static_cast<uint16_t>(i + 1) < count) {
 				// More bytes already sat in WifiData past this frame's end --
 				// the next call to this function replays them before asking
 				// the driver for anything new, rather than dropping them.
+				// After a file-transfer start they are the start of the
+				// transfer itself (the controller sends its FILE_MD5 straight
+				// after FILE_START), and gets() reads them first instead.
 				pending_wifi_client = client_index;
 				pending_wifi_offset = static_cast<uint16_t>(i + 1);
 				pending_wifi_count = count;
@@ -643,6 +643,52 @@ void WifiProvider::refuse_as_busy(const multiclient::Address& sender, const u8* 
 	snprintf(ip_str, sizeof(ip_str), "%u.%u.%u.%u", sender.ip[0], sender.ip[1], sender.ip[2], sender.ip[3]);
 	u16 status = 0;
 	M8266WIFI_SPI_Send_Data_to_TcpClient(frame, static_cast<u16>(frame_length), tcp_link_no, ip_str, sender.port, &status);
+}
+
+// Called by gets() for the same discarded read, before refuse_as_busy().
+// While a job start is held (libs/JobStartWait.h), a job-start ready message
+// or an abort in the read is taken rather than lost to the transfer: the
+// ready is recorded at once, and an abort the control gate would let through
+// cancels the held start before it can be started once the transfer ends.
+// The bytes go through the sender's own frame decoder, which the transfer
+// does not use. Nothing is sent to anyone here. Returns true if something
+// was taken, and the sender then gets no busy reply for this read.
+bool WifiProvider::take_held_start_frames(const multiclient::Address& sender, const u8* data, u16 length) {
+	multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
+	if (!wait.pending()) return false;
+	multiclient::ClientTable &table = multiclient::shared_client_table();
+	const int client_index = table.find_wifi(sender);
+	if (client_index < 0) return false;
+	multiclient::Client *client = table.wifi_at(client_index);
+	makera::ResyncingDecoder &decoder = wifi_streams[client_index].decoder;
+	const uint32_t now_us = us_ticker_read();
+	bool taken = false;
+	for (u16 i = 0; i < length; ++i) {
+		if (decoder.decode_byte(data[i], now_us) != makera::ResyncResult::complete) continue;
+		const makera::Packet &packet = decoder.packet();
+		if (multiclient::must_identify_first(table, client) &&
+		    !multiclient::taken_before_identifying(packet.type, packet.data, packet.data_length)) continue;
+		switch (multiclient::held_start_frame(packet.type, packet.data, packet.data_length)) {
+			case multiclient::TransferFrame::ready:
+				if (wait.mark_ready(*client, packet.data, packet.data_length)) taken = true;
+				break;
+			case multiclient::TransferFrame::cancel: {
+				// peek(), not gate(): control does not move during a
+				// transfer, and nothing is published until it ends.
+				const GateInputs in = gate_inputs_for(client_index, packet);
+				const multiclient::GateResult result = multiclient::shared_control_token().peek(
+					in.sender, in.traffic, in.motion, multi_client_mode, in.action, multi_client_passive_rights);
+				if (!result.refused) {
+					wait.request_cancel();
+					taken = true;
+				}
+				break;
+			}
+			case multiclient::TransferFrame::other:
+				break;
+		}
+	}
+	return taken;
 }
 
 void WifiProvider::broadcast_to_wifi_clients(const u8* data, size_t length) {
@@ -1118,9 +1164,9 @@ void WifiProvider::publish_client_left_if_identified(const multiclient::Client& 
 void WifiProvider::reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_clients[]) {
 	auto &table = multiclient::shared_client_table();
 
-	// First, reap anyone a send has already proved is gone. send_to_wifi_client()
-	// only flags them, because it runs while a caller is walking this same
-	// table. Doing the removal here keeps every removal in one place, and
+	// First, reap anyone sends have already shown is gone. send_to_wifi_client()
+	// only records the failures, because it runs while a caller is walking this
+	// same table. Doing the removal here keeps every removal in one place, and
 	// means a client whose socket died is dropped on the next tick rather
 	// than being published to at 5 Hz forever.
 	//
@@ -1129,7 +1175,7 @@ void WifiProvider::reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_
 	// relying on it.
 	for (int i = 0; i < static_cast<int>(multiclient::max_wifi_clients); ++i) {
 		multiclient::Client *client = table.wifi_at(i);
-		if (client == nullptr || !client->send_failed) continue;
+		if (client == nullptr || !multiclient::sends_show_client_gone(*client)) continue;
 		disconnect_wifi_client(client->address, "the machine could no longer send to it", false);
 		publish_client_left_if_identified(*client);
 		table.remove_wifi(i);
@@ -1199,7 +1245,14 @@ void WifiProvider::reconcile_wifi_clients(uint8_t client_num, ClientInfo remote_
 }
 
 bool WifiProvider::ready() {
-	return M8266WIFI_SPI_Has_DataReceived();
+	return M8266WIFI_SPI_Has_DataReceived() || transfer_bytes_pending();
+}
+
+// True while bytes the transfer's own client sent straight after its
+// file-transfer start, read in the same chunk as that start, wait in
+// WifiData for gets() (see receive_wifi_data()).
+bool WifiProvider::transfer_bytes_pending() const {
+	return pending_wifi_client >= 0 && pending_wifi_client == active_reply_client;
 }
 
 // Asked by Player's upload loop while it waits for the next packet. The
@@ -1998,7 +2051,11 @@ int WifiProvider::gets(char** buf, int size)
 		uint16_t expectedLength = 0;
 		uint16_t checksum;
 		
-		if(this->ptrData == 0)
+		if (this->ptrData == 0 && transfer_bytes_pending()) {
+			this->ptrData = pending_wifi_offset;
+			received = pending_wifi_count;
+			pending_wifi_client = -1;
+		} else if(this->ptrData == 0)
 		{
 			u8 remote_ip[4];
 			u16 remote_port = 0;
@@ -2031,7 +2088,7 @@ int WifiProvider::gets(char** buf, int size)
 				memcpy(sender.ip, remote_ip, sizeof(sender.ip));
 				sender.port = remote_port;
 				if (!multiclient::is_transfer_owner(multiclient::shared_client_table(), active_reply_client, sender)) {
-					refuse_as_busy(sender, WifiData, received);
+					if (!take_held_start_frames(sender, WifiData, received)) refuse_as_busy(sender, WifiData, received);
 					return 0;
 				}
 			}

@@ -98,6 +98,7 @@ private:
     };
     SendOutcome send_to_wifi_client(int client_index, const u8* data, size_t length);
     void refuse_as_busy(const multiclient::Address& sender, const u8* data, u16 length);
+    bool take_held_start_frames(const multiclient::Address& sender, const u8* data, u16 length);
     void broadcast_to_wifi_clients(const u8* data, size_t length);
     void broadcast_to_identified_wifi_clients(const u8* data, size_t length);
     // Same as broadcast_to_identified_wifi_clients(), skipping whichever
@@ -317,10 +318,12 @@ private:
     // any bytes already read past it -- still sitting in WifiData -- are
     // saved here and replayed before the next RecvData_ex call, instead of
     // being dropped. pending_wifi_client is -1 when there is nothing
-    // pending.
+    // pending. When the command is a file-transfer start, gets() reads
+    // these bytes first, as the start of the transfer.
     int pending_wifi_client = -1;
     uint16_t pending_wifi_offset = 0;
     uint16_t pending_wifi_count = 0;
+    bool transfer_bytes_pending() const;
 
     // Addresses already logged as refused-but-still-present by
     // reconcile_wifi_clients(), so a disconnect call that the WiFi module

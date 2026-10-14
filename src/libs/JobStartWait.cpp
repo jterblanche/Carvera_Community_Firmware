@@ -3,12 +3,20 @@
 #include <cstring>
 
 #include "Hello.h"
+#include "PublicData.h"
 
 namespace multiclient {
 
 namespace {
 
 constexpr uint32_t microseconds_per_second = 1000000;
+
+// How many second ticks a held start waits after a file transfer. The
+// first can come at once, from a tick that fell due during the transfer;
+// it brings the WiFi client list up to date. The second makes sure at
+// least one whole pass of the main loop, in which the links act on what
+// they received, comes between the two. So the wait is at most two seconds.
+constexpr uint8_t settle_ticks_after_transfer = 2;
 
 // True if the first word of `line` (`length` bytes, starting at `word_at`)
 // is exactly `word`.
@@ -55,6 +63,9 @@ void JobStartWait::begin(const Identity& starter) {
   pending_ = true;
   hashing_ = true;
   hash_complete_ = false;
+  cancel_requested_ = false;
+  limit_ran_out_in_transfer_ = false;
+  settle_ticks_ = 0;
   hashed_size_ = 0;
   md5_ = MD5();
 }
@@ -88,11 +99,25 @@ bool JobStartWait::awaited(const Client* client) const {
 }
 
 StartCheck JobStartWait::check(const ClientTable& table, uint32_t now_us) const {
+  if (cancel_requested_) return StartCheck::cancelled;
   if (!connected(table, starter_id_)) return StartCheck::starter_left;
+  if (settling()) return StartCheck::keep_waiting;
   uint64_t ids[max_wifi_clients + 1];
   if (not_ready(table, ids, max_wifi_clients + 1) == 0) return StartCheck::all_ready;
-  if (!hashing() && seconds_left(now_us) == 0) return StartCheck::time_limit;
+  if (!hashing() && seconds_left(now_us) == 0) {
+    return limit_ran_out_in_transfer_ ? StartCheck::time_limit_in_transfer : StartCheck::time_limit;
+  }
   return StartCheck::keep_waiting;
+}
+
+void JobStartWait::transfer_ended(uint32_t now_us) {
+  if (!pending_) return;
+  settle_ticks_ = settle_ticks_after_transfer;
+  if (!hashing() && seconds_left(now_us) == 0) limit_ran_out_in_transfer_ = true;
+}
+
+void JobStartWait::second_tick() {
+  if (settle_ticks_ != 0) --settle_ticks_;
 }
 
 uint8_t JobStartWait::seconds_left(uint32_t now_us) const {
@@ -141,6 +166,15 @@ bool refused_while_start_pending(const char* line, std::size_t length) {
     if (first_word_is(line, length, at, word)) return true;
   }
   return false;
+}
+
+TransferFrame held_start_frame(uint8_t type, const uint8_t* data, std::size_t length) {
+  if (type == PTYPE_JOB_START_READY) return TransferFrame::ready;
+  if (type != PTYPE_CTRL_MULTI || data == nullptr) return TransferFrame::other;
+  const char* line = reinterpret_cast<const char*>(data);
+  std::size_t at = 0;
+  while (at < length && (line[at] == ' ' || line[at] == '\t')) ++at;
+  return first_word_is(line, length, at, "abort") ? TransferFrame::cancel : TransferFrame::other;
 }
 
 }  // namespace multiclient
