@@ -45,6 +45,13 @@ constexpr std::size_t hello_ack_length = 4;
 // ack, the machine holds a start for such controllers
 // (multi_client.start_wait_s is not 0).
 constexpr uint8_t hello_feature_job_start_wait = 0x01;
+//
+// hello_feature_keep_waiting: in a hello, the controller asks its user what
+// to do when a start it made is still held at the end of the limit (start
+// now, keep waiting or cancel), so the machine keeps holding such a start
+// instead of starting it. In a hello ack, the machine does that and takes
+// keep-waiting.
+constexpr uint8_t hello_feature_keep_waiting = 0x02;
 
 // A parsed hello payload.
 struct Hello {

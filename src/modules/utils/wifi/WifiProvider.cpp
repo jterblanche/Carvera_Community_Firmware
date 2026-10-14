@@ -646,10 +646,12 @@ void WifiProvider::refuse_as_busy(const multiclient::Address& sender, const u8* 
 }
 
 // Called by gets() for the same discarded read, before refuse_as_busy().
-// While a job start is held (libs/JobStartWait.h), a job-start ready message
-// or an abort in the read is taken rather than lost to the transfer: the
-// ready is recorded at once, and an abort the control gate would let through
-// cancels the held start before it can be started once the transfer ends.
+// While a job start is held (libs/JobStartWait.h), a job-start ready message,
+// an abort or a keep-waiting in the read is taken rather than lost to the
+// transfer: the ready is recorded at once, an abort the control gate would
+// let through cancels the held start before it can be started once the
+// transfer ends, and a keep-waiting from the starter that the gate would let
+// through restarts the limit when the transfer ends.
 // The bytes go through the sender's own frame decoder, which the transfer
 // does not use. Nothing is sent to anyone here. Returns true if something
 // was taken, and the sender then gets no busy reply for this read.
@@ -668,18 +670,23 @@ bool WifiProvider::take_held_start_frames(const multiclient::Address& sender, co
 		const makera::Packet &packet = decoder.packet();
 		if (multiclient::must_identify_first(table, client) &&
 		    !multiclient::taken_before_identifying(packet.type, packet.data, packet.data_length)) continue;
-		switch (multiclient::held_start_frame(packet.type, packet.data, packet.data_length)) {
+		const multiclient::TransferFrame frame = multiclient::held_start_frame(packet.type, packet.data, packet.data_length);
+		switch (frame) {
 			case multiclient::TransferFrame::ready:
 				if (wait.mark_ready(*client, packet.data, packet.data_length)) taken = true;
 				break;
-			case multiclient::TransferFrame::cancel: {
+			case multiclient::TransferFrame::cancel:
+			case multiclient::TransferFrame::keep_waiting: {
 				// peek(), not gate(): control does not move during a
 				// transfer, and nothing is published until it ends.
 				const GateInputs in = gate_inputs_for(client_index, packet);
 				const multiclient::GateResult result = multiclient::shared_control_token().peek(
 					in.sender, in.traffic, in.motion, multi_client_mode, in.action, multi_client_passive_rights);
-				if (!result.refused) {
+				if (result.refused) break;
+				if (frame == multiclient::TransferFrame::cancel) {
 					wait.request_cancel();
+					taken = true;
+				} else if (wait.request_keep_waiting(in.sender.id)) {
 					taken = true;
 				}
 				break;

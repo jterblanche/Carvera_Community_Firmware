@@ -558,6 +558,7 @@ int main() {
     CHECK(multiclient::job_start_phase_starting == 1);
     CHECK(multiclient::job_start_phase_cancelled == 2);
     CHECK(multiclient::job_start_phase_hashing == 3);
+    CHECK(multiclient::job_start_phase_timed_out == 4);
     const uint64_t not_ready[] = {0x2122232425262728ULL};
     multiclient::JobStartEvent event;
     event.path = "x.nc";

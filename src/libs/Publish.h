@@ -213,11 +213,16 @@ std::size_t build_client_left_event(uint64_t client_id, const char* name, uint8_
 // and once a second after, with the computed checksum), then it ends one
 // of two ways, each sent once (starting, just before the job's own
 // play-started; cancelled, and the job does not run). Starting and
-// cancelled can follow hashing directly.
+// cancelled can follow hashing directly. When the limit runs out and the
+// starter asks its user what to do (libs/Hello.h,
+// hello_feature_keep_waiting), the start stays held in timed_out, sent on
+// entry and once a second after with no time left, until it starts, is
+// cancelled, or keep-waiting returns it to waiting.
 constexpr uint8_t job_start_phase_waiting = 0;
 constexpr uint8_t job_start_phase_starting = 1;
 constexpr uint8_t job_start_phase_cancelled = 2;
 constexpr uint8_t job_start_phase_hashing = 3;
+constexpr uint8_t job_start_phase_timed_out = 4;
 
 // "job start" reasons: why the hold ended, or job_start_reason_waiting
 // while it has not.

@@ -280,8 +280,7 @@ void Player::on_second_tick(void *)
     multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
     if (wait.pending() && !THEKERNEL->is_uploading()) {
         wait.second_tick();
-        this->publish_job_start(wait.hashing() ? multiclient::job_start_phase_hashing : multiclient::job_start_phase_waiting,
-                                multiclient::job_start_reason_waiting);
+        this->publish_held_start();
     }
 #endif
 
@@ -477,9 +476,11 @@ void Player::start_opened_file(bool new_job)
 // it to them and leaves the file open but not playing. on_main_loop() then
 // hashes the file, announces its MD5, and starts it once they are ready or
 // the limit runs out, unless start-now starts it first or abort, a halt or
-// the starter leaving cancels it. The controller starting the job is the
-// one holding control: a start passes the control gate as a user action,
-// which gives its sender control in either mode. `from_play_command` and
+// the starter leaving cancels it. A starter that chooses what happens at
+// the limit (libs/Hello.h, hello_feature_keep_waiting) has the start held
+// there until it sends start-now, keep-waiting or abort. The controller
+// starting the job is the one holding control: a start passes the control
+// gate as a user action, which gives its sender control in either mode. `from_play_command` and
 // `verbose` say how to start it later.
 // True if the start is held; false if it goes ahead now, as it always has.
 bool Player::hold_start(StreamOutput *stream, bool from_play_command, bool verbose)
@@ -513,7 +514,7 @@ bool Player::hold_start(StreamOutput *stream, bool from_play_command, bool verbo
     multiclient::remember_announced_file(this->filename.c_str(),
                                          multiclient::event_path_length(this->filename.c_str(), this->filename.size()));
     this->publish_job_start(multiclient::job_start_phase_hashing, multiclient::job_start_reason_waiting);
-    stream->printf("Checking %s, then waiting up to %u s for other controllers to load it. Send start-now to start at once, or abort to cancel\r\n",
+    stream->printf("Checking %s, then waiting up to %u s for other controllers to load it. Send start-now to start at once, keep-waiting to wait the full time again, or abort to cancel\r\n",
                    this->filename.c_str(), static_cast<unsigned>(wait.limit_s()));
     return true;
 }
@@ -582,7 +583,7 @@ void Player::cancel_held_start(uint8_t reason)
 }
 
 // Called from on_main_loop() while a start is held: starts or cancels it
-// once the wait says so.
+// once the wait says so, or holds it for the starter's choice.
 void Player::check_held_start()
 {
     switch (multiclient::shared_job_start_wait().check(multiclient::shared_client_table(), us_ticker_read())) {
@@ -593,6 +594,12 @@ void Player::check_held_start()
             break;
         case multiclient::StartCheck::time_limit:
             this->start_held_job(multiclient::job_start_reason_time_limit);
+            break;
+        case multiclient::StartCheck::timed_out:
+            // The starter chooses: start-now, keep-waiting or abort. Until
+            // then the start stays held.
+            multiclient::shared_job_start_wait().mark_timed_out();
+            this->publish_held_start();
             break;
         case multiclient::StartCheck::time_limit_in_transfer:
             // The limit ran out while a file transfer kept the machine
@@ -636,6 +643,20 @@ void Player::publish_job_start(uint8_t phase, uint8_t reason)
     uint8_t payload[multiclient::max_job_start_event_length];
     const size_t length = multiclient::build_job_start_event(event, payload, sizeof(payload));
     if (length != 0) THEKERNEL->streams->publish_multiclient(PTYPE_EVENT, payload, length);
+}
+
+// Publishes the job-start event for a start that is still held, in the
+// phase it is in.
+void Player::publish_held_start()
+{
+    const multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
+    uint8_t phase = multiclient::job_start_phase_waiting;
+    if (wait.hashing()) {
+        phase = multiclient::job_start_phase_hashing;
+    } else if (wait.timed_out()) {
+        phase = multiclient::job_start_phase_timed_out;
+    }
+    this->publish_job_start(phase, multiclient::job_start_reason_waiting);
 }
 #endif
 // extract any options found on line, terminates args at the space before the first option (-v)
@@ -919,6 +940,8 @@ void Player::on_console_line_received( void *argument )
     	this->buffer_command( possible_command, new_message.stream );
     }else if (cmd == "start-now") {
         this->start_now_command( new_message.stream );
+    }else if (cmd == "keep-waiting") {
+        this->keep_waiting_command( new_message.stream );
     }else if (cmd == "upload") {
 #if defined(NO_SD_CARD)
         new_message.stream->printf("ERROR: local file transfers are not available on this machine\r\n");
@@ -1078,6 +1101,27 @@ void Player::start_now_command(StreamOutput *stream)
 #if !defined(STREAMED_JOB_PLAYBACK)
     if (multiclient::shared_job_start_wait().pending()) {
         this->start_held_job(multiclient::job_start_reason_start_now);
+        return;
+    }
+#endif
+    stream->printf("No job start is waiting\r\n");
+}
+
+// Restarts a held start's limit in full (keep-waiting) when sent by the
+// controller that started the job, or says nothing is held. The command has
+// passed the control gate, so its sender is the control holder.
+void Player::keep_waiting_command(StreamOutput *stream)
+{
+#if !defined(STREAMED_JOB_PLAYBACK)
+    multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
+    if (wait.pending()) {
+        if (!wait.keep_waiting(multiclient::shared_control_token().holder().id, us_ticker_read())) {
+            stream->printf("error:Refused -- only the controller that started the job can keep waiting\r\n");
+            return;
+        }
+        this->publish_held_start();
+        stream->printf("Waiting up to %u s more for other controllers to load %s\r\n",
+                       static_cast<unsigned>(wait.limit_s()), this->filename.c_str());
         return;
     }
 #endif

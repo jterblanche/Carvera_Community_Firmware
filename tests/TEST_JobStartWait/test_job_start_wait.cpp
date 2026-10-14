@@ -65,6 +65,14 @@ void identify_usb(ClientTable& table, uint64_t id, bool takes_part) {
   usb->features = takes_part ? multiclient::hello_feature_job_start_wait : 0;
 }
 
+// Adds a WiFi client that takes part in the wait and, as a starter, is
+// asked what to do when the limit runs out (hello_feature_keep_waiting).
+int add_deciding(ClientTable& table, uint8_t last, uint64_t id) {
+  const int index = add_identified(table, last, id, true);
+  table.wifi_at(index)->features |= multiclient::hello_feature_keep_waiting;
+  return index;
+}
+
 Identity identity(const ClientTable& table, int index) { return multiclient::identity_of(table.wifi_at(index)); }
 
 // A ready message's payload for `start_id`: start_id(2, BE).
@@ -157,7 +165,8 @@ int main() {
     wait.configure(30);
     CHECK(wait.enabled());
     CHECK(wait.limit_s() == 30);
-    CHECK(wait.hello_ack_features() == multiclient::hello_feature_job_start_wait);
+    CHECK(wait.hello_ack_features() ==
+          (multiclient::hello_feature_job_start_wait | multiclient::hello_feature_keep_waiting));
     wait.configure(0);
     CHECK(!wait.enabled());
     CHECK(wait.hello_ack_features() == 0);
@@ -689,6 +698,7 @@ int main() {
   {
     TEST("refused_while_start_pending: start-now, abort, reads, transfers and overrides still run");
     CHECK(!refused("start-now"));
+    CHECK(!refused("keep-waiting"));
     CHECK(!refused("abort"));
     CHECK(!refused("ls -e -s /sd/gcodes"));
     CHECK(!refused("config-get sd wifi.max_clients"));
@@ -715,6 +725,9 @@ int main() {
     CHECK(command_frame("abort\r\n") == TransferFrame::cancel);
     CHECK(command_frame("  abort 1") == TransferFrame::cancel);
     CHECK(command_frame("aborted") == TransferFrame::other);
+    CHECK(command_frame("keep-waiting") == TransferFrame::keep_waiting);
+    CHECK(command_frame(" keep-waiting\r\n") == TransferFrame::keep_waiting);
+    CHECK(command_frame("keep-waitingx") == TransferFrame::other);
     CHECK(command_frame("start-now") == TransferFrame::other);
     CHECK(command_frame("G0 X10") == TransferFrame::other);
     CHECK(command_frame("") == TransferFrame::other);
@@ -885,6 +898,236 @@ int main() {
     CHECK(send_ready(wait, *table.wifi_at(other), wait.start_id()));
     CHECK(wait.check(table, 0) == StartCheck::all_ready);
     CHECK(wait.check(table, 30 * second_us) == StartCheck::all_ready);
+  }
+
+  {
+    TEST("timed out: a starter that can choose holds the start when the limit runs out, indefinitely");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_deciding(table, 1, 0x100);
+    add_identified(table, 2, 0x200, true);
+    hold(wait, identity(table, starter), 5);
+    CHECK(!wait.timed_out());
+    CHECK(wait.check(table, 5 + 30 * second_us - 1) == StartCheck::keep_waiting);
+    CHECK(wait.check(table, 5 + 30 * second_us) == StartCheck::timed_out);
+    wait.mark_timed_out();
+    CHECK(wait.timed_out());
+    CHECK(wait.pending());
+    CHECK(wait.seconds_left(5 + 30 * second_us) == 0);
+    CHECK(wait.check(table, 5 + 31 * second_us) == StartCheck::keep_waiting);
+    // Hours later, past a wrap of the microsecond counter, it is still held.
+    CHECK(wait.check(table, 5 + 3600 * second_us) == StartCheck::keep_waiting);
+    CHECK(wait.check(table, 5 + 2 * 3600 * second_us) == StartCheck::keep_waiting);
+    CHECK(wait.check(table, 4 * second_us) == StartCheck::keep_waiting);
+    wait.end();
+    CHECK(!wait.timed_out());
+  }
+
+  {
+    TEST("timed out: a starter on USB that can choose is asked too");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    add_identified(table, 2, 0x200, true);
+    identify_usb(table, 0x900, true);
+    table.usb()->features |= multiclient::hello_feature_keep_waiting;
+    hold(wait, multiclient::identity_of(table.usb()), 0);
+    CHECK(wait.check(table, 30 * second_us) == StartCheck::timed_out);
+  }
+
+  {
+    TEST("timed out: a starter that cannot choose still starts the job at the limit, as before");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    add_deciding(table, 2, 0x200);  // a watcher that could choose changes nothing
+    hold(wait, identity(table, starter), 0);
+    CHECK(wait.check(table, 30 * second_us) == StartCheck::time_limit);
+    wait.end();
+    hold(wait, identity(table, starter), 0);
+    wait.transfer_ended(57 * second_us);
+    wait.second_tick();
+    wait.second_tick();
+    CHECK(wait.check(table, 58 * second_us) == StartCheck::time_limit_in_transfer);
+  }
+
+  {
+    TEST("timed out: the limit running out during a transfer holds the start for the starter's choice");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_deciding(table, 1, 0x100);
+    add_identified(table, 2, 0x200, true);
+    hold(wait, identity(table, starter), 0);
+    wait.transfer_ended(57 * second_us);
+    wait.second_tick();
+    CHECK(wait.check(table, 58 * second_us) == StartCheck::keep_waiting);
+    wait.second_tick();
+    CHECK(wait.check(table, 58 * second_us) == StartCheck::timed_out);
+  }
+
+  {
+    TEST("timed out: every awaited controller becoming ready starts the job, with all_ready");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_deciding(table, 1, 0x100);
+    const int other = add_identified(table, 2, 0x200, true);
+    const int third = add_identified(table, 3, 0x300, true);
+    hold(wait, identity(table, starter), 0);
+    CHECK(wait.check(table, 30 * second_us) == StartCheck::timed_out);
+    wait.mark_timed_out();
+    CHECK(send_ready(wait, *table.wifi_at(other), wait.start_id()));
+    CHECK(wait.check(table, 40 * second_us) == StartCheck::keep_waiting);
+    table.remove_wifi(third);  // an awaited controller that leaves is not waited for
+    CHECK(wait.check(table, 41 * second_us) == StartCheck::all_ready);
+  }
+
+  {
+    TEST("timed out: the starter leaving or an abort taken in a transfer still cancels");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_deciding(table, 1, 0x100);
+    add_identified(table, 2, 0x200, true);
+    hold(wait, identity(table, starter), 0);
+    wait.mark_timed_out();
+    wait.request_cancel();
+    CHECK(wait.check(table, 31 * second_us) == StartCheck::cancelled);
+    wait.end();
+    hold(wait, identity(table, starter), 0);
+    wait.mark_timed_out();
+    table.remove_wifi(starter);
+    CHECK(wait.check(table, 31 * second_us) == StartCheck::starter_left);
+  }
+
+  {
+    TEST("keep_waiting: from the starter, restarts the whole limit and returns to waiting, every time");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_deciding(table, 1, 0x100);
+    add_identified(table, 2, 0x200, true);
+    hold(wait, identity(table, starter), 0);
+    CHECK(wait.check(table, 30 * second_us) == StartCheck::timed_out);
+    wait.mark_timed_out();
+    CHECK(wait.keep_waiting(0x100, 45 * second_us));
+    CHECK(!wait.timed_out());
+    CHECK(wait.seconds_left(45 * second_us) == 30);
+    CHECK(wait.check(table, 75 * second_us - 1) == StartCheck::keep_waiting);
+    CHECK(wait.check(table, 75 * second_us) == StartCheck::timed_out);
+    // Also taken while still waiting: the limit starts over from then.
+    CHECK(wait.keep_waiting(0x100, 60 * second_us));
+    CHECK(wait.seconds_left(61 * second_us) == 29);
+    CHECK(wait.check(table, 89 * second_us) == StartCheck::keep_waiting);
+    CHECK(wait.keep_waiting(0x100, 89 * second_us));
+    CHECK(wait.check(table, 118 * second_us) == StartCheck::keep_waiting);
+    CHECK(wait.check(table, 119 * second_us) == StartCheck::timed_out);
+  }
+
+  {
+    TEST("keep_waiting: a starter that cannot choose gets the full limit again, then the job starts");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_identified(table, 1, 0x100, true);
+    add_identified(table, 2, 0x200, true);
+    hold(wait, identity(table, starter), 0);
+    CHECK(wait.keep_waiting(0x100, 20 * second_us));
+    CHECK(wait.check(table, 49 * second_us) == StartCheck::keep_waiting);
+    CHECK(wait.check(table, 50 * second_us) == StartCheck::time_limit);
+  }
+
+  {
+    TEST("keep_waiting: refused from any other controller, and with no start held");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_deciding(table, 1, 0x100);
+    add_deciding(table, 2, 0x200);
+    CHECK(!wait.keep_waiting(0x100, 0));
+    CHECK(!wait.request_keep_waiting(0x100));
+    hold(wait, identity(table, starter), 0);
+    wait.mark_timed_out();
+    CHECK(!wait.keep_waiting(0x200, 35 * second_us));
+    CHECK(!wait.keep_waiting(0, 35 * second_us));
+    CHECK(wait.timed_out());
+    CHECK(!wait.request_keep_waiting(0x200));
+    wait.transfer_ended(36 * second_us);
+    CHECK(wait.timed_out());
+    wait.end();
+    CHECK(!wait.keep_waiting(0x100, 40 * second_us));
+    CHECK(!wait.request_keep_waiting(0x100));
+  }
+
+  {
+    TEST("keep_waiting: during hashing it is taken, and the limit still starts when hashing ends");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_deciding(table, 1, 0x100);
+    add_identified(table, 2, 0x200, true);
+    wait.begin(identity(table, starter));
+    CHECK(wait.keep_waiting(0x100, 5 * second_us));
+    CHECK(wait.hashing());
+    MemoryFile empty;
+    hash_all(wait, empty, multiclient::hash_chunk_bytes, 10 * second_us);
+    CHECK(wait.seconds_left(10 * second_us) == 30);
+    CHECK(wait.check(table, 40 * second_us) == StartCheck::timed_out);
+  }
+
+  {
+    TEST("keep_waiting during a transfer: kept, and the limit starts over when the transfer ends");
+    ClientTable table;
+    JobStartWait wait;
+    wait.configure(30);
+    const int starter = add_deciding(table, 1, 0x100);
+    add_identified(table, 2, 0x200, true);
+
+    // Sent while waiting; the limit runs out before the transfer ends.
+    hold(wait, identity(table, starter), 0);
+    CHECK(wait.request_keep_waiting(0x100));
+    wait.transfer_ended(57 * second_us);
+    CHECK(wait.seconds_left(57 * second_us) == 30);
+    wait.second_tick();
+    wait.second_tick();
+    CHECK(wait.check(table, 58 * second_us) == StartCheck::keep_waiting);
+    CHECK(wait.check(table, 87 * second_us) == StartCheck::timed_out);
+    wait.end();
+
+    // Sent while timed out.
+    hold(wait, identity(table, starter), 0);
+    wait.mark_timed_out();
+    CHECK(wait.request_keep_waiting(0x100));
+    CHECK(wait.timed_out());  // nothing changes until the transfer ends
+    wait.transfer_ended(70 * second_us);
+    CHECK(!wait.timed_out());
+    CHECK(wait.seconds_left(70 * second_us) == 30);
+    wait.second_tick();
+    wait.second_tick();
+    CHECK(wait.check(table, 99 * second_us) == StartCheck::keep_waiting);
+    CHECK(wait.check(table, 100 * second_us) == StartCheck::timed_out);
+    wait.end();
+
+    // Never carried into the next start.
+    hold(wait, identity(table, starter), 0);
+    CHECK(wait.request_keep_waiting(0x100));
+    wait.end();
+    hold(wait, identity(table, starter), 0);
+    wait.transfer_ended(57 * second_us);
+    wait.second_tick();
+    wait.second_tick();
+    CHECK(wait.check(table, 58 * second_us) == StartCheck::timed_out);
+    wait.end();
+
+    // An abort kept in the same transfer still cancels.
+    hold(wait, identity(table, starter), 0);
+    CHECK(wait.request_keep_waiting(0x100));
+    wait.request_cancel();
+    wait.transfer_ended(57 * second_us);
+    CHECK(wait.check(table, 57 * second_us) == StartCheck::cancelled);
   }
 
   {
