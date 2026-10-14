@@ -90,7 +90,10 @@ struct Client {
   // two of these is ordinary back-pressure and means nothing. A client that
   // never drains, though, looks exactly the same from here and is
   // effectively gone, so the count is what tells the two apart. Reset to 0
-  // by any send that fully succeeds.
+  // by any send that fully succeeds. Reaching max_consecutive_send_failures
+  // marks the client gone only for as long as the run lasts (see
+  // sends_show_client_gone), so a client that a network stall held up and
+  // that then takes a send again is kept.
   uint8_t consecutive_send_failures = 0;
 
   // The features byte from this client's hello (libs/Hello.h), 0 until it
@@ -140,6 +143,15 @@ bool send_error_means_client_gone(uint8_t errcode);
 // invisible to the module's own dead-client timer because that timer counts
 // what a client sends us, never what it accepts from us.
 void note_send_result(Client& client, bool sent_everything, uint8_t errcode);
+
+// True when sends have shown `client` is gone: a send failed with an error
+// that says so (send_failed, which stays set), or the latest
+// max_consecutive_send_failures sends in a row all failed. The second is
+// judged when asked, not latched, because clients are not reaped while a
+// file transfer runs: a client whose sends failed during a short network
+// stall and then went through again must not be dropped once the transfer
+// ends.
+bool sends_show_client_gone(const Client& client);
 
 // True for the WiFi module's error codes that mean it cannot take more data
 // just now, so the same bytes can go through if tried again shortly: 0x12
@@ -402,7 +414,7 @@ ClientTable& shared_client_table();
 bool is_transfer_owner(const ClientTable& table, int client_index, const Address& sender);
 
 // True while the WiFi client at `owner_index` can still finish the file
-// transfer it started: its slot is occupied, no send to it has failed, and
+// transfer it started: its slot is occupied, its sends do not show it gone, and
 // its address is among the `count` connections in `connected` (the WiFi
 // module's own list of who is connected right now). An upload stops the
 // once-a-second pass that would otherwise reap a departed client, so this is

@@ -750,12 +750,69 @@ int main() {
 
     for (uint8_t i = 1; i < multiclient::max_consecutive_send_failures; ++i) {
       multiclient::note_send_result(*client, false, 0x12);
-      CHECK(!client->send_failed);  // still just busy, all the way to the last one
+      CHECK(!multiclient::sends_show_client_gone(*client));  // still just busy, all the way to the last one
     }
     // The one that tips it over: this client has accepted nothing for the
     // whole window, which no client that is reading at all ever does.
     multiclient::note_send_result(*client, false, 0x12);
+    CHECK(multiclient::sends_show_client_gone(*client));
+    // A run of temporary failures is not a client-gone error.
+    CHECK(!client->send_failed);
+  }
+
+  {
+    TEST("a client whose sends go through again after a full run of failures is kept, "
+         "even when the reaping pass first looks after that (as after an upload)");
+    multiclient::ClientTable table;
+    const int index = table.add_wifi(address(10, 0, 0, 3, 51003), 0);
+    multiclient::Client *client = table.wifi_at(index);
+
+    // A network stall: every send in a row fails as the module's buffer
+    // stays full.
+    for (uint8_t i = 0; i < multiclient::max_consecutive_send_failures; ++i) {
+      multiclient::note_send_result(*client, false, 0x12);
+    }
+    CHECK(multiclient::sends_show_client_gone(*client));
+
+    // The stall ends and the next send is delivered in full.
+    multiclient::note_send_result(*client, true, 0);
+
+    // The module still lists the client; the reaping pass and the upload's
+    // owner check both ask sends_show_client_gone(), and both keep it.
+    CHECK(!multiclient::sends_show_client_gone(*client));
+    const multiclient::Address connected[] = {address(10, 0, 0, 3, 51003)};
+    CHECK(multiclient::transfer_owner_connected(table, index, connected, 1));
+  }
+
+  {
+    TEST("a client whose sends keep failing after a full run is still reaped, "
+         "even while the module lists it");
+    multiclient::ClientTable table;
+    const int index = table.add_wifi(address(10, 0, 0, 3, 51003), 0);
+    multiclient::Client *client = table.wifi_at(index);
+
+    for (uint8_t i = 0; i < multiclient::max_consecutive_send_failures; ++i) {
+      multiclient::note_send_result(*client, false, 0x12);
+    }
+    // It keeps failing for far longer than the counter can count.
+    for (int i = 0; i < 300; ++i) {
+      multiclient::note_send_result(*client, false, 0x12);
+    }
+    CHECK(client->consecutive_send_failures == 0xFF);
+    CHECK(multiclient::sends_show_client_gone(*client));
+    const multiclient::Address connected[] = {address(10, 0, 0, 3, 51003)};
+    CHECK(!multiclient::transfer_owner_connected(table, index, connected, 1));
+  }
+
+  {
+    TEST("a client-gone error is not undone by a later send that goes through");
+    multiclient::ClientTable table;
+    const int index = table.add_wifi(address(1, 1, 1, 1, 1), 0);
+    multiclient::Client *client = table.wifi_at(index);
+    multiclient::note_send_result(*client, false, 0x15);
+    multiclient::note_send_result(*client, true, 0);
     CHECK(client->send_failed);
+    CHECK(multiclient::sends_show_client_gone(*client));
   }
 
   {
@@ -771,12 +828,12 @@ int main() {
 
     multiclient::note_send_result(*client, true, 0);
     CHECK(client->consecutive_send_failures == 0);
-    CHECK(!client->send_failed);
+    CHECK(!multiclient::sends_show_client_gone(*client));
 
     // And from there it takes the full run again, not one more.
     for (uint8_t i = 0; i < multiclient::max_consecutive_send_failures - 1; ++i) {
       multiclient::note_send_result(*client, false, 0x12);
-      CHECK(!client->send_failed);
+      CHECK(!multiclient::sends_show_client_gone(*client));
     }
   }
 
@@ -853,7 +910,7 @@ int main() {
     CHECK(elapsed < multiclient::max_busy_send_wait_us + 1000 + 88 * module.spi_cost_us * 2);
     CHECK(elapsed >= multiclient::max_busy_send_wait_us);
     // And it still ends up marked gone, as before.
-    CHECK(client.send_failed);
+    CHECK(multiclient::sends_show_client_gone(client));
   }
 
   {
