@@ -2783,7 +2783,11 @@ void Player::upload_command( string parameters, StreamOutput *stream )
                 if(retry > RETRYTIME*10)
                 {
                     SendMessage(PTYPE_FILE_RETRY, buf, 0, stream);	//resend the last package
-                    retry = 0;				
+                    // The controller answers a retry by sending its last frame again.
+                    // If that is not the frame awaited, the machine's own request was
+                    // lost; with the count at RETRYTIME, that answer makes the machine
+                    // send the request again at once.
+                    retry = RETRYTIME;
                     tatalretry ++;
                     stream->reset();
                 }
