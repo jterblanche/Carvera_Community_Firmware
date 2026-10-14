@@ -199,6 +199,42 @@ int main() {
   }
 
   {
+    TEST("needs_wait: a lone controller starts at once in either mode, on WiFi, USB or both");
+    const multiclient::Mode modes[] = {multiclient::Mode::single_user, multiclient::Mode::multi_user};
+    for (const multiclient::Mode mode : modes) {
+      // The starter is whoever holds control after the start passes the
+      // gate, as in Player::hold_start().
+      ClientTable table;
+      JobStartWait wait;
+      wait.configure(30);
+      multiclient::ControlToken token;
+      const int pc = add_identified(table, 1, 0x100, true);
+      token.gate(identity(table, pc), multiclient::Traffic::user_caused, multiclient::MotionState{}, mode);
+      CHECK(token.holder().id == 0x100);
+      CHECK(!wait.needs_wait(table, token.holder()));
+
+      identify_usb(table, 0x100, true);  // the same controller on USB too
+      CHECK(!wait.needs_wait(table, token.holder()));
+
+      add_identified(table, 2, 0x200, false);  // an older controller
+      const int stranger = table.add_wifi(address(3), 0);  // a connection that never said hello
+      CHECK(!wait.needs_wait(table, token.holder()));
+
+      CHECK(table.remove_wifi(stranger));     // make room: the table holds three WiFi links
+      add_identified(table, 4, 0x400, true);  // a second controller that takes part
+      CHECK(wait.needs_wait(table, token.holder()));
+
+      ClientTable usb_only;
+      multiclient::ControlToken usb_token;
+      identify_usb(usb_only, 0x500, true);
+      usb_token.gate(multiclient::identity_of(usb_only.usb()), multiclient::Traffic::user_caused,
+                     multiclient::MotionState{}, mode);
+      CHECK(usb_token.holder().id == 0x500);
+      CHECK(!wait.needs_wait(usb_only, usb_token.holder()));
+    }
+  }
+
+  {
     TEST("begin and end: pending, a non-zero start id that changes every start, and the starter");
     ClientTable table;
     JobStartWait wait;
