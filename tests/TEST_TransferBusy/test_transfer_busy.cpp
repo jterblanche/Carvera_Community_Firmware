@@ -107,6 +107,17 @@ int main() {
   }
 
   {
+    TEST("frames the machine never answers need no reply of their own");
+    const std::vector<uint8_t> relay = make_frame(PTYPE_RELAY, {2, 0x02, 0x58});
+    CHECK(!needs_reply(relay));
+    CHECK(!needs_reply(make_frame(PTYPE_PRESENCE_REPLY, {1, 2, 3, 4})));
+    CHECK(!needs_reply(make_frame(PTYPE_JOB_START_READY, {1, 2, 3, 4})));
+    CHECK(!needs_reply(join({query, relay, heartbeat})));
+    // A controller relays its transfer notice just before its download.
+    CHECK(needs_reply(join({relay, make_frame(PTYPE_CTRL_MULTI, text("download /sd/gcodes/a.nc\n"))})));
+  }
+
+  {
     TEST("a read with no frame header needs no reply of its own");
     CHECK(!needs_reply({}));
     CHECK(!needs_reply(text("some bytes from the middle of a frame")));
@@ -125,7 +136,6 @@ int main() {
     CHECK(needs_reply(make_frame(PTYPE_FILE_START, text("/sd/gcodes/a.nc"))));
     CHECK(needs_reply(make_frame(PTYPE_CLIENT_LIST_REQ, {})));
     CHECK(needs_reply(make_frame(PTYPE_CONTROL_RELEASE, {})));
-    CHECK(needs_reply(make_frame(PTYPE_RELAY, text("x"))));
     // An automatic command is discarded during a transfer like any other
     // frame, and its sender told, whether it wraps a query or a download.
     CHECK(needs_reply(make_frame(PTYPE_AUTO_COMMAND, join({{0}, text("version")}))));
@@ -162,38 +172,51 @@ int main() {
   {
     TEST("the first read from each client is answered whatever it holds");
     multiclient::BusyReplyLimiter limiter;
-    CHECK(limiter.should_reply(address(10, 1000), false, 0));
-    CHECK(limiter.should_reply(address(11, 1000), true, 0));
-    CHECK(limiter.should_reply(address(10, 1001), false, 0));  // same host, another connection
+    CHECK(limiter.should_reply(address(10, 1000), false, false, 0));
+    CHECK(limiter.should_reply(address(11, 1000), true, false, 0));
+    CHECK(limiter.should_reply(address(10, 1001), false, false, 0));  // same host, another connection
+  }
+
+  {
+    TEST("a controller sent transfer notices is answered only for a frame that needs it");
+    multiclient::BusyReplyLimiter limiter;
+    const multiclient::Address a = address(10, 1000);
+    CHECK(!limiter.should_reply(a, false, true, 0));
+    CHECK(!limiter.should_reply(a, false, true, 1000000));
+    CHECK(limiter.should_reply(a, true, true, 1000001));
+    CHECK(!limiter.should_reply(a, true, true, 1000001 + multiclient::busy_reply_gap_us - 1));
+    CHECK(limiter.should_reply(a, true, true, 1000001 + multiclient::busy_reply_gap_us));
+    // Another client that is not sent the notices still gets its first read answered.
+    CHECK(limiter.should_reply(address(11, 1000), false, false, 2000000));
   }
 
   {
     TEST("after the first reply, automatic traffic gets nothing more");
     multiclient::BusyReplyLimiter limiter;
     const multiclient::Address a = address(10, 1000);
-    CHECK(limiter.should_reply(a, false, 0));
-    CHECK(!limiter.should_reply(a, false, 1000000));
-    CHECK(!limiter.should_reply(a, false, 60000000));
+    CHECK(limiter.should_reply(a, false, false, 0));
+    CHECK(!limiter.should_reply(a, false, false, 1000000));
+    CHECK(!limiter.should_reply(a, false, false, 60000000));
   }
 
   {
     TEST("a frame that needs a reply is answered after an automatic one, however soon");
     multiclient::BusyReplyLimiter limiter;
     const multiclient::Address a = address(10, 1000);
-    CHECK(limiter.should_reply(a, false, 0));
-    CHECK(limiter.should_reply(a, true, 1));
+    CHECK(limiter.should_reply(a, false, false, 0));
+    CHECK(limiter.should_reply(a, true, false, 1));
   }
 
   {
     TEST("frames that need a reply are answered no more often than every 250 ms");
     multiclient::BusyReplyLimiter limiter;
     const multiclient::Address a = address(10, 1000);
-    CHECK(limiter.should_reply(a, true, 1000000));
-    CHECK(!limiter.should_reply(a, true, 1000000 + multiclient::busy_reply_gap_us - 1));
-    CHECK(limiter.should_reply(a, true, 1000000 + multiclient::busy_reply_gap_us));
-    CHECK(!limiter.should_reply(a, true, 1000000 + multiclient::busy_reply_gap_us + 1));
-    CHECK(!limiter.should_reply(a, false, 1000000 + 10 * multiclient::busy_reply_gap_us));
-    CHECK(limiter.should_reply(a, true, 1000000 + 10 * multiclient::busy_reply_gap_us));
+    CHECK(limiter.should_reply(a, true, false, 1000000));
+    CHECK(!limiter.should_reply(a, true, false, 1000000 + multiclient::busy_reply_gap_us - 1));
+    CHECK(limiter.should_reply(a, true, false, 1000000 + multiclient::busy_reply_gap_us));
+    CHECK(!limiter.should_reply(a, true, false, 1000000 + multiclient::busy_reply_gap_us + 1));
+    CHECK(!limiter.should_reply(a, false, false, 1000000 + 10 * multiclient::busy_reply_gap_us));
+    CHECK(limiter.should_reply(a, true, false, 1000000 + 10 * multiclient::busy_reply_gap_us));
   }
 
   {
@@ -201,28 +224,28 @@ int main() {
     multiclient::BusyReplyLimiter limiter;
     const multiclient::Address a = address(10, 1000);
     const uint32_t before_wrap = 0xFFFFFFFFu - 100000u;
-    CHECK(limiter.should_reply(a, true, before_wrap));
-    CHECK(!limiter.should_reply(a, true, before_wrap + 200000u));  // wrapped, 200 ms later
-    CHECK(limiter.should_reply(a, true, before_wrap + multiclient::busy_reply_gap_us));
+    CHECK(limiter.should_reply(a, true, false, before_wrap));
+    CHECK(!limiter.should_reply(a, true, false, before_wrap + 200000u));  // wrapped, 200 ms later
+    CHECK(limiter.should_reply(a, true, false, before_wrap + multiclient::busy_reply_gap_us));
   }
 
   {
     TEST("each client has its own gap");
     multiclient::BusyReplyLimiter limiter;
-    CHECK(limiter.should_reply(address(10, 1000), true, 0));
-    CHECK(limiter.should_reply(address(11, 1000), true, 1));
-    CHECK(!limiter.should_reply(address(10, 1000), true, 2));
-    CHECK(!limiter.should_reply(address(11, 1000), true, 3));
+    CHECK(limiter.should_reply(address(10, 1000), true, false, 0));
+    CHECK(limiter.should_reply(address(11, 1000), true, false, 1));
+    CHECK(!limiter.should_reply(address(10, 1000), true, false, 2));
+    CHECK(!limiter.should_reply(address(11, 1000), true, false, 3));
   }
 
   {
     TEST("clearing starts over for the next transfer");
     multiclient::BusyReplyLimiter limiter;
     const multiclient::Address a = address(10, 1000);
-    CHECK(limiter.should_reply(a, false, 0));
-    CHECK(!limiter.should_reply(a, false, 1));
+    CHECK(limiter.should_reply(a, false, false, 0));
+    CHECK(!limiter.should_reply(a, false, false, 1));
     limiter.clear();
-    CHECK(limiter.should_reply(a, false, 2));
+    CHECK(limiter.should_reply(a, false, false, 2));
   }
 
   {
@@ -230,17 +253,17 @@ int main() {
     multiclient::BusyReplyLimiter limiter;
     const std::size_t tracked = multiclient::max_wifi_clients + 1;
     for (std::size_t k = 0; k < tracked; ++k) {
-      CHECK(limiter.should_reply(address(static_cast<uint8_t>(10 + k), 1000), false, 0));
+      CHECK(limiter.should_reply(address(static_cast<uint8_t>(10 + k), 1000), false, false, 0));
     }
     for (std::size_t k = 0; k < tracked; ++k) {
-      CHECK(!limiter.should_reply(address(static_cast<uint8_t>(10 + k), 1000), false, 1));
+      CHECK(!limiter.should_reply(address(static_cast<uint8_t>(10 + k), 1000), false, false, 1));
     }
     // One more client takes the first one's entry, so the first is answered
     // again as new and the second, still tracked, is not.
-    CHECK(limiter.should_reply(address(99, 1000), false, 2));
-    CHECK(limiter.should_reply(address(10, 1000), false, 3));
-    CHECK(!limiter.should_reply(address(99, 1000), false, 4));
-    CHECK(!limiter.should_reply(address(12, 1000), false, 5));
+    CHECK(limiter.should_reply(address(99, 1000), false, false, 2));
+    CHECK(limiter.should_reply(address(10, 1000), false, false, 3));
+    CHECK(!limiter.should_reply(address(99, 1000), false, false, 4));
+    CHECK(!limiter.should_reply(address(12, 1000), false, false, 5));
   }
 
   {
