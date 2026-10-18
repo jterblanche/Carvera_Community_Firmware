@@ -56,7 +56,8 @@ bool needs_busy_reply(const uint8_t* data, std::size_t length) {
     } else if (type == PTYPE_CTRL_MULTI) {
       if (frame_length < 3 || i + 5 + (frame_length - 3u) > length) return true;
       if (!makera::is_diagnostic_request(data + i + 5, frame_length - 3u)) return true;
-    } else if (type != PTYPE_HEARTBEAT) {
+    } else if (type != PTYPE_HEARTBEAT && type != PTYPE_RELAY && type != PTYPE_PRESENCE_REPLY &&
+               type != PTYPE_JOB_START_READY) {
       return true;
     }
     // Skip the whole frame, so its CRC cannot be mistaken for a header.
@@ -65,7 +66,9 @@ bool needs_busy_reply(const uint8_t* data, std::size_t length) {
   return false;
 }
 
-bool BusyReplyLimiter::should_reply(const Address& sender, bool needs_reply, uint32_t now_us) {
+bool BusyReplyLimiter::should_reply(const Address& sender, bool needs_reply, bool sent_transfer_notices,
+                                    uint32_t now_us) {
+  if (sent_transfer_notices && !needs_reply) return false;
   for (std::size_t k = 0; k < count_; ++k) {
     Entry& entry = entries_[k];
     if (!same_address(entry.address, sender)) continue;
