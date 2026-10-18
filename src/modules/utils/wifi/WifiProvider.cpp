@@ -413,6 +413,8 @@ void WifiProvider::receive_wifi_data() {
 			if (result == makera::ResyncResult::incomplete) continue;
 
 			++frames;
+			// Neither an invalid frame nor one marked during a file
+			// transfer (makera::take_frames()) is run.
 			if (result != makera::ResyncResult::complete) continue;
 
 			const makera::Packet &packet = client.decoder.packet();
@@ -654,7 +656,9 @@ void WifiProvider::refuse_as_busy(const multiclient::Address& sender, const u8* 
 // through restarts the limit when the transfer ends.
 // The bytes go through the sender's own frame decoder, which the transfer
 // does not use. Nothing is sent to anyone here. Returns true if something
-// was taken, and the sender then gets no busy reply for this read.
+// was taken, and the sender then gets no busy reply for this read. If
+// nothing was, a frame the read leaves cut off is never run after the
+// transfer (see makera::take_frames()).
 bool WifiProvider::take_held_start_frames(const multiclient::Address& sender, const u8* data, u16 length) {
 	multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
 	if (!wait.pending()) return false;

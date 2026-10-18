@@ -237,12 +237,69 @@ int main() {
                                              return packet.type == 0xA2;
                                            });
     CHECK(taken);
-    CHECK(seen.size() == 2);
     CHECK(seen.size() == 2 && seen[0] == "ab" && seen[1] == "abort");
 
     const std::vector<uint8_t> third = make_frame(0x6C, "cd");
     CHECK(!makera::take_frames(decoder.resync, third.data(), third.size(), 20,
                                [](const makera::Packet&) { return false; }));
+  }
+
+  {
+    TEST("take_frames: a frame cut off by a read nothing was taken from, wherever the cut falls, "
+         "is not completed by its rest arriving later");
+    const std::vector<uint8_t> download = make_frame(0xA2, "download /sd/gcodes/part.nc");
+    const auto take_nothing = [](const makera::Packet&) { return false; };
+    for (std::size_t cut = 1; cut < download.size(); ++cut) {
+      Decoder decoder;
+      CHECK(!makera::take_frames(decoder.resync, download.data(), cut, 10, take_nothing));
+      // The rest arrives after the transfer, and is decoded as any read is.
+      const std::vector<uint8_t> rest(download.begin() + static_cast<std::ptrdiff_t>(cut), download.end());
+      std::vector<bool> notifications;
+      // Not run, and not searched for a header either.
+      CHECK(feed(decoder, rest, 20, 0, &notifications) != makera::ResyncResult::complete);
+      CHECK(notifications.empty());
+      // The next whole frame decodes as usual.
+      CHECK(feed(decoder, make_frame(0xA2, "ls"), 30) == makera::ResyncResult::complete);
+      CHECK(packet_data(decoder.packet) == "ls");
+    }
+  }
+
+  {
+    TEST("take_frames: a frame cut off by a read something was taken from completes as usual");
+    Decoder decoder;
+    const std::vector<uint8_t> download = make_frame(0xA2, "download /sd/gcodes/part.nc");
+    std::vector<uint8_t> read = make_frame(0x6C, "ab");
+    read.insert(read.end(), download.begin(), download.begin() + 9);
+    CHECK(makera::take_frames(decoder.resync, read.data(), read.size(), 10,
+                              [](const makera::Packet& packet) { return packet.type == 0x6C; }));
+    const std::vector<uint8_t> rest(download.begin() + 9, download.end());
+    CHECK(feed(decoder, rest, 20) == makera::ResyncResult::complete);
+    CHECK(packet_data(decoder.packet) == "download /sd/gcodes/part.nc");
+  }
+
+  {
+    TEST("take_frames: a frame split across two reads, nothing taken from the first, is still offered "
+         "when its rest comes through take_frames");
+    Decoder decoder;
+    const std::vector<uint8_t> frame = make_frame(0xA2, "abort");
+    const auto take_abort = [](const makera::Packet& packet) { return packet_data(packet) == "abort"; };
+    for (std::size_t cut = 1; cut < frame.size(); ++cut) {
+      CHECK(!makera::take_frames(decoder.resync, frame.data(), cut, 10, take_abort));
+      CHECK(makera::take_frames(decoder.resync, frame.data() + cut, frame.size() - cut, 20, take_abort));
+    }
+  }
+
+  {
+    TEST("take_frames: a read nothing was taken from that ends on a lone first header byte marks nothing "
+         "if the next byte does not finish the header");
+    Decoder decoder;
+    const uint8_t first_header_byte = static_cast<uint8_t>(makera::header >> 8);
+    CHECK(!makera::take_frames(decoder.resync, &first_header_byte, 1, 10,
+                               [](const makera::Packet&) { return false; }));
+    std::vector<uint8_t> next{'x'};
+    const std::vector<uint8_t> frame = make_frame(0xA2, "ls");
+    next.insert(next.end(), frame.begin(), frame.end());
+    CHECK(feed(decoder, next, 20) == makera::ResyncResult::complete);
   }
 
   std::printf("%d checks, %d failures\n", checks, failures);

@@ -245,6 +245,56 @@ int main() {
   }
 
   {
+    TEST("a frame marked while in progress completes as marked, and the next one as complete");
+    const std::vector<uint8_t> frame = make_frame(0xA2, "download /sd/a.nc");
+    for (std::size_t cut = 1; cut < frame.size(); ++cut) {
+      Decoder decoder;
+      for (std::size_t i = 0; i < cut; ++i) decoder->decode_byte(frame[i], 1);
+      decoder->mark_frame();
+      const std::vector<uint8_t> rest(frame.begin() + static_cast<std::ptrdiff_t>(cut), frame.end());
+      CHECK(feed(decoder, rest, 2) == makera::DecodeResult::marked);
+      CHECK(packet_data(decoder->packet()) == "download /sd/a.nc");
+      CHECK(feed(decoder, make_frame(0xA2, "next"), 3) == makera::DecodeResult::complete);
+    }
+  }
+
+  {
+    TEST("marking with no frame in progress marks nothing");
+    Decoder decoder;
+    decoder->mark_frame();
+    CHECK(feed(decoder, make_frame(0xA2, "next")) == makera::DecodeResult::complete);
+  }
+
+  {
+    TEST("a marked lone first header byte is forgotten when the header does not follow");
+    Decoder decoder;
+    decoder->decode_byte(static_cast<uint8_t>(makera::header >> 8), 1);
+    decoder->mark_frame();
+    decoder->decode_byte('x', 1);
+    CHECK(feed(decoder, make_frame(0xA2, "next"), 2) == makera::DecodeResult::complete);
+  }
+
+  {
+    TEST("a marked frame with a bad CRC is still rejected as a bad CRC");
+    Decoder decoder;
+    std::vector<uint8_t> frame = make_frame(0xA2, "bad");
+    frame[frame.size() - 3] ^= 0x01;
+    for (std::size_t i = 0; i < 6; ++i) decoder->decode_byte(frame[i], 1);
+    decoder->mark_frame();
+    const std::vector<uint8_t> rest(frame.begin() + 6, frame.end());
+    CHECK(feed(decoder, rest, 2) == makera::DecodeResult::invalid_crc);
+  }
+
+  {
+    TEST("a marked partial frame that stalls is abandoned, and the next frame is not marked");
+    Decoder decoder;
+    const std::vector<uint8_t> frame = make_frame(0xA2, "partial");
+    for (std::size_t i = 0; i < 6; ++i) decoder->decode_byte(frame[i], 10);
+    decoder->mark_frame();
+    CHECK(feed(decoder, make_frame(0xA2, "next"), 10 + makera::frame_timeout_us) == makera::DecodeResult::complete);
+  }
+
+  {
     TEST("Makera control bytes have one shared interpretation");
     CHECK(makera::decode_control('?') == makera::ControlAction::query);
     CHECK(makera::decode_control('*') == makera::ControlAction::diagnose);
