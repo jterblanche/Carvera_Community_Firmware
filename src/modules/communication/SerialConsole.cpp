@@ -73,7 +73,6 @@ SerialConsole::SerialConsole( PinName tx_pin, PinName rx_pin, int baud_rate )
     this->current_baud_rate = baud_rate;
     this->default_baud_rate = baud_rate;
     this->temp_baud_rate = 0;
-    this->last_activity_us = 0;
     this->status_publish_interval_us = multiclient::status_publish_interval_us(multiclient::default_status_publish_hz);
     this->multi_client_mode = multiclient::Mode::single_user;
     this->multi_client_passive_rights = multiclient::PassiveRights::watch_stop_upload;
@@ -183,10 +182,13 @@ void SerialConsole::set_baud_temporary(int new_baud) {
     this->temp_baud_rate = new_baud;
     this->current_baud_rate = new_baud;
     this->serial->baud(new_baud);
-    this->last_activity_us = us_ticker_read();
+    this->usb_activity.last_activity_us = us_ticker_read();
 }
 
 void SerialConsole::set_rx_enabled(bool enabled) {
+    // Before the receive interrupt is attached, so that this reading never
+    // replaces a later one taken by the interrupt.
+    this->usb_activity.set_rx_enabled(enabled, us_ticker_read());
 #if defined(SERIAL_RX_DMA)
     this->rx_dispatch_enabled = enabled;
 #else
@@ -216,7 +218,7 @@ void SerialConsole::on_serial_char_received() {
 	int received_byte;
 	while ((received_byte = this->read_byte()) >= 0) {
 		char received = static_cast<char>(received_byte);
-		last_activity_us = us_ticker_read();
+		usb_activity.last_activity_us = us_ticker_read();
 
 		if(THEKERNEL->is_cachewait()) {
 			continue;
@@ -226,7 +228,7 @@ void SerialConsole::on_serial_char_received() {
             // The firmware cannot detect a bare USB cable, only bytes
             // actually arriving on it -- this is where a USB controller
             // starts counting as present for the old-client rule.
-            multiclient::shared_client_table().start_usb_hello_window(last_activity_us);
+            multiclient::shared_client_table().start_usb_hello_window(usb_activity.last_activity_us);
             const int next = makera_rx_bytes.next_block_index(makera_rx_bytes.head);
             if (next == makera_rx_bytes.tail) {
                 makera_rx_overflow = true;
@@ -302,7 +304,7 @@ void SerialConsole::on_idle(void * argument)
 
     const uint32_t now_us = us_ticker_read();
     if (communication_protocol == PROTOCOL_MAKERA && !command_waiting &&
-        now_us - last_activity_us >= makera_rx_quiet_us) {
+        now_us - usb_activity.last_activity_us >= makera_rx_quiet_us) {
         while (!command_waiting && makera_rx_bytes.tail != makera_rx_bytes.head) {
             char received;
             makera_rx_bytes.pop_front(received);
@@ -318,10 +320,12 @@ void SerialConsole::on_idle(void * argument)
     // identified, toward "old and not alone") until something arrives on it
     // again. Without this, a single USB session anywhere in a power cycle
     // would count forever, since nothing else ever un-counts it.
+    // A file transfer reading the link itself does not count as quiet
+    // (libs/UsbActivity.h).
     if (communication_protocol == PROTOCOL_MAKERA) {
         auto &table = multiclient::shared_client_table();
         const multiclient::Client *usb = table.usb();
-        if (usb != nullptr && multiclient::usb_session_expired(usb->hello_window_started, now_us, last_activity_us)) {
+        if (usb != nullptr && usb_activity.session_expired(usb->hello_window_started, now_us)) {
             // Read id/name before clearing: clear_usb_identity() wipes them.
             // Only an identified session is announced -- one that never got
             // past its hello window had no id or name to announce either.
@@ -339,7 +343,7 @@ void SerialConsole::on_idle(void * argument)
 
 #if defined(MACHINE_FAMILY_CARVERA)
     if (temp_baud_rate != 0) {
-        if ((now_us - last_activity_us) >= 15000000u) {
+        if (usb_activity.temporary_baud_expired(now_us)) {
             this->serial->baud(default_baud_rate);
             this->current_baud_rate = default_baud_rate;
             this->temp_baud_rate = 0;
@@ -693,7 +697,7 @@ int SerialConsole::gets(char** buf, int size)
 
 void SerialConsole::process_makera_byte(uint8_t received)
 {
-    const makera::DecodeResult result = makera_frame_decoder.decode_byte(received, last_activity_us);
+    const makera::DecodeResult result = makera_frame_decoder.decode_byte(received, usb_activity.last_activity_us);
     if (result != makera::DecodeResult::complete) return;
 
     const makera::Packet &packet = makera_frame_decoder.packet();
@@ -720,7 +724,7 @@ void SerialConsole::process_makera_byte(uint8_t received)
     }
 
     if (packet.type == PTYPE_HELLO) {
-        handle_hello(packet.data, packet.data_length, last_activity_us);
+        handle_hello(packet.data, packet.data_length, usb_activity.last_activity_us);
         return;
     }
 
@@ -731,7 +735,7 @@ void SerialConsole::process_makera_byte(uint8_t received)
 
     if (packet.type == PTYPE_HEARTBEAT) {
         multiclient::Client *self = multiclient::shared_client_table().usb();
-        if (self != nullptr) multiclient::record_heartbeat(*self, last_activity_us);
+        if (self != nullptr) multiclient::record_heartbeat(*self, usb_activity.last_activity_us);
         return;
     }
 

@@ -20,6 +20,7 @@ using std::string;
 #include "libs/ControlToken.h"
 #include "libs/Hello.h"
 #include "libs/Publish.h"
+#include "libs/UsbActivity.h"
 
 
 #define baud_rate_setting_checksum CHECKSUM("baud_rate")
@@ -64,7 +65,7 @@ class SerialConsole : public Module, public StreamOutput {
         int current_baud_rate;
         int default_baud_rate;
         int temp_baud_rate;                       // non-zero = temporary baud active
-        uint32_t last_activity_us;                // for 15s timeout revert (a raw us_ticker_read() reading, not a value divided down to ms)
+        multiclient::UsbActivity usb_activity;    // when this link last received anything (libs/UsbActivity.h)
         makera::FrameDecoder makera_frame_decoder;
 #if defined(SERIAL_RX_DMA)
         bool rx_dispatch_enabled;
