@@ -224,6 +224,27 @@ int main() {
     CHECK(packet_data(decoder.packet) == "ok");
   }
 
+  {
+    TEST("take_frames: take() sees each whole frame in a read; true if any call returned true");
+    Decoder decoder;
+    std::vector<uint8_t> read = make_frame(0x6C, "ab");
+    const std::vector<uint8_t> second = make_frame(0xA2, "abort");
+    read.insert(read.end(), second.begin(), second.end());
+    std::vector<std::string> seen;
+    const bool taken = makera::take_frames(decoder.resync, read.data(), read.size(), 10,
+                                           [&](const makera::Packet& packet) {
+                                             seen.push_back(packet_data(packet));
+                                             return packet.type == 0xA2;
+                                           });
+    CHECK(taken);
+    CHECK(seen.size() == 2);
+    CHECK(seen.size() == 2 && seen[0] == "ab" && seen[1] == "abort");
+
+    const std::vector<uint8_t> third = make_frame(0x6C, "cd");
+    CHECK(!makera::take_frames(decoder.resync, third.data(), third.size(), 20,
+                               [](const makera::Packet&) { return false; }));
+  }
+
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

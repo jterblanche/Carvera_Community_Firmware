@@ -87,4 +87,17 @@ class ResyncingDecoder {
   bool notified_once_ = false;
 };
 
+// Feeds one read through `decoder` and calls take(packet) for each whole
+// frame in it. Returns true if any call returned true. WifiProvider uses it
+// for a read that a file transfer is discarding, to keep the few frames a
+// held job start must not miss (see WifiProvider::take_held_start_frames()).
+template <typename Take>
+bool take_frames(ResyncingDecoder& decoder, const uint8_t* data, std::size_t length, uint32_t now_us, Take take) {
+  bool taken = false;
+  for (std::size_t i = 0; i < length; ++i) {
+    if (decoder.decode_byte(data[i], now_us) == ResyncResult::complete && take(decoder.packet())) taken = true;
+  }
+  return taken;
+}
+
 }  // namespace makera

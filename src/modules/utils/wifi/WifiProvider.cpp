@@ -662,19 +662,14 @@ bool WifiProvider::take_held_start_frames(const multiclient::Address& sender, co
 	const int client_index = table.find_wifi(sender);
 	if (client_index < 0) return false;
 	multiclient::Client *client = table.wifi_at(client_index);
-	makera::ResyncingDecoder &decoder = wifi_streams[client_index].decoder;
-	const uint32_t now_us = us_ticker_read();
-	bool taken = false;
-	for (u16 i = 0; i < length; ++i) {
-		if (decoder.decode_byte(data[i], now_us) != makera::ResyncResult::complete) continue;
-		const makera::Packet &packet = decoder.packet();
+	return makera::take_frames(wifi_streams[client_index].decoder, data, length, us_ticker_read(),
+		[&](const makera::Packet &packet) -> bool {
 		if (multiclient::must_identify_first(table, client) &&
-		    !multiclient::taken_before_identifying(packet.type, packet.data, packet.data_length)) continue;
+		    !multiclient::taken_before_identifying(packet.type, packet.data, packet.data_length)) return false;
 		const multiclient::TransferFrame frame = multiclient::held_start_frame(packet.type, packet.data, packet.data_length);
 		switch (frame) {
 			case multiclient::TransferFrame::ready:
-				if (wait.mark_ready(*client, packet.data, packet.data_length)) taken = true;
-				break;
+				return wait.mark_ready(*client, packet.data, packet.data_length);
 			case multiclient::TransferFrame::cancel:
 			case multiclient::TransferFrame::keep_waiting: {
 				// peek(), not gate(): control does not move during a
@@ -682,20 +677,18 @@ bool WifiProvider::take_held_start_frames(const multiclient::Address& sender, co
 				const GateInputs in = gate_inputs_for(client_index, packet);
 				const multiclient::GateResult result = multiclient::shared_control_token().peek(
 					in.sender, in.traffic, in.motion, multi_client_mode, in.action, multi_client_passive_rights);
-				if (result.refused) break;
+				if (result.refused) return false;
 				if (frame == multiclient::TransferFrame::cancel) {
 					wait.request_cancel();
-					taken = true;
-				} else if (wait.request_keep_waiting(in.sender.id)) {
-					taken = true;
+					return true;
 				}
-				break;
+				return wait.request_keep_waiting(in.sender.id);
 			}
 			case multiclient::TransferFrame::other:
 				break;
 		}
-	}
-	return taken;
+		return false;
+	});
 }
 
 void WifiProvider::broadcast_to_wifi_clients(const u8* data, size_t length) {
