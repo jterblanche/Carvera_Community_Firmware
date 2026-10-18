@@ -13,7 +13,9 @@ trap 'rm -rf "$OUT"' EXIT
     -I"$ROOT/src" -I"$ROOT/src/libs" \
     "$ROOT/src/libs/ClientTable.cpp" \
     "$ROOT/src/libs/ControlToken.cpp" \
+    "$ROOT/src/libs/FrameResync.cpp" \
     "$ROOT/src/libs/JobStartWait.cpp" \
+    "$ROOT/src/libs/MakeraFrame.cpp" \
     "$ROOT/src/libs/md5.cpp" \
     "$HERE/test_job_start_wait.cpp" \
     -o "$OUT/test_job_start_wait"

@@ -56,13 +56,19 @@ struct Packet {
   uint16_t crc;
 };
 
-enum class DecodeResult : uint8_t { incomplete, complete, invalid_length, invalid_crc, invalid_footer };
+// marked: a whole frame with a valid CRC, like complete, that was in
+// progress when mark_frame() was called.
+enum class DecodeResult : uint8_t { incomplete, complete, invalid_length, invalid_crc, invalid_footer, marked };
 class FrameDecoder {
  public:
   explicit FrameDecoder(Packet& packet) : packet_(packet) {}
 
   DecodeResult decode_byte(uint8_t byte, uint32_t now_us);
   void reset();
+  // Marks the frame in progress, if there is one, so that when it completes
+  // decode_byte() returns marked instead of complete. It is still decoded to
+  // its end, so its remaining bytes are not searched for another frame.
+  void mark_frame() { marked_ = in_progress(); }
 
   bool in_progress() const { return received_ != 0 || header_prefix_; }
   bool has_header() const { return received_ >= 2; }
@@ -83,6 +89,7 @@ class FrameDecoder {
   uint32_t last_byte_us_ = 0;
   bool header_prefix_ = false;
   bool have_last_byte_ = false;
+  bool marked_ = false;
   Packet& packet_;
 };
 

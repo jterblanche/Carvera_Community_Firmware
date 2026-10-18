@@ -24,12 +24,14 @@ This is not wired into CI. Run it by hand when changing this module.
 
 The reply decodes as one text frame carrying exactly the busy message, and is
 not built into a buffer too small for it. A read holding only status queries,
-keep-alives, diagnose requests or heartbeats needs no reply of its own, and
-neither does a read with no frame header in it; a hello, a command, a stop, a
-file transfer start or any other frame does, including one mixed in after
-automatic frames, one whose type or text is cut off by the end of the read,
-and one whose CRC happens to contain the header bytes. The first read from
-each client during a transfer is answered whatever it holds; after that,
+keep-alives, diagnose requests, heartbeats, relays, presence replies or
+job-start readies needs no reply of its own, and neither does a read with no
+frame header in it; a hello, a command, a stop, a file transfer start or any
+other frame does, including one mixed in after automatic frames or a relay,
+one whose type or text is cut off by the end of the read, and one whose CRC
+happens to contain the header bytes. The first read from each client that is
+not sent transfer notices is answered whatever it holds; a client that is
+sent them is answered only for a read that needs a reply. After that,
 automatic traffic gets nothing more, while other frames are answered no more
 often than every 250 ms, correctly across a wrap of the microsecond counter.
 Clients are tracked separately, clearing starts over, and a client beyond the

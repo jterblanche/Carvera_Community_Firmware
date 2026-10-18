@@ -33,6 +33,8 @@ enum class ResyncResult : uint8_t {
   invalid_length,
   invalid_crc,
   invalid_footer,
+  // A whole frame marked while in progress (see mark_frame()).
+  marked,
   // A run of max_header_errors bytes never resolved into a header. The
   // decoder has already been resynchronised (reset, ready to try the very
   // next byte as a fresh header) before this is returned, so the caller
@@ -68,6 +70,9 @@ class ResyncingDecoder {
   // connection, not forever.
   void reset();
 
+  // See FrameDecoder::mark_frame().
+  void mark_frame() { decoder_.mark_frame(); }
+
   bool has_header() const { return decoder_.has_header(); }
   const Packet& packet() const { return decoder_.packet(); }
 
@@ -86,5 +91,25 @@ class ResyncingDecoder {
   bool notify_pending_ = false;
   bool notified_once_ = false;
 };
+
+// Feeds one read through `decoder` and calls take(packet) for each whole
+// frame in it. Returns true if any call returned true. WifiProvider uses it
+// for a read that a file transfer is discarding, to keep the few frames a
+// held job start must not miss (see WifiProvider::take_held_start_frames()).
+// If no call returned true, a frame the read leaves cut off is marked. It
+// can still be taken if its rest comes through here. If its rest is read
+// after the transfer instead, WifiProvider::receive_wifi_data() does not run
+// it if it is a command whose sender may have been told the machine was busy
+// (multiclient::dropped_when_marked()).
+template <typename Take>
+bool take_frames(ResyncingDecoder& decoder, const uint8_t* data, std::size_t length, uint32_t now_us, Take take) {
+  bool taken = false;
+  for (std::size_t i = 0; i < length; ++i) {
+    const ResyncResult result = decoder.decode_byte(data[i], now_us);
+    if ((result == ResyncResult::complete || result == ResyncResult::marked) && take(decoder.packet())) taken = true;
+  }
+  if (!taken) decoder.mark_frame();
+  return taken;
+}
 
 }  // namespace makera

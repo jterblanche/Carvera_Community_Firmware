@@ -12,6 +12,7 @@ void FrameDecoder::reset() {
   last_byte_us_ = 0;
   header_prefix_ = false;
   have_last_byte_ = false;
+  marked_ = false;
 }
 
 void FrameDecoder::restart_with(uint8_t byte, uint32_t now_us) {
@@ -68,6 +69,7 @@ DecodeResult FrameDecoder::decode_byte(uint8_t byte, uint32_t now_us) {
       header_prefix_ = false;
     } else {
       header_prefix_ = byte == static_cast<uint8_t>(header >> 8);
+      marked_ = false;
     }
     return DecodeResult::incomplete;
   }
@@ -120,8 +122,10 @@ DecodeResult FrameDecoder::decode_byte(uint8_t byte, uint32_t now_us) {
   }
 
   const bool crc_valid = packet_.crc == calculated_crc_;
+  const bool marked = marked_;
   reset();
-  return crc_valid ? DecodeResult::complete : DecodeResult::invalid_crc;
+  if (!crc_valid) return DecodeResult::invalid_crc;
+  return marked ? DecodeResult::marked : DecodeResult::complete;
 }
 
 }  // namespace makera

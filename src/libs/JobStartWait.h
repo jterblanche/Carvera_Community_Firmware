@@ -224,4 +224,16 @@ bool refused_while_start_pending(const char* line, std::size_t length);
 // `type`, `data` and `length` are the frame's type and payload.
 TransferFrame held_start_frame(uint8_t type, const uint8_t* data, std::size_t length);
 
+// Whether a frame marked during a file transfer (makera::take_frames()) is
+// dropped when the rest of it is read after the transfer. It is if it is a
+// command its sender may have been told the machine was busy for, so the
+// command is not run after that answer: a command line (PTYPE_CTRL_MULTI),
+// a file transfer start or an automatic command. An abort or a keep-waiting
+// is still run, so a held start does not miss it, and so is a diagnose
+// request, which gets no busy reply. Frames of any other type (a ready
+// message, a halt or stop, a hello, a heartbeat, ...) are run as usual: the
+// busy reply does not stand as their answer, and some, like a halt, must
+// not be missed.
+bool dropped_when_marked(uint8_t type, const uint8_t* data, std::size_t length);
+
 }  // namespace multiclient
