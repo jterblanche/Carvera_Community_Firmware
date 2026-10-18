@@ -113,6 +113,17 @@ CheckStep poll_until(IdentityCheck& check, const ClientTable& table, Link link, 
   return CheckStep::wait;
 }
 
+// Services both links every 100 ms from `from_us` up to and including
+// `to_us`, WiFi first, and returns true if every step was wait.
+bool both_wait(IdentityCheck& check, const ClientTable& table, uint32_t from_us, uint32_t to_us, bool usb_can_read) {
+  bool all_wait = true;
+  for (uint32_t t = from_us; static_cast<int32_t>(to_us - t) >= 0; t += 100 * ms) {
+    all_wait = check.next_step(table, Link::wifi, t) == CheckStep::wait && all_wait;
+    all_wait = check.next_step(table, Link::usb, t, usb_can_read) == CheckStep::wait && all_wait;
+  }
+  return all_wait;
+}
+
 }  // namespace
 
 int main() {
@@ -735,6 +746,141 @@ int main() {
     Client quiet;
     multiclient::restart_hello_window(quiet, 100 * ms);
     CHECK(!quiet.hello_window_started);
+  }
+
+  {
+    TEST("USB old that cannot read: nothing is asked until it can, then it has the full 2 s");
+    ClientTable table;
+    IdentityCheck check;
+    identify_usb(table, make_hello(office_id, true, 1));
+    const int self = table.add_wifi(address(2), 0);
+    CHECK(check.begin(table, multiclient::wifi_seat(self), multiclient::usb_seat(), make_hello(office_id, true, 2), true, 0));
+    CHECK(check.next_step(table, Link::usb, 0, false) == CheckStep::wait);
+    // A 60 s transfer: both links keep being serviced, and nothing happens.
+    CHECK(both_wait(check, table, 100 * ms, 60000 * ms, false));
+    CHECK(table.usb()->identified);
+    // The transfer ends: the question goes now, and the wait starts now.
+    CHECK(check.next_step(table, Link::usb, 60100 * ms) == CheckStep::ask);
+    check.asked(60100 * ms);
+    CHECK(both_wait(check, table, 60200 * ms, 62000 * ms, true));
+    // A controller that is really gone is still removed, 2 s after it was asked.
+    CHECK(check.next_step(table, Link::usb, 62100 * ms) == CheckStep::retire);
+    table.clear_usb_identity();
+    check.retired();
+    CHECK(check.next_step(table, Link::wifi, 62100 * ms) == CheckStep::admit);
+  }
+
+  {
+    TEST("USB old that cannot read, then answers once it can: the newcomer is refused");
+    ClientTable table;
+    IdentityCheck check;
+    identify_usb(table, make_hello(office_id, true, 1));
+    const int self = table.add_wifi(address(2), 0);
+    check.begin(table, multiclient::wifi_seat(self), multiclient::usb_seat(), make_hello(office_id, true, 2), true, 0);
+    CHECK(both_wait(check, table, 0, 5000 * ms, false));
+    CHECK(check.next_step(table, Link::usb, 5100 * ms) == CheckStep::ask);
+    check.asked(5100 * ms);
+    CHECK(answer(check, multiclient::usb_seat(), question_number(check)));
+    CHECK(check.next_step(table, Link::wifi, 5150 * ms) == CheckStep::refuse);
+  }
+
+  {
+    TEST("a question asked before the USB link stopped reading is asked again once it can");
+    ClientTable table;
+    IdentityCheck check;
+    identify_usb(table, make_hello(office_id, true, 1));
+    const int self = table.add_wifi(address(2), 0);
+    check.begin(table, multiclient::wifi_seat(self), multiclient::usb_seat(), make_hello(office_id, true, 2), true, 0);
+    CHECK(check.next_step(table, Link::usb, 0) == CheckStep::ask);
+    const uint32_t number = question_number(check);
+    check.asked(0);
+    // It stops reading at 1 s with no pause in servicing, and stays so
+    // well past the 2 s.
+    CHECK(both_wait(check, table, 100 * ms, 900 * ms, true));
+    CHECK(both_wait(check, table, 1000 * ms, 4000 * ms, false));
+    CHECK(check.next_step(table, Link::usb, 4100 * ms) == CheckStep::ask);
+    check.asked(4100 * ms);
+    // The same question, so an answer to either asking counts.
+    CHECK(question_number(check) == number);
+    CHECK(both_wait(check, table, 4200 * ms, 6000 * ms, true));
+    CHECK(check.next_step(table, Link::usb, 6100 * ms) == CheckStep::retire);
+  }
+
+  {
+    TEST("the wait running out just as the USB link stops reading does not remove it");
+    ClientTable table;
+    IdentityCheck check;
+    identify_usb(table, make_hello(office_id, true, 1));
+    const int self = table.add_wifi(address(2), 0);
+    check.begin(table, multiclient::wifi_seat(self), multiclient::usb_seat(), make_hello(office_id, true, 2), true, 0);
+    check.next_step(table, Link::usb, 0);
+    check.asked(0);
+    CHECK(both_wait(check, table, 100 * ms, 1900 * ms, true));
+    // The WiFi link is serviced first in the pass in which the 2 s run out
+    // and the USB link cannot read.
+    CHECK(check.next_step(table, Link::wifi, 2000 * ms) == CheckStep::wait);
+    CHECK(check.next_step(table, Link::usb, 2000 * ms, false) == CheckStep::wait);
+    CHECK(table.usb()->identified);
+    CHECK(check.next_step(table, Link::usb, 3000 * ms) == CheckStep::ask);
+  }
+
+  {
+    TEST("while the question waits, the newcomer leaving drops the check");
+    ClientTable table;
+    IdentityCheck check;
+    identify_usb(table, make_hello(office_id, true, 1));
+    const int self = table.add_wifi(address(2), 0);
+    check.begin(table, multiclient::wifi_seat(self), multiclient::usb_seat(), make_hello(office_id, true, 2), true, 0);
+    CHECK(check.next_step(table, Link::usb, 0, false) == CheckStep::wait);
+    table.remove_wifi(self);
+    CHECK(check.next_step(table, Link::usb, 100 * ms, false) == CheckStep::drop);
+    check.end(table);
+    CHECK(!check.active());
+  }
+
+  {
+    TEST("while the question waits, other hellos with that id retry and other ids are decided as usual");
+    ClientTable table;
+    IdentityCheck check;
+    identify_usb(table, make_hello(office_id, true, 1));
+    const int self = table.add_wifi(address(2), 0);
+    check.begin(table, multiclient::wifi_seat(self), multiclient::usb_seat(), make_hello(office_id, true, 2), true, 0);
+    CHECK(check.next_step(table, Link::usb, 0, false) == CheckStep::wait);
+    const int other = table.add_wifi(address(3), 0);
+    const Seat seat = multiclient::wifi_seat(other);
+    CHECK(multiclient::decide_hello(table, seat, make_hello(office_id, true, 3), check).action == HelloAction::busy);
+    CHECK(multiclient::decide_hello(table, seat, make_hello(office_id, true, 1), check).action == HelloAction::busy);
+    CHECK(multiclient::decide_hello(table, seat, make_hello(7, true, 1), check).action == HelloAction::admit);
+    // The newcomer's own hello sent again is still held.
+    CHECK(check.holds(multiclient::wifi_seat(self)));
+    CHECK(check.next_step(table, Link::usb, 100 * ms) == CheckStep::ask);
+  }
+
+  {
+    TEST("a link that cannot read changes nothing for an old entry on the other link");
+    ClientTable table;
+    IdentityCheck check;
+    const int old = add_identified(table, 1, make_hello(office_id, true, 1));
+    const int self = table.add_wifi(address(2), 0);
+    check.begin(table, multiclient::wifi_seat(self), multiclient::wifi_seat(old), make_hello(office_id, true, 2), true, 0);
+    CHECK(check.next_step(table, Link::usb, 0, false) == CheckStep::wait);
+    CHECK(check.next_step(table, Link::wifi, 0) == CheckStep::ask);
+    check.asked(0);
+    CHECK(both_wait(check, table, 100 * ms, 1900 * ms, false));
+    CHECK(check.next_step(table, Link::usb, 2000 * ms, false) == CheckStep::wait);
+    CHECK(check.next_step(table, Link::wifi, 2000 * ms) == CheckStep::retire);
+
+    // A USB newcomer is still answered while its link cannot read: an
+    // answer is something it sends.
+    ClientTable t2;
+    IdentityCheck second;
+    const int o2 = add_identified(t2, 1, make_hello(office_id, true, 1));
+    start_usb(t2, 0);
+    second.begin(t2, multiclient::usb_seat(), multiclient::wifi_seat(o2), make_hello(office_id, true, 2), true, 0);
+    CHECK(second.next_step(t2, Link::wifi, 0) == CheckStep::ask);
+    second.asked(0);
+    CHECK(answer(second, multiclient::wifi_seat(o2), question_number(second)));
+    CHECK(second.next_step(t2, Link::usb, 100 * ms, false) == CheckStep::refuse);
   }
 
   {

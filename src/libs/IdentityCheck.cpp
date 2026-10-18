@@ -77,12 +77,16 @@ bool IdentityCheck::old_present(const ClientTable& table) const {
   return client != nullptr && client->identified && client->id == hello_.id;
 }
 
-CheckStep IdentityCheck::next_step(const ClientTable& table, Link link, uint32_t now_us) {
+CheckStep IdentityCheck::next_step(const ClientTable& table, Link link, uint32_t now_us, bool link_can_read) {
   if (!active()) return CheckStep::wait;
   if (!newcomer_present(table)) return CheckStep::drop;
 
   // The old entry left by itself, or was just removed: nothing to wait for.
   if (phase_ != Phase::refuse && !old_present(table)) phase_ = Phase::admit;
+
+  if (link == old_.link && !link_can_read && (phase_ == Phase::waiting || phase_ == Phase::retire)) {
+    phase_ = Phase::ask;
+  }
 
   if (phase_ == Phase::waiting && static_cast<uint32_t>(now_us - last_step_us_) > presence_max_pause_us) {
     phase_ = Phase::ask;
@@ -94,7 +98,7 @@ CheckStep IdentityCheck::next_step(const ClientTable& table, Link link, uint32_t
   }
 
   switch (phase_) {
-    case Phase::ask: return link == old_.link ? CheckStep::ask : CheckStep::wait;
+    case Phase::ask: return link == old_.link && link_can_read ? CheckStep::ask : CheckStep::wait;
     case Phase::retire: return link == old_.link ? CheckStep::retire : CheckStep::wait;
     case Phase::refuse: return link == newcomer_.link ? CheckStep::refuse : CheckStep::wait;
     case Phase::admit: return link == newcomer_.link ? CheckStep::admit : CheckStep::wait;

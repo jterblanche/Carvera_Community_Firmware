@@ -19,7 +19,9 @@
 //   for up to presence_answer_wait_us. If it answers, the new hello is
 //   refused with hello_result_identity_connected and the connected
 //   controller keeps its connection and control. If not, its entry is
-//   removed and the new controller is admitted.
+//   removed and the new controller is admitted. While the connected
+//   controller's link cannot read what it sends, as during a file transfer
+//   over USB, the question waits, and the 2 s start when it is asked.
 //
 // Either way the controller admitted under that id starts without control.
 // One check runs at a time. A hello that would need another one, or that
@@ -115,7 +117,11 @@ class IdentityCheck {
   // gets wait. Steps for the newcomer's entry go to the newcomer's link and
   // steps for the old entry to the old entry's link, so each link only
   // touches its own entries.
-  CheckStep next_step(const ClientTable& table, Link link, uint32_t now_us);
+  // `link_can_read` is false while `link` cannot read what its controller
+  // sends. If the old entry is on that link, it is then neither asked nor
+  // removed: a question already asked may go unread, so it is asked again
+  // once the link can read, and the wait for the answer starts then.
+  CheckStep next_step(const ClientTable& table, Link link, uint32_t now_us, bool link_can_read = true);
 
   // Writes the presence check's payload, the current number, to `out`
   // (presence_check_length bytes). Returns presence_check_length.
