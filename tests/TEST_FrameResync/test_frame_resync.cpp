@@ -246,7 +246,7 @@ int main() {
 
   {
     TEST("take_frames: a frame cut off by a read nothing was taken from, wherever the cut falls, "
-         "is not completed by its rest arriving later");
+         "completes as marked, not complete, when its rest arrives later");
     const std::vector<uint8_t> download = make_frame(0xA2, "download /sd/gcodes/part.nc");
     const auto take_nothing = [](const makera::Packet&) { return false; };
     for (std::size_t cut = 1; cut < download.size(); ++cut) {
@@ -255,8 +255,8 @@ int main() {
       // The rest arrives after the transfer, and is decoded as any read is.
       const std::vector<uint8_t> rest(download.begin() + static_cast<std::ptrdiff_t>(cut), download.end());
       std::vector<bool> notifications;
-      // Not run, and not searched for a header either.
-      CHECK(feed(decoder, rest, 20, 0, &notifications) != makera::ResyncResult::complete);
+      // Completes as marked, and is not searched for a header either.
+      CHECK(feed(decoder, rest, 20, 0, &notifications) == makera::ResyncResult::marked);
       CHECK(notifications.empty());
       // The next whole frame decodes as usual.
       CHECK(feed(decoder, make_frame(0xA2, "ls"), 30) == makera::ResyncResult::complete);

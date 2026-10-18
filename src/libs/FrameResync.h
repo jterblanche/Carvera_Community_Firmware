@@ -97,9 +97,10 @@ class ResyncingDecoder {
 // for a read that a file transfer is discarding, to keep the few frames a
 // held job start must not miss (see WifiProvider::take_held_start_frames()).
 // If no call returned true, a frame the read leaves cut off is marked. It
-// can still be taken if its rest comes through here, but once the transfer
-// is over WifiProvider::receive_wifi_data() runs only complete frames, so it
-// is not run after its sender may have been told the machine was busy.
+// can still be taken if its rest comes through here. If its rest is read
+// after the transfer instead, WifiProvider::receive_wifi_data() does not run
+// it if it is a command whose sender may have been told the machine was busy
+// (multiclient::dropped_when_marked()).
 template <typename Take>
 bool take_frames(ResyncingDecoder& decoder, const uint8_t* data, std::size_t length, uint32_t now_us, Take take) {
   bool taken = false;

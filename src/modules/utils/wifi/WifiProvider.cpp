@@ -413,11 +413,13 @@ void WifiProvider::receive_wifi_data() {
 			if (result == makera::ResyncResult::incomplete) continue;
 
 			++frames;
-			// Neither an invalid frame nor one marked during a file
-			// transfer (makera::take_frames()) is run.
-			if (result != makera::ResyncResult::complete) continue;
+			if (result != makera::ResyncResult::complete && result != makera::ResyncResult::marked) continue;
 
 			const makera::Packet &packet = client.decoder.packet();
+			// A command marked during a file transfer (makera::take_frames())
+			// is not run: its sender may have been told the machine was busy.
+			if (result == makera::ResyncResult::marked &&
+			    multiclient::dropped_when_marked(packet.type, packet.data, packet.data_length)) continue;
 
 			// While another client has identified, one that has not gets
 			// nothing acted on but its hello and its status queries (see

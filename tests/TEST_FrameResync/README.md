@@ -58,10 +58,12 @@ failures against the byte that follows it.
 is discarding while a job start is held. Each whole frame is offered to
 the caller. When a read nothing is taken from ends part-way through a
 frame, wherever the cut falls, the rest of that frame arriving later
-(within the decoder's one-second frame timeout) does not complete it and
-is not counted as junk; if the rest comes through
-`take_frames()` instead, the frame is still offered. A frame cut off by a
-read something is taken from completes as usual.
+(within the decoder's one-second frame timeout) completes it as marked
+rather than complete, and is not counted as junk; if the rest comes
+through `take_frames()` instead, the frame is still offered. A frame cut
+off by a read something is taken from completes as usual. Which marked
+frames are dropped is tested in `TEST_JobStartWait`
+(`dropped_when_marked()`).
 
 Not covered here, and not host-testable without pulling `WifiProvider`
 apart much further than this fix warrants: that `receive_wifi_data()`
