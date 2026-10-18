@@ -35,8 +35,11 @@ struct UsbActivity {
     return !rx_detached && usb_session_expired(hello_window_started, now_us, last_activity_us);
   }
 
+  // Signed, as in usb_session_expired(): the receive interrupt can stamp the
+  // link after now_us was read, and that must count as no quiet time.
   bool temporary_baud_expired(uint32_t now_us) const {
-    return !rx_detached && now_us - last_activity_us >= temporary_baud_timeout_us;
+    return !rx_detached &&
+           static_cast<int32_t>(now_us - last_activity_us) >= static_cast<int32_t>(temporary_baud_timeout_us);
   }
 };
 

@@ -180,6 +180,37 @@ int main() {
     CHECK(activity.temporary_baud_expired(end + multiclient::temporary_baud_timeout_us));
   }
 
+  {
+    TEST("a byte stamped after the idle work read the clock does not count as quiet time");
+    // The receive interrupt can stamp the link between the idle work reading
+    // the clock and checking it, so the stamp can be later than now.
+    multiclient::UsbActivity activity;
+    activity.last_activity_us = 1000 + 5 * second + 1;
+    CHECK(!activity.temporary_baud_expired(1000 + 5 * second));
+    CHECK(!activity.session_expired(true, 1000 + 5 * second));
+    activity.last_activity_us = 1000 + 5 * second + 2000;
+    CHECK(!activity.temporary_baud_expired(1000 + 5 * second));
+    CHECK(!activity.session_expired(true, 1000 + 5 * second));
+  }
+
+  {
+    TEST("a stamp just past a wrap of the microsecond counter, later than now, does not count as quiet time");
+    multiclient::UsbActivity activity;
+    const uint32_t now = 0xFFFFFFFFu - 100;
+    activity.last_activity_us = 50;  // the counter wrapped between the two reads
+    CHECK(!activity.temporary_baud_expired(now));
+    CHECK(!activity.session_expired(true, now));
+  }
+
+  {
+    TEST("a temporary baud rate reverts on time when the quiet time spans a wrap");
+    multiclient::UsbActivity activity;
+    const uint32_t start = 0xFFFFFFFFu - second;
+    activity.last_activity_us = start;
+    CHECK(!activity.temporary_baud_expired(start + multiclient::temporary_baud_timeout_us - 1));
+    CHECK(activity.temporary_baud_expired(start + multiclient::temporary_baud_timeout_us));
+  }
+
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }
