@@ -894,8 +894,13 @@ void SerialConsole::admit_usb_hello(const multiclient::Hello& hello, bool reconn
 void SerialConsole::drive_identity_check(uint32_t now_us) {
     auto &check = multiclient::shared_identity_check();
     auto &table = multiclient::shared_client_table();
+    // A presence reply cannot be read while a file transfer has switched
+    // this link's receive handling off, nor during the pause after a
+    // refused or failed transfer, which discards what arrives
+    // (on_serial_char_received()).
+    const bool can_read = !usb_activity.rx_detached && !THEKERNEL->is_cachewait();
     for (;;) {
-        switch (check.next_step(table, multiclient::Link::usb, now_us)) {
+        switch (check.next_step(table, multiclient::Link::usb, now_us, can_read)) {
             case multiclient::CheckStep::ask: {
                 uint8_t question[multiclient::presence_check_length];
                 const std::size_t length = check.build_question(question);
