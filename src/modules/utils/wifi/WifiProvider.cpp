@@ -413,9 +413,13 @@ void WifiProvider::receive_wifi_data() {
 			if (result == makera::ResyncResult::incomplete) continue;
 
 			++frames;
-			if (result != makera::ResyncResult::complete) continue;
+			if (result != makera::ResyncResult::complete && result != makera::ResyncResult::marked) continue;
 
 			const makera::Packet &packet = client.decoder.packet();
+			// A command marked during a file transfer (makera::take_frames())
+			// is not run: its sender may have been told the machine was busy.
+			if (result == makera::ResyncResult::marked &&
+			    multiclient::dropped_when_marked(packet.type, packet.data, packet.data_length)) continue;
 
 			// While another client has identified, one that has not gets
 			// nothing acted on but its hello and its status queries (see
@@ -633,9 +637,14 @@ WifiProvider::SendOutcome WifiProvider::send_to_wifi_client(int client_index, co
 // because a client that connected during the transfer is not in the client
 // table yet, and it is not published: the transfer's own client must see
 // nothing but its transfer. Whether this read gets a reply at all is
-// BusyReplyLimiter's decision (libs/TransferBusy.h).
+// BusyReplyLimiter's decision (libs/TransferBusy.h). An identified client is
+// sent the transfer notices (send_transfer_notice()).
 void WifiProvider::refuse_as_busy(const multiclient::Address& sender, const u8* data, u16 length) {
-	if (!busy_replies.should_reply(sender, multiclient::needs_busy_reply(data, length), us_ticker_read())) return;
+	multiclient::ClientTable &table = multiclient::shared_client_table();
+	const multiclient::Client *client = table.wifi_at(table.find_wifi(sender));
+	const bool sent_transfer_notices = client != nullptr && client->identified;
+	if (!busy_replies.should_reply(sender, multiclient::needs_busy_reply(data, length), sent_transfer_notices,
+	                               us_ticker_read())) return;
 	u8 frame[multiclient::busy_reply_frame_size];
 	const size_t frame_length = multiclient::build_busy_reply_frame(frame, sizeof(frame));
 	if (frame_length == 0) return;
@@ -654,7 +663,9 @@ void WifiProvider::refuse_as_busy(const multiclient::Address& sender, const u8* 
 // through restarts the limit when the transfer ends.
 // The bytes go through the sender's own frame decoder, which the transfer
 // does not use. Nothing is sent to anyone here. Returns true if something
-// was taken, and the sender then gets no busy reply for this read.
+// was taken, and the sender then gets no busy reply for this read. If
+// nothing was, a command the read leaves cut off is not run after the
+// transfer (see makera::take_frames() and multiclient::dropped_when_marked()).
 bool WifiProvider::take_held_start_frames(const multiclient::Address& sender, const u8* data, u16 length) {
 	multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
 	if (!wait.pending()) return false;
@@ -662,19 +673,14 @@ bool WifiProvider::take_held_start_frames(const multiclient::Address& sender, co
 	const int client_index = table.find_wifi(sender);
 	if (client_index < 0) return false;
 	multiclient::Client *client = table.wifi_at(client_index);
-	makera::ResyncingDecoder &decoder = wifi_streams[client_index].decoder;
-	const uint32_t now_us = us_ticker_read();
-	bool taken = false;
-	for (u16 i = 0; i < length; ++i) {
-		if (decoder.decode_byte(data[i], now_us) != makera::ResyncResult::complete) continue;
-		const makera::Packet &packet = decoder.packet();
+	return makera::take_frames(wifi_streams[client_index].decoder, data, length, us_ticker_read(),
+		[&](const makera::Packet &packet) -> bool {
 		if (multiclient::must_identify_first(table, client) &&
-		    !multiclient::taken_before_identifying(packet.type, packet.data, packet.data_length)) continue;
+		    !multiclient::taken_before_identifying(packet.type, packet.data, packet.data_length)) return false;
 		const multiclient::TransferFrame frame = multiclient::held_start_frame(packet.type, packet.data, packet.data_length);
 		switch (frame) {
 			case multiclient::TransferFrame::ready:
-				if (wait.mark_ready(*client, packet.data, packet.data_length)) taken = true;
-				break;
+				return wait.mark_ready(*client, packet.data, packet.data_length);
 			case multiclient::TransferFrame::cancel:
 			case multiclient::TransferFrame::keep_waiting: {
 				// peek(), not gate(): control does not move during a
@@ -682,20 +688,18 @@ bool WifiProvider::take_held_start_frames(const multiclient::Address& sender, co
 				const GateInputs in = gate_inputs_for(client_index, packet);
 				const multiclient::GateResult result = multiclient::shared_control_token().peek(
 					in.sender, in.traffic, in.motion, multi_client_mode, in.action, multi_client_passive_rights);
-				if (result.refused) break;
+				if (result.refused) return false;
 				if (frame == multiclient::TransferFrame::cancel) {
 					wait.request_cancel();
-					taken = true;
-				} else if (wait.request_keep_waiting(in.sender.id)) {
-					taken = true;
+					return true;
 				}
-				break;
+				return wait.request_keep_waiting(in.sender.id);
 			}
 			case multiclient::TransferFrame::other:
 				break;
 		}
-	}
-	return taken;
+		return false;
+	});
 }
 
 void WifiProvider::broadcast_to_wifi_clients(const u8* data, size_t length) {

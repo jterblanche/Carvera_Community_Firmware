@@ -35,6 +35,7 @@ ResyncResult ResyncingDecoder::decode_byte(uint8_t byte, uint32_t now_us) {
     case DecodeResult::invalid_length: return ResyncResult::invalid_length;
     case DecodeResult::invalid_crc: return ResyncResult::invalid_crc;
     case DecodeResult::invalid_footer: return ResyncResult::invalid_footer;
+    case DecodeResult::marked: return ResyncResult::marked;
     case DecodeResult::incomplete: break;  // unreachable, handled above
   }
   return ResyncResult::incomplete;

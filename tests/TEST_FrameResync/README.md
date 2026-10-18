@@ -54,6 +54,17 @@ that looks like the start of a header (matches the first header byte) but
 isn't followed by the second, which must not by itself count as extra
 failures against the byte that follows it.
 
+`take_frames()`, which `WifiProvider` uses for a read that a file transfer
+is discarding while a job start is held. Each whole frame is offered to
+the caller. When a read nothing is taken from ends part-way through a
+frame, wherever the cut falls, the rest of that frame arriving later
+(within the decoder's one-second frame timeout) completes it as marked
+rather than complete, and is not counted as junk; if the rest comes
+through `take_frames()` instead, the frame is still offered. A frame cut
+off by a read something is taken from completes as usual. Which marked
+frames are dropped is tested in `TEST_JobStartWait`
+(`dropped_when_marked()`).
+
 Not covered here, and not host-testable without pulling `WifiProvider`
 apart much further than this fix warrants: that `receive_wifi_data()`
 actually calls `consume_notify_pending()` and shows the diagnostic at the
