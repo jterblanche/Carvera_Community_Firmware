@@ -659,8 +659,8 @@ void WifiProvider::refuse_as_busy(const multiclient::Address& sender, const u8* 
 // The bytes go through the sender's own frame decoder, which the transfer
 // does not use. Nothing is sent to anyone here. Returns true if something
 // was taken, and the sender then gets no busy reply for this read. If
-// nothing was, a frame the read leaves cut off is never run after the
-// transfer (see makera::take_frames()).
+// nothing was, a command the read leaves cut off is not run after the
+// transfer (see makera::take_frames() and multiclient::dropped_when_marked()).
 bool WifiProvider::take_held_start_frames(const multiclient::Address& sender, const u8* data, u16 length) {
 	multiclient::JobStartWait &wait = multiclient::shared_job_start_wait();
 	if (!wait.pending()) return false;
