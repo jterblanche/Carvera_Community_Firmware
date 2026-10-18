@@ -26,19 +26,24 @@ std::size_t build_busy_reply_frame(uint8_t* out, std::size_t capacity);
 
 // True if `data`, one read from a client, holds any frame other than the
 // traffic a controller sends on its own: a status query, a keep-alive, a
-// diagnose request or a heartbeat. A frame whose type or text is cut off by
-// the end of `data` counts as needing a reply, since it cannot be ruled out.
+// diagnose request, a heartbeat, or a frame the machine never answers (a
+// relay, a presence reply, a job-start ready). A frame whose type or text is
+// cut off by the end of `data` counts as needing a reply, since it cannot be
+// ruled out.
 bool needs_busy_reply(const uint8_t* data, std::size_t length);
 
 // Decides which discarded reads get a busy reply during one transfer. The
-// first read from each client always does, whatever it holds, so every
-// client learns once why the machine has gone quiet. After that, a read that
-// needs_busy_reply() gets one, no more often than busy_reply_gap_us, and
-// status queries and heartbeats get nothing more. clear() starts over for
-// the next transfer.
+// first read from a client that is not sent transfer notices (below) always
+// does, whatever it holds, so it learns once why the machine has gone quiet.
+// A client that is sent them learns that from the notices, so it is only
+// answered for a read that needs_busy_reply(): a controller waiting for the
+// answer to its own command can then take a busy reply as that answer. After
+// the first reply, a read that needs_busy_reply() gets one, no more often
+// than busy_reply_gap_us, and status queries and heartbeats get nothing
+// more. clear() starts over for the next transfer.
 class BusyReplyLimiter {
  public:
-  bool should_reply(const Address& sender, bool needs_reply, uint32_t now_us);
+  bool should_reply(const Address& sender, bool needs_reply, bool sent_transfer_notices, uint32_t now_us);
   void clear() {
     count_ = 0;
     oldest_ = 0;

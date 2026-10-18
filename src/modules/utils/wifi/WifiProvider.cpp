@@ -633,9 +633,14 @@ WifiProvider::SendOutcome WifiProvider::send_to_wifi_client(int client_index, co
 // because a client that connected during the transfer is not in the client
 // table yet, and it is not published: the transfer's own client must see
 // nothing but its transfer. Whether this read gets a reply at all is
-// BusyReplyLimiter's decision (libs/TransferBusy.h).
+// BusyReplyLimiter's decision (libs/TransferBusy.h). An identified client is
+// sent the transfer notices (send_transfer_notice()).
 void WifiProvider::refuse_as_busy(const multiclient::Address& sender, const u8* data, u16 length) {
-	if (!busy_replies.should_reply(sender, multiclient::needs_busy_reply(data, length), us_ticker_read())) return;
+	multiclient::ClientTable &table = multiclient::shared_client_table();
+	const multiclient::Client *client = table.wifi_at(table.find_wifi(sender));
+	const bool sent_transfer_notices = client != nullptr && client->identified;
+	if (!busy_replies.should_reply(sender, multiclient::needs_busy_reply(data, length), sent_transfer_notices,
+	                               us_ticker_read())) return;
 	u8 frame[multiclient::busy_reply_frame_size];
 	const size_t frame_length = multiclient::build_busy_reply_frame(frame, sizeof(frame));
 	if (frame_length == 0) return;
