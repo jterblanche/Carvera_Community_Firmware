@@ -3,11 +3,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
+#include "libs/CRC16.h"
 #include "libs/ClientTable.h"
 #include "libs/ControlToken.h"
+#include "libs/FrameResync.h"
 #include "libs/Hello.h"
 #include "libs/JobStartWait.h"
+#include "libs/MakeraFrame.h"
 #include "libs/PublicData.h"
 
 namespace {
@@ -86,6 +90,22 @@ bool refused(const char* line) { return multiclient::refused_while_start_pending
 multiclient::TransferFrame command_frame(const char* line) {
   return multiclient::held_start_frame(PTYPE_CTRL_MULTI, reinterpret_cast<const uint8_t*>(line), std::strlen(line));
 }
+
+// A whole Makera frame of `type` carrying `data`.
+std::vector<uint8_t> make_frame(uint8_t type, const std::vector<uint8_t>& data) {
+  const uint16_t length = static_cast<uint16_t>(data.size() + 3);
+  std::vector<uint8_t> frame{static_cast<uint8_t>(makera::header >> 8), static_cast<uint8_t>(makera::header),
+                             static_cast<uint8_t>(length >> 8), static_cast<uint8_t>(length), type};
+  frame.insert(frame.end(), data.begin(), data.end());
+  const uint16_t crc = crc16::ccitt(frame.data() + 2, length);
+  frame.push_back(static_cast<uint8_t>(crc >> 8));
+  frame.push_back(static_cast<uint8_t>(crc));
+  frame.push_back(static_cast<uint8_t>(makera::footer >> 8));
+  frame.push_back(static_cast<uint8_t>(makera::footer));
+  return frame;
+}
+
+std::vector<uint8_t> command(const char* line) { return std::vector<uint8_t>(line, line + std::strlen(line)); }
 
 // A file in memory for hash_step() to read, `chunk` bytes at most per read.
 // Fails the read at byte `fail_at` when it is set. Counts the reads.
@@ -735,6 +755,68 @@ int main() {
     const uint8_t abort_bytes[] = {'a', 'b', 'o', 'r', 't'};
     CHECK(multiclient::held_start_frame(PTYPE_CTRL_SINGLE, abort_bytes, sizeof(abort_bytes)) == TransferFrame::other);
     CHECK(multiclient::held_start_frame(PTYPE_HEARTBEAT, nullptr, 0) == TransferFrame::other);
+  }
+
+  {
+    TEST("dropped_when_marked: a command line, a file transfer start or an automatic command, "
+         "but not an abort, a keep-waiting, a diagnose request or any other type");
+    const auto dropped = [](uint8_t type, const char* text) {
+      const std::vector<uint8_t> data = command(text);
+      return multiclient::dropped_when_marked(type, data.data(), data.size());
+    };
+    CHECK(dropped(PTYPE_CTRL_MULTI, "download /sd/gcodes/part.nc\n"));
+    CHECK(dropped(PTYPE_CTRL_MULTI, "start-now\n"));
+    CHECK(dropped(PTYPE_CTRL_MULTI, "aborted\n"));
+    CHECK(dropped(PTYPE_FILE_START, "/sd/gcodes/part.nc"));
+    CHECK(dropped(PTYPE_FILE_START, ""));
+    CHECK(dropped(PTYPE_AUTO_COMMAND, "M6T1"));
+    CHECK(!dropped(PTYPE_CTRL_MULTI, "abort\n"));
+    CHECK(!dropped(PTYPE_CTRL_MULTI, "keep-waiting\n"));
+    CHECK(!dropped(PTYPE_CTRL_MULTI, "diagnose\n"));
+    const uint8_t ready[2] = {0, 1};
+    CHECK(!multiclient::dropped_when_marked(PTYPE_JOB_START_READY, ready, sizeof(ready)));
+    const uint8_t halt[1] = {'X' - 'A' + 1};
+    CHECK(!multiclient::dropped_when_marked(PTYPE_CTRL_SINGLE, halt, sizeof(halt)));
+    CHECK(!multiclient::dropped_when_marked(PTYPE_HEARTBEAT, nullptr, 0));
+    CHECK(!dropped(PTYPE_HELLO, "x"));
+    CHECK(!dropped(PTYPE_RELAY, "x"));
+  }
+
+  {
+    TEST("a frame cut off at the end of a transfer, nothing taken from the read, is dropped after the transfer "
+         "only if it is a command, wherever the cut falls");
+    struct Case {
+      uint8_t type;
+      std::vector<uint8_t> data;
+      bool dropped;
+    };
+    const Case cases[] = {
+        {PTYPE_JOB_START_READY, {0x12, 0x34}, false},
+        {PTYPE_CTRL_MULTI, command("abort\n"), false},
+        {PTYPE_CTRL_MULTI, command("keep-waiting\n"), false},
+        {PTYPE_CTRL_SINGLE, {'X' - 'A' + 1}, false},
+        {PTYPE_HEARTBEAT, {}, false},
+        {PTYPE_CTRL_MULTI, command("download /sd/gcodes/part.nc\n"), true},
+        {PTYPE_FILE_START, command("/sd/gcodes/part.nc"), true},
+        {PTYPE_AUTO_COMMAND, command("M6T1"), true},
+    };
+    const auto take_nothing = [](const makera::Packet&) { return false; };
+    for (const Case& c : cases) {
+      const std::vector<uint8_t> frame = make_frame(c.type, c.data);
+      for (std::size_t cut = 1; cut < frame.size(); ++cut) {
+        makera::Packet packet{};
+        makera::ResyncingDecoder decoder{packet};
+        // The last read the transfer discards ends `cut` bytes into the frame.
+        CHECK(!makera::take_frames(decoder, frame.data(), cut, 10, take_nothing));
+        // The rest is read after the transfer, as receive_wifi_data() reads it.
+        makera::ResyncResult result = makera::ResyncResult::incomplete;
+        for (std::size_t i = cut; i < frame.size(); ++i) result = decoder.decode_byte(frame[i], 20);
+        CHECK(result == makera::ResyncResult::marked);
+        CHECK(multiclient::dropped_when_marked(packet.type, packet.data, packet.data_length) == c.dropped);
+        CHECK(packet.type == c.type && packet.data_length == c.data.size() &&
+              (c.data.empty() || std::memcmp(packet.data, c.data.data(), c.data.size()) == 0));
+      }
+    }
   }
 
   {

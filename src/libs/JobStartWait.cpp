@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "Hello.h"
+#include "MakeraControl.h"
 #include "PublicData.h"
 
 namespace multiclient {
@@ -209,6 +210,12 @@ TransferFrame held_start_frame(uint8_t type, const uint8_t* data, std::size_t le
   if (first_word_is(line, length, at, "abort")) return TransferFrame::cancel;
   if (first_word_is(line, length, at, "keep-waiting")) return TransferFrame::keep_waiting;
   return TransferFrame::other;
+}
+
+bool dropped_when_marked(uint8_t type, const uint8_t* data, std::size_t length) {
+  if (type == PTYPE_FILE_START || type == PTYPE_AUTO_COMMAND) return true;
+  if (type != PTYPE_CTRL_MULTI || makera::is_diagnostic_request(data, length)) return false;
+  return held_start_frame(type, data, length) == TransferFrame::other;
 }
 
 }  // namespace multiclient

@@ -26,7 +26,8 @@ This is not wired into CI. Run it by hand when changing the parser.
 Frame framing and resynchronisation (header hunting across noise, a split
 header pair, length validation, CRC and footer rejection), the command queue
 (ordering, capacity, overflow reporting, drain and refill, the payload size
-boundary), and the shared interpretation of Makera control bytes.
+boundary), marking a frame in progress (`mark_frame()`), and the shared
+interpretation of Makera control bytes.
 
 ## A note on writing tests here
 
